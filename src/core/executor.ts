@@ -12,6 +12,7 @@ import { SecurityManager } from '../security/manager';
 import { ContextManager } from '../context/manager';
 import { AuditLogger } from '../audit/logger';
 import { OutputProcessor } from '../utils/output-processor';
+import { IntentTracker } from '../utils/intent-tracker';
 
 export interface ExecuteCommandOptions {
   command: string;
@@ -28,6 +29,7 @@ export class ShellExecutor {
   private contextManager: ContextManager;
   private auditLogger: AuditLogger;
   private outputProcessor: OutputProcessor;
+  private intentTracker: IntentTracker;
   private config: ServerConfig;
 
   constructor(
@@ -41,6 +43,7 @@ export class ShellExecutor {
     this.auditLogger = auditLogger;
     this.config = config;
     this.outputProcessor = new OutputProcessor(config.output);
+    this.intentTracker = new IntentTracker();
   }
 
   async executeCommand(options: ExecuteCommandOptions): Promise<CommandOutput> {
@@ -51,10 +54,13 @@ export class ShellExecutor {
       // Security validation
       const fullCommand = this.buildFullCommand(options);
       const securityCheck = await this.securityManager.validateCommand(fullCommand);
-      
+
       if (!securityCheck.allowed) {
         throw new Error(`Command blocked by security policy: ${securityCheck.reason}`);
       }
+
+      // Analyze command intent
+      const intent = this.intentTracker.analyzeIntent(fullCommand, options.aiContext);
 
       // Get current context
       const context = await this.contextManager.getCurrentContext();
@@ -82,7 +88,14 @@ export class ShellExecutor {
       );
 
       // Process output
-      const processedOutput = await this.outputProcessor.process(result);
+      const processedOutput = await this.outputProcessor.process(result, fullCommand);
+
+      // Enhance output with intent information
+      processedOutput.metadata.commandIntent = intent;
+      processedOutput.summary.nextSteps = [
+        ...(processedOutput.summary.nextSteps || []),
+        ...this.intentTracker.suggestNextCommands(fullCommand).slice(0, 3)
+      ];
 
       // Update context
       await this.contextManager.updateAfterCommand({
@@ -142,6 +155,18 @@ export class ShellExecutor {
 
       return errorOutput;
     }
+  }
+
+  getIntentSummary() {
+    return this.intentTracker.getIntentSummary();
+  }
+
+  suggestNextCommands(command: string): string[] {
+    return this.intentTracker.suggestNextCommands(command);
+  }
+
+  getRecentIntents(limit?: number) {
+    return this.intentTracker.getRecentIntents(limit);
   }
 
   private buildFullCommand(options: ExecuteCommandOptions): string {

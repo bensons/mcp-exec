@@ -7,11 +7,13 @@ exports.ShellExecutor = void 0;
 const child_process_1 = require("child_process");
 const uuid_1 = require("uuid");
 const output_processor_1 = require("../utils/output-processor");
+const intent_tracker_1 = require("../utils/intent-tracker");
 class ShellExecutor {
     securityManager;
     contextManager;
     auditLogger;
     outputProcessor;
+    intentTracker;
     config;
     constructor(securityManager, contextManager, auditLogger, config) {
         this.securityManager = securityManager;
@@ -19,6 +21,7 @@ class ShellExecutor {
         this.auditLogger = auditLogger;
         this.config = config;
         this.outputProcessor = new output_processor_1.OutputProcessor(config.output);
+        this.intentTracker = new intent_tracker_1.IntentTracker();
     }
     async executeCommand(options) {
         const commandId = (0, uuid_1.v4)();
@@ -30,6 +33,8 @@ class ShellExecutor {
             if (!securityCheck.allowed) {
                 throw new Error(`Command blocked by security policy: ${securityCheck.reason}`);
             }
+            // Analyze command intent
+            const intent = this.intentTracker.analyzeIntent(fullCommand, options.aiContext);
             // Get current context
             const context = await this.contextManager.getCurrentContext();
             // Determine working directory
@@ -48,7 +53,13 @@ class ShellExecutor {
                 timeout: options.timeout || this.config.security.timeout,
             });
             // Process output
-            const processedOutput = await this.outputProcessor.process(result);
+            const processedOutput = await this.outputProcessor.process(result, fullCommand);
+            // Enhance output with intent information
+            processedOutput.metadata.commandIntent = intent;
+            processedOutput.summary.nextSteps = [
+                ...(processedOutput.summary.nextSteps || []),
+                ...this.intentTracker.suggestNextCommands(fullCommand).slice(0, 3)
+            ];
             // Update context
             await this.contextManager.updateAfterCommand({
                 id: commandId,
@@ -103,6 +114,15 @@ class ShellExecutor {
             });
             return errorOutput;
         }
+    }
+    getIntentSummary() {
+        return this.intentTracker.getIntentSummary();
+    }
+    suggestNextCommands(command) {
+        return this.intentTracker.suggestNextCommands(command);
+    }
+    getRecentIntents(limit) {
+        return this.intentTracker.getRecentIntents(limit);
     }
     buildFullCommand(options) {
         if (options.args && options.args.length > 0) {

@@ -6,6 +6,8 @@ export interface OutputConfig {
     formatStructured: boolean;
     stripAnsi: boolean;
     summarizeVerbose: boolean;
+    enableAiOptimizations: boolean;
+    maxOutputLength: number;
 }
 export declare class OutputProcessor {
     private config;
@@ -14,14 +16,24 @@ export declare class OutputProcessor {
         stdout: string;
         stderr: string;
         exitCode: number;
-    }): Promise<CommandOutput>;
+    }, command?: string): Promise<CommandOutput>;
     private stripAnsiCodes;
+    private optimizeForAI;
+    private enhanceCommandSpecificOutput;
+    private enhanceDirectoryListing;
+    private enhanceProcessListing;
+    private enhanceGitOutput;
+    private enhancePackageManagerOutput;
+    private truncateOutput;
     private detectStructuredOutput;
     private inferJsonSchema;
     private parseCsv;
     private isTableFormat;
     private parseTable;
     private generateMetadata;
+    private detectAffectedResources;
+    private classifyCommandType;
+    private generateCommandSpecificSuggestions;
     private generateSummary;
 }
 //# sourceMappingURL=output-processor.d.ts.map

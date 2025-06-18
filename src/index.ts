@@ -58,6 +58,8 @@ const DEFAULT_CONFIG: ServerConfig = {
     formatStructured: true,
     stripAnsi: true,
     summarizeVerbose: true,
+    enableAiOptimizations: true,
+    maxOutputLength: 10000, // 10KB max output
   },
   audit: {
     enabled: true,
@@ -115,6 +117,12 @@ const ConfirmCommandSchema = z.object({
 });
 
 const GetPendingConfirmationsSchema = z.object({});
+
+const GetIntentSummarySchema = z.object({});
+
+const SuggestNextCommandsSchema = z.object({
+  command: z.string().describe('Current command to get suggestions for'),
+});
 
 class MCPShellServer {
   private server: Server;
@@ -274,6 +282,25 @@ class MCPShellServer {
             inputSchema: {
               type: 'object',
               properties: {},
+            },
+          },
+          {
+            name: 'get_intent_summary',
+            description: 'Get summary of command intents and AI optimization insights',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+            },
+          },
+          {
+            name: 'suggest_next_commands',
+            description: 'Get AI-suggested next commands based on current command',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                command: { type: 'string', description: 'Current command to get suggestions for' },
+              },
+              required: ['command'],
             },
           },
         ],
@@ -501,6 +528,44 @@ class MCPShellServer {
                   text: JSON.stringify({
                     pendingConfirmations: pending,
                     count: pending.length
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'get_intent_summary': {
+            const intentSummary = this.shellExecutor.getIntentSummary();
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    intentSummary,
+                    aiOptimizations: {
+                      outputProcessing: this.config.output.enableAiOptimizations,
+                      maxOutputLength: this.config.output.maxOutputLength,
+                      structuredOutput: this.config.output.formatStructured,
+                    }
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'suggest_next_commands': {
+            const parsed = SuggestNextCommandsSchema.parse(args);
+            const suggestions = this.shellExecutor.suggestNextCommands(parsed.command);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    currentCommand: parsed.command,
+                    suggestions,
+                    count: suggestions.length
                   }, null, 2),
                 },
               ],

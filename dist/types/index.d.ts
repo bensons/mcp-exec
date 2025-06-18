@@ -16,6 +16,13 @@ export interface CommandOutput {
         affectedResources: string[];
         warnings: string[];
         suggestions: string[];
+        commandIntent?: {
+            category: string;
+            purpose: string;
+            confidence: number;
+            relatedCommands: string[];
+            suggestedFollowups: string[];
+        };
     };
     summary: {
         success: boolean;
@@ -186,6 +193,8 @@ export interface ServerConfig {
         formatStructured: boolean;
         stripAnsi: boolean;
         summarizeVerbose: boolean;
+        enableAiOptimizations: boolean;
+        maxOutputLength: number;
     };
     audit: {
         enabled: boolean;

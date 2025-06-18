@@ -19,9 +19,20 @@ export declare class ShellExecutor {
     private contextManager;
     private auditLogger;
     private outputProcessor;
+    private intentTracker;
     private config;
     constructor(securityManager: SecurityManager, contextManager: ContextManager, auditLogger: AuditLogger, config: ServerConfig);
     executeCommand(options: ExecuteCommandOptions): Promise<CommandOutput>;
+    getIntentSummary(): {
+        categories: Record<string, number>;
+        totalCommands: number;
+    };
+    suggestNextCommands(command: string): string[];
+    getRecentIntents(limit?: number): {
+        command: string;
+        intent: import("../utils/intent-tracker").CommandIntent;
+        timestamp: Date;
+    }[];
     private buildFullCommand;
     private executeWithTimeout;
 }

@@ -8,6 +8,8 @@ export interface OutputConfig {
   formatStructured: boolean;
   stripAnsi: boolean;
   summarizeVerbose: boolean;
+  enableAiOptimizations: boolean;
+  maxOutputLength: number;
 }
 
 export class OutputProcessor {
@@ -17,7 +19,7 @@ export class OutputProcessor {
     this.config = config;
   }
 
-  async process(rawOutput: { stdout: string; stderr: string; exitCode: number }): Promise<CommandOutput> {
+  async process(rawOutput: { stdout: string; stderr: string; exitCode: number }, command?: string): Promise<CommandOutput> {
     let { stdout, stderr, exitCode } = rawOutput;
 
     // Strip ANSI codes if configured
@@ -26,13 +28,25 @@ export class OutputProcessor {
       stderr = this.stripAnsiCodes(stderr);
     }
 
+    // Apply AI optimizations if enabled
+    if (this.config.enableAiOptimizations) {
+      stdout = this.optimizeForAI(stdout, command);
+      stderr = this.optimizeForAI(stderr, command);
+    }
+
+    // Truncate output if too long
+    if (this.config.maxOutputLength > 0) {
+      stdout = this.truncateOutput(stdout, this.config.maxOutputLength);
+      stderr = this.truncateOutput(stderr, this.config.maxOutputLength / 2);
+    }
+
     // Detect and parse structured output
-    const structuredOutput = this.config.formatStructured 
+    const structuredOutput = this.config.formatStructured
       ? this.detectStructuredOutput(stdout)
       : undefined;
 
     // Generate metadata
-    const metadata = this.generateMetadata(stdout, stderr, exitCode);
+    const metadata = this.generateMetadata(stdout, stderr, exitCode, command);
 
     // Generate AI-friendly summary
     const summary = this.generateSummary(stdout, stderr, exitCode, metadata);
@@ -50,6 +64,99 @@ export class OutputProcessor {
   private stripAnsiCodes(text: string): string {
     // Remove ANSI escape sequences
     return text.replace(/\x1b\[[0-9;]*m/g, '');
+  }
+
+  private optimizeForAI(text: string, command?: string): string {
+    if (!text.trim()) return text;
+
+    // Remove excessive whitespace
+    let optimized = text.replace(/\n{3,}/g, '\n\n');
+
+    // Remove progress indicators and spinner characters
+    optimized = optimized.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '');
+    optimized = optimized.replace(/\r[^\n]*\r/g, '');
+
+    // Clean up common noise patterns
+    optimized = optimized.replace(/^\s*[\.\-=]{3,}\s*$/gm, '');
+    optimized = optimized.replace(/^\s*[#*]{3,}\s*$/gm, '');
+
+    // Enhance readability for specific command types
+    if (command) {
+      optimized = this.enhanceCommandSpecificOutput(optimized, command);
+    }
+
+    return optimized.trim();
+  }
+
+  private enhanceCommandSpecificOutput(text: string, command: string): string {
+    const cmd = command.toLowerCase().split(' ')[0];
+
+    switch (cmd) {
+      case 'ls':
+      case 'dir':
+        return this.enhanceDirectoryListing(text);
+      case 'ps':
+        return this.enhanceProcessListing(text);
+      case 'git':
+        return this.enhanceGitOutput(text);
+      case 'npm':
+      case 'yarn':
+        return this.enhancePackageManagerOutput(text);
+      default:
+        return text;
+    }
+  }
+
+  private enhanceDirectoryListing(text: string): string {
+    // Add structure to directory listings
+    const lines = text.split('\n');
+    const enhanced = lines.map(line => {
+      if (line.match(/^d/)) {
+        return `📁 ${line}`;
+      } else if (line.match(/^-.*x/)) {
+        return `🔧 ${line}`;
+      } else if (line.match(/^-/)) {
+        return `📄 ${line}`;
+      }
+      return line;
+    });
+    return enhanced.join('\n');
+  }
+
+  private enhanceProcessListing(text: string): string {
+    // Highlight important process information
+    return text.replace(/(\d+)\s+(\S+)\s+(.+)/g, 'PID:$1 USER:$2 CMD:$3');
+  }
+
+  private enhanceGitOutput(text: string): string {
+    // Enhance git output readability
+    let enhanced = text;
+    enhanced = enhanced.replace(/^(\s*modified:)/gm, '🔄 $1');
+    enhanced = enhanced.replace(/^(\s*new file:)/gm, '✅ $1');
+    enhanced = enhanced.replace(/^(\s*deleted:)/gm, '❌ $1');
+    return enhanced;
+  }
+
+  private enhancePackageManagerOutput(text: string): string {
+    // Clean up package manager noise
+    let enhanced = text;
+    enhanced = enhanced.replace(/^npm WARN.*$/gm, '');
+    enhanced = enhanced.replace(/^added \d+ packages.*$/gm, '✅ Packages installed successfully');
+    return enhanced.replace(/\n{2,}/g, '\n');
+  }
+
+  private truncateOutput(text: string, maxLength: number): string {
+    if (text.length <= maxLength) return text;
+
+    const truncated = text.substring(0, maxLength - 100);
+    const lastNewline = truncated.lastIndexOf('\n');
+
+    if (lastNewline > maxLength * 0.8) {
+      return truncated.substring(0, lastNewline) +
+        `\n\n... [Output truncated - ${text.length - lastNewline} more characters]`;
+    }
+
+    return truncated + `\n\n... [Output truncated - ${text.length - maxLength + 100} more characters]`;
   }
 
   private detectStructuredOutput(stdout: string): CommandOutput['structuredOutput'] {
@@ -198,14 +305,16 @@ export class OutputProcessor {
     return [];
   }
 
-  private generateMetadata(stdout: string, stderr: string, exitCode: number): CommandOutput['metadata'] {
+  private generateMetadata(stdout: string, stderr: string, exitCode: number, command?: string): CommandOutput['metadata'] {
     const warnings: string[] = [];
     const suggestions: string[] = [];
     const affectedResources: string[] = [];
 
-    // Analyze stderr for warnings
+    // Analyze stderr for warnings and errors
     if (stderr) {
       const stderrLower = stderr.toLowerCase();
+
+      // Common warning patterns
       if (stderrLower.includes('warning')) {
         warnings.push('Command produced warnings');
       }
@@ -213,33 +322,37 @@ export class OutputProcessor {
         warnings.push('Command uses deprecated features');
         suggestions.push('Consider using updated alternatives');
       }
-      if (stderrLower.includes('permission denied')) {
+
+      // Permission issues
+      if (stderrLower.includes('permission denied') || stderrLower.includes('access denied')) {
         suggestions.push('Check file permissions or run with appropriate privileges');
       }
-      if (stderrLower.includes('not found')) {
+
+      // File/command not found
+      if (stderrLower.includes('not found') || stderrLower.includes('no such file')) {
         suggestions.push('Verify the command or file path exists');
+      }
+
+      // Network issues
+      if (stderrLower.includes('connection refused') || stderrLower.includes('timeout')) {
+        suggestions.push('Check network connectivity and firewall settings');
+      }
+
+      // Disk space issues
+      if (stderrLower.includes('no space left') || stderrLower.includes('disk full')) {
+        suggestions.push('Free up disk space before retrying');
       }
     }
 
-    // Detect affected resources from output
-    const pathPattern = /(?:^|\s)([\/\\]?[\w\-\.\/\\]+\.[a-zA-Z0-9]+)(?:\s|$)/g;
-    let match;
-    while ((match = pathPattern.exec(stdout)) !== null) {
-      affectedResources.push(match[1]);
-    }
+    // Enhanced resource detection
+    this.detectAffectedResources(stdout, stderr, affectedResources);
 
-    // Determine command type
-    let commandType = 'general';
-    const stdoutLower = stdout.toLowerCase();
-    
-    if (stdoutLower.includes('file') || stdoutLower.includes('directory')) {
-      commandType = 'file-operation';
-    } else if (stdoutLower.includes('process') || stdoutLower.includes('pid')) {
-      commandType = 'process-management';
-    } else if (stdoutLower.includes('network') || stdoutLower.includes('connection')) {
-      commandType = 'network-operation';
-    } else if (stdoutLower.includes('package') || stdoutLower.includes('install')) {
-      commandType = 'package-management';
+    // Determine command type with better classification
+    const commandType = this.classifyCommandType(stdout, stderr, command);
+
+    // Add command-specific suggestions
+    if (command) {
+      suggestions.push(...this.generateCommandSpecificSuggestions(command, exitCode, stderr));
     }
 
     return {
@@ -249,6 +362,117 @@ export class OutputProcessor {
       warnings,
       suggestions,
     };
+  }
+
+  private detectAffectedResources(stdout: string, stderr: string, affectedResources: string[]): void {
+    const combinedOutput = stdout + '\n' + stderr;
+
+    // File paths
+    const pathPattern = /(?:^|\s)([\/\\]?[\w\-\.\/\\]+\.[a-zA-Z0-9]+)(?:\s|$)/g;
+    let match;
+    while ((match = pathPattern.exec(combinedOutput)) !== null) {
+      affectedResources.push(match[1]);
+    }
+
+    // URLs
+    const urlPattern = /https?:\/\/[^\s]+/g;
+    while ((match = urlPattern.exec(combinedOutput)) !== null) {
+      affectedResources.push(match[0]);
+    }
+
+    // Package names
+    const packagePattern = /(?:installing|updating|removing)\s+([a-zA-Z0-9\-_]+)/gi;
+    while ((match = packagePattern.exec(combinedOutput)) !== null) {
+      affectedResources.push(`package:${match[1]}`);
+    }
+  }
+
+  private classifyCommandType(stdout: string, stderr: string, command?: string): string {
+    if (command) {
+      const cmd = command.toLowerCase().split(' ')[0];
+
+      // Direct command classification
+      const commandTypes: Record<string, string> = {
+        'ls': 'file-operation',
+        'dir': 'file-operation',
+        'cp': 'file-operation',
+        'mv': 'file-operation',
+        'rm': 'file-operation',
+        'mkdir': 'file-operation',
+        'touch': 'file-operation',
+        'ps': 'process-management',
+        'kill': 'process-management',
+        'top': 'process-management',
+        'htop': 'process-management',
+        'git': 'version-control',
+        'npm': 'package-management',
+        'yarn': 'package-management',
+        'pip': 'package-management',
+        'curl': 'network-operation',
+        'wget': 'network-operation',
+        'ssh': 'network-operation',
+        'ping': 'network-operation',
+        'docker': 'container-management',
+        'kubectl': 'container-management',
+      };
+
+      if (commandTypes[cmd]) {
+        return commandTypes[cmd];
+      }
+    }
+
+    // Fallback to content-based classification
+    const combinedOutput = (stdout + '\n' + stderr).toLowerCase();
+
+    if (combinedOutput.includes('file') || combinedOutput.includes('directory')) {
+      return 'file-operation';
+    } else if (combinedOutput.includes('process') || combinedOutput.includes('pid')) {
+      return 'process-management';
+    } else if (combinedOutput.includes('network') || combinedOutput.includes('connection')) {
+      return 'network-operation';
+    } else if (combinedOutput.includes('package') || combinedOutput.includes('install')) {
+      return 'package-management';
+    } else if (combinedOutput.includes('commit') || combinedOutput.includes('branch')) {
+      return 'version-control';
+    }
+
+    return 'general';
+  }
+
+  private generateCommandSpecificSuggestions(command: string, exitCode: number, stderr: string): string[] {
+    const suggestions: string[] = [];
+    const cmd = command.toLowerCase().split(' ')[0];
+
+    if (exitCode !== 0) {
+      switch (cmd) {
+        case 'git':
+          if (stderr.includes('not a git repository')) {
+            suggestions.push('Initialize a git repository with "git init" first');
+          } else if (stderr.includes('nothing to commit')) {
+            suggestions.push('Add files to staging area with "git add" before committing');
+          }
+          break;
+
+        case 'npm':
+        case 'yarn':
+          if (stderr.includes('ENOENT')) {
+            suggestions.push('Run "npm install" to install dependencies first');
+          } else if (stderr.includes('permission')) {
+            suggestions.push('Try using sudo or check npm permissions');
+          }
+          break;
+
+        case 'docker':
+          if (stderr.includes('permission denied')) {
+            suggestions.push('Add user to docker group or use sudo');
+          } else if (stderr.includes('not found')) {
+            suggestions.push('Ensure Docker is installed and running');
+          }
+          break;
+      }
+    }
+
+    return suggestions;
   }
 
   private generateSummary(
