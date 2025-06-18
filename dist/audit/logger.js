@@ -321,7 +321,8 @@ class AuditLogger {
         // 2. Environment variable MCP_EXEC_AUDIT_LOG
         // 3. logDirectory + default filename
         // 4. Environment variable MCP_EXEC_LOG_DIR + default filename
-        // 5. Current working directory + default filename
+        // 5. User home directory + default filename (safer than cwd)
+        // 6. Temp directory + default filename (fallback)
         const defaultFilename = '.mcp-exec-audit.log';
         // 1. Explicit log file path
         if (config.logFile) {
@@ -339,8 +340,34 @@ class AuditLogger {
         if (process.env.MCP_EXEC_LOG_DIR) {
             return path.join(path.resolve(process.env.MCP_EXEC_LOG_DIR), defaultFilename);
         }
-        // 5. Default: current working directory + default filename
-        return path.join(process.cwd(), defaultFilename);
+        // 5. Try current working directory, but check if it's writable
+        const cwd = process.cwd();
+        if (this.isDirectoryWritable(cwd)) {
+            return path.join(cwd, defaultFilename);
+        }
+        // 6. Use user home directory as safer default
+        const homeDir = process.env.HOME || process.env.USERPROFILE;
+        if (homeDir && this.isDirectoryWritable(homeDir)) {
+            return path.join(homeDir, defaultFilename);
+        }
+        // 7. Final fallback: temp directory
+        const tempDir = process.env.TMPDIR || process.env.TEMP || '/tmp';
+        return path.join(tempDir, defaultFilename);
+    }
+    isDirectoryWritable(dirPath) {
+        try {
+            // Check if directory exists and is writable
+            const stats = require('fs').statSync(dirPath);
+            if (!stats.isDirectory()) {
+                return false;
+            }
+            // Try to access with write permissions
+            require('fs').accessSync(dirPath, require('fs').constants.W_OK);
+            return true;
+        }
+        catch {
+            return false;
+        }
     }
     getLogFilePath() {
         return this.logFile;
@@ -350,15 +377,47 @@ class AuditLogger {
             // Ensure log directory exists
             const logDir = path.dirname(this.logFile);
             await fs.mkdir(logDir, { recursive: true });
-            // Ensure log file exists
-            await fs.access(this.logFile);
+            // Test if we can write to the log file location
+            try {
+                await fs.access(this.logFile);
+            }
+            catch {
+                // Create log file if it doesn't exist
+                await fs.writeFile(this.logFile, '');
+            }
+            // Load existing logs
+            await this.loadExistingLogs();
+            // Log successful initialization
+            console.log(`✅ Audit logging initialized: ${this.logFile}`);
         }
-        catch {
-            // Create log file if it doesn't exist
-            await fs.writeFile(this.logFile, '');
+        catch (error) {
+            // If we can't write to the configured location, try fallback
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            console.warn(`⚠️  Failed to initialize audit log at ${this.logFile}: ${errorMessage}`);
+            // Try fallback location
+            const fallbackPath = this.getFallbackLogPath();
+            console.log(`🔄 Attempting fallback location: ${fallbackPath}`);
+            this.logFile = fallbackPath;
+            try {
+                const fallbackDir = path.dirname(this.logFile);
+                await fs.mkdir(fallbackDir, { recursive: true });
+                await fs.writeFile(this.logFile, '');
+                await this.loadExistingLogs();
+                console.log(`✅ Audit logging initialized at fallback location: ${this.logFile}`);
+            }
+            catch (fallbackError) {
+                const fallbackErrorMessage = fallbackError instanceof Error ? fallbackError.message : 'Unknown error';
+                console.error(`❌ Failed to initialize audit logging even at fallback location: ${fallbackErrorMessage}`);
+                console.log(`🚫 Audit logging will be disabled for this session`);
+                this.config.enabled = false;
+            }
         }
-        // Load existing logs
-        await this.loadExistingLogs();
+    }
+    getFallbackLogPath() {
+        const defaultFilename = '.mcp-exec-audit.log';
+        // Try temp directory
+        const tempDir = process.env.TMPDIR || process.env.TEMP || '/tmp';
+        return path.join(tempDir, defaultFilename);
     }
     async loadExistingLogs() {
         try {

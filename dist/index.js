@@ -4,12 +4,46 @@
  * MCP Shell Execution Server
  * Enhanced shell command execution with security, context preservation, and AI optimization
  */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MCPShellServer = void 0;
 const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
 const stdio_js_1 = require("@modelcontextprotocol/sdk/server/stdio.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const zod_1 = require("zod");
+const path = __importStar(require("path"));
 const executor_1 = require("./core/executor");
 const manager_1 = require("./security/manager");
 const manager_2 = require("./context/manager");
@@ -59,7 +93,9 @@ const DEFAULT_CONFIG = {
         enabled: true,
         logLevel: 'info',
         retention: 30,
-        logDirectory: process.env.MCP_EXEC_LOG_DIR, // Support environment variable
+        logDirectory: process.env.MCP_EXEC_LOG_DIR ||
+            (process.env.HOME && path.join(process.env.HOME, '.mcp-exec')) ||
+            (process.env.USERPROFILE && path.join(process.env.USERPROFILE, '.mcp-exec')), // Safer default
         monitoring: {
             enabled: true,
             alertRetention: 7,
@@ -773,12 +809,13 @@ class MCPShellServer {
         await this.contextManager.loadSession();
         const transport = new stdio_js_1.StdioServerTransport();
         await this.server.connect(transport);
-        // Log server start
+        // Log server start with audit log location info
         await this.auditLogger.log({
             level: 'info',
             message: 'MCP Shell Server started',
             context: {
                 config: this.config,
+                auditLogLocation: this.auditLogger.getLogFilePath(),
                 pid: process.pid,
                 platform: process.platform,
                 nodeVersion: process.version,

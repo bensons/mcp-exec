@@ -50,8 +50,10 @@ export declare class AuditLogger {
     acknowledgeAlert(alertId: string, acknowledgedBy: string): boolean;
     getAlertRules(): import("./monitoring").AlertRule[];
     private resolveLogFilePath;
+    private isDirectoryWritable;
     getLogFilePath(): string;
     private initializeLogging;
+    private getFallbackLogPath;
     private loadExistingLogs;
     private writeLogEntry;
     private shouldLog;

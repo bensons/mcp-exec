@@ -13,6 +13,7 @@ import {
   Tool,
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import * as path from 'path';
 
 import { ShellExecutor } from './core/executor';
 import { SecurityManager } from './security/manager';
@@ -65,7 +66,9 @@ const DEFAULT_CONFIG: ServerConfig = {
     enabled: true,
     logLevel: 'info',
     retention: 30,
-    logDirectory: process.env.MCP_EXEC_LOG_DIR, // Support environment variable
+    logDirectory: process.env.MCP_EXEC_LOG_DIR ||
+                  (process.env.HOME && path.join(process.env.HOME, '.mcp-exec')) ||
+                  (process.env.USERPROFILE && path.join(process.env.USERPROFILE, '.mcp-exec')), // Safer default
     monitoring: {
       enabled: true,
       alertRetention: 7,
@@ -855,12 +858,13 @@ class MCPShellServer {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
 
-    // Log server start
+    // Log server start with audit log location info
     await this.auditLogger.log({
       level: 'info',
       message: 'MCP Shell Server started',
       context: {
         config: this.config,
+        auditLogLocation: this.auditLogger.getLogFilePath(),
         pid: process.pid,
         platform: process.platform,
         nodeVersion: process.version,
