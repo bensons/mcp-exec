@@ -10,6 +10,7 @@ declare class MCPShellServer {
     private securityManager;
     private contextManager;
     private auditLogger;
+    private confirmationManager;
     private config;
     constructor(config?: Partial<ServerConfig>);
     private setupHandlers;

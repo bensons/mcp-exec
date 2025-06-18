@@ -166,6 +166,16 @@ export interface ServerConfig {
         allowedDirectories: string[];
         blockedCommands: string[];
         timeout: number;
+        resourceLimits?: {
+            maxMemoryUsage?: number;
+            maxFileSize?: number;
+            maxProcesses?: number;
+        };
+        sandboxing?: {
+            enabled: boolean;
+            networkAccess: boolean;
+            fileSystemAccess: 'read-only' | 'restricted' | 'full';
+        };
     };
     context: {
         preserveWorkingDirectory: boolean;

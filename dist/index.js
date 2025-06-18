@@ -14,6 +14,7 @@ const executor_1 = require("./core/executor");
 const manager_1 = require("./security/manager");
 const manager_2 = require("./context/manager");
 const logger_1 = require("./audit/logger");
+const confirmation_1 = require("./security/confirmation");
 // Default configuration
 const DEFAULT_CONFIG = {
     security: {
@@ -31,6 +32,16 @@ const DEFAULT_CONFIG = {
             'parted'
         ],
         timeout: 300000, // 5 minutes
+        resourceLimits: {
+            maxMemoryUsage: 1024, // 1GB
+            maxFileSize: 100, // 100MB
+            maxProcesses: 10,
+        },
+        sandboxing: {
+            enabled: false, // Disabled by default for compatibility
+            networkAccess: true,
+            fileSystemAccess: 'full',
+        },
     },
     context: {
         preserveWorkingDirectory: true,
@@ -74,12 +85,27 @@ const ClearHistorySchema = zod_1.z.object({
 const GetFileSystemChangesSchema = zod_1.z.object({
     since: zod_1.z.string().optional().describe('ISO date string to filter changes since'),
 });
+const UpdateSecurityConfigSchema = zod_1.z.object({
+    level: zod_1.z.enum(['strict', 'moderate', 'permissive']).optional().describe('Security level'),
+    confirmDangerous: zod_1.z.boolean().optional().describe('Require confirmation for dangerous commands'),
+    sandboxing: zod_1.z.object({
+        enabled: zod_1.z.boolean().optional(),
+        networkAccess: zod_1.z.boolean().optional(),
+        fileSystemAccess: zod_1.z.enum(['read-only', 'restricted', 'full']).optional(),
+    }).optional().describe('Sandboxing configuration'),
+});
+const GetSecurityStatusSchema = zod_1.z.object({});
+const ConfirmCommandSchema = zod_1.z.object({
+    confirmationId: zod_1.z.string().describe('Confirmation ID for the pending command'),
+});
+const GetPendingConfirmationsSchema = zod_1.z.object({});
 class MCPShellServer {
     server;
     shellExecutor;
     securityManager;
     contextManager;
     auditLogger;
+    confirmationManager;
     config;
     constructor(config = {}) {
         this.config = { ...DEFAULT_CONFIG, ...config };
@@ -95,6 +121,7 @@ class MCPShellServer {
         this.securityManager = new manager_1.SecurityManager(this.config.security);
         this.contextManager = new manager_2.ContextManager(this.config.context);
         this.auditLogger = new logger_1.AuditLogger(this.config.audit);
+        this.confirmationManager = new confirmation_1.ConfirmationManager();
         this.shellExecutor = new executor_1.ShellExecutor(this.securityManager, this.contextManager, this.auditLogger, this.config);
         this.setupHandlers();
     }
@@ -170,6 +197,53 @@ class MCPShellServer {
                             properties: {
                                 since: { type: 'string', description: 'ISO date string to filter changes since' },
                             },
+                        },
+                    },
+                    {
+                        name: 'update_security_config',
+                        description: 'Update security configuration settings',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                level: { type: 'string', enum: ['strict', 'moderate', 'permissive'], description: 'Security level' },
+                                confirmDangerous: { type: 'boolean', description: 'Require confirmation for dangerous commands' },
+                                sandboxing: {
+                                    type: 'object',
+                                    properties: {
+                                        enabled: { type: 'boolean' },
+                                        networkAccess: { type: 'boolean' },
+                                        fileSystemAccess: { type: 'string', enum: ['read-only', 'restricted', 'full'] },
+                                    },
+                                    description: 'Sandboxing configuration',
+                                },
+                            },
+                        },
+                    },
+                    {
+                        name: 'get_security_status',
+                        description: 'Get current security configuration and status',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {},
+                        },
+                    },
+                    {
+                        name: 'confirm_command',
+                        description: 'Confirm execution of a dangerous command',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                confirmationId: { type: 'string', description: 'Confirmation ID for the pending command' },
+                            },
+                            required: ['confirmationId'],
+                        },
+                    },
+                    {
+                        name: 'get_pending_confirmations',
+                        description: 'Get list of commands pending confirmation',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {},
                         },
                     },
                 ],
@@ -271,6 +345,113 @@ class MCPShellServer {
                                 {
                                     type: 'text',
                                     text: JSON.stringify(changes, null, 2),
+                                },
+                            ],
+                        };
+                    }
+                    case 'update_security_config': {
+                        const parsed = UpdateSecurityConfigSchema.parse(args);
+                        // Update security configuration
+                        if (parsed.level) {
+                            this.config.security.level = parsed.level;
+                        }
+                        if (parsed.confirmDangerous !== undefined) {
+                            this.config.security.confirmDangerous = parsed.confirmDangerous;
+                        }
+                        if (parsed.sandboxing) {
+                            if (!this.config.security.sandboxing) {
+                                this.config.security.sandboxing = {
+                                    enabled: false,
+                                    networkAccess: true,
+                                    fileSystemAccess: 'full',
+                                };
+                            }
+                            if (parsed.sandboxing.enabled !== undefined) {
+                                this.config.security.sandboxing.enabled = parsed.sandboxing.enabled;
+                            }
+                            if (parsed.sandboxing.networkAccess !== undefined) {
+                                this.config.security.sandboxing.networkAccess = parsed.sandboxing.networkAccess;
+                            }
+                            if (parsed.sandboxing.fileSystemAccess) {
+                                this.config.security.sandboxing.fileSystemAccess = parsed.sandboxing.fileSystemAccess;
+                            }
+                        }
+                        // Recreate security manager with new config
+                        this.securityManager = new manager_1.SecurityManager(this.config.security);
+                        return {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: JSON.stringify({
+                                        success: true,
+                                        message: 'Security configuration updated',
+                                        newConfig: this.config.security
+                                    }, null, 2),
+                                },
+                            ],
+                        };
+                    }
+                    case 'get_security_status': {
+                        return {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: JSON.stringify({
+                                        securityConfig: this.config.security,
+                                        pendingConfirmations: this.confirmationManager.getAllPendingConfirmations().length,
+                                        serverInfo: {
+                                            version: '1.0.0',
+                                            platform: process.platform,
+                                            nodeVersion: process.version,
+                                        }
+                                    }, null, 2),
+                                },
+                            ],
+                        };
+                    }
+                    case 'confirm_command': {
+                        const parsed = ConfirmCommandSchema.parse(args);
+                        const confirmed = this.confirmationManager.confirmCommand(parsed.confirmationId);
+                        if (confirmed) {
+                            const confirmation = this.confirmationManager.getPendingConfirmation(parsed.confirmationId);
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: JSON.stringify({
+                                            success: true,
+                                            message: 'Command confirmed and ready for execution',
+                                            confirmationId: parsed.confirmationId
+                                        }, null, 2),
+                                    },
+                                ],
+                            };
+                        }
+                        else {
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: JSON.stringify({
+                                            success: false,
+                                            message: 'Confirmation not found or expired',
+                                            confirmationId: parsed.confirmationId
+                                        }, null, 2),
+                                    },
+                                ],
+                            };
+                        }
+                    }
+                    case 'get_pending_confirmations': {
+                        const pending = this.confirmationManager.getAllPendingConfirmations();
+                        return {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: JSON.stringify({
+                                        pendingConfirmations: pending,
+                                        count: pending.length
+                                    }, null, 2),
                                 },
                             ],
                         };

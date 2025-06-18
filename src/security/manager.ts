@@ -12,6 +12,16 @@ export interface SecurityConfig {
   allowedDirectories: string[];
   blockedCommands: string[];
   timeout: number;
+  resourceLimits?: {
+    maxMemoryUsage?: number; // in MB
+    maxFileSize?: number; // in MB
+    maxProcesses?: number;
+  };
+  sandboxing?: {
+    enabled: boolean;
+    networkAccess: boolean;
+    fileSystemAccess: 'read-only' | 'restricted' | 'full';
+  };
 }
 
 export class SecurityManager {
@@ -25,63 +35,7 @@ export class SecurityManager {
     this.initializeSystemDirectories();
   }
 
-  async validateCommand(command: string): Promise<ValidationResult> {
-    const normalizedCommand = command.trim().toLowerCase();
 
-    // Check blocked commands
-    for (const blocked of this.config.blockedCommands) {
-      if (normalizedCommand.includes(blocked.toLowerCase())) {
-        return {
-          allowed: false,
-          reason: `Command contains blocked pattern: ${blocked}`,
-          riskLevel: 'high',
-          suggestions: ['Use a safer alternative command'],
-        };
-      }
-    }
-
-    // Check dangerous patterns
-    for (const pattern of this.dangerousPatterns) {
-      if (pattern.test(normalizedCommand)) {
-        const riskLevel = this.assessRiskLevel(command);
-        
-        if (this.config.level === 'strict' && riskLevel === 'high') {
-          return {
-            allowed: false,
-            reason: 'High-risk command blocked in strict mode',
-            riskLevel,
-            suggestions: ['Use a safer alternative or switch to moderate security level'],
-          };
-        }
-
-        if (this.config.confirmDangerous && riskLevel !== 'low') {
-          return {
-            allowed: false,
-            reason: 'Dangerous command requires confirmation',
-            riskLevel,
-            suggestions: ['Review command carefully before proceeding'],
-          };
-        }
-      }
-    }
-
-    // Check directory access
-    const directoryCheck = this.validateDirectoryAccess(command);
-    if (!directoryCheck.allowed) {
-      return directoryCheck;
-    }
-
-    // Check for privilege escalation
-    const privilegeCheck = this.checkPrivilegeEscalation(command);
-    if (!privilegeCheck.allowed) {
-      return privilegeCheck;
-    }
-
-    return {
-      allowed: true,
-      riskLevel: this.assessRiskLevel(command),
-    };
-  }
 
   private initializeDangerousPatterns(): void {
     this.dangerousPatterns = [
@@ -240,6 +194,9 @@ export class SecurityManager {
       /sudo/,
       /shutdown/,
       /reboot/,
+      /mkfs/,
+      /fdisk/,
+      /parted/,
     ];
 
     // Medium risk indicators
@@ -250,6 +207,10 @@ export class SecurityManager {
       /kill\s+/,
       /chmod\s+777/,
       /chown\s+/,
+      /wget.*\|/,
+      /curl.*\|/,
+      />\s*\/etc/,
+      />\s*\/sys/,
     ];
 
     for (const pattern of highRiskPatterns) {
@@ -265,5 +226,175 @@ export class SecurityManager {
     }
 
     return 'low';
+  }
+
+  validateResourceLimits(command: string): ValidationResult {
+    if (!this.config.resourceLimits) {
+      return { allowed: true, riskLevel: 'low' };
+    }
+
+    const limits = this.config.resourceLimits;
+
+    // Check for commands that might consume excessive resources
+    const resourceIntensivePatterns = [
+      { pattern: /find\s+\/\s+/, reason: 'Full filesystem search may consume excessive resources' },
+      { pattern: /grep\s+-r.*\//, reason: 'Recursive grep may consume excessive resources' },
+      { pattern: /tar\s+.*\*/, reason: 'Large archive operations may consume excessive resources' },
+      { pattern: /dd\s+.*bs=\d+[MG]/, reason: 'Large data operations may consume excessive memory' },
+      { pattern: /sort\s+.*-S\s*\d+[MG]/, reason: 'Large sort operations may consume excessive memory' },
+    ];
+
+    for (const { pattern, reason } of resourceIntensivePatterns) {
+      if (pattern.test(command)) {
+        if (this.config.level === 'strict') {
+          return {
+            allowed: false,
+            reason: `Resource-intensive command blocked: ${reason}`,
+            riskLevel: 'medium',
+            suggestions: ['Use more specific parameters to limit resource usage'],
+          };
+        }
+
+        return {
+          allowed: true,
+          reason: `Resource-intensive command detected: ${reason}`,
+          riskLevel: 'medium',
+          suggestions: ['Monitor resource usage during execution'],
+        };
+      }
+    }
+
+    return { allowed: true, riskLevel: 'low' };
+  }
+
+  validateSandboxing(command: string): ValidationResult {
+    if (!this.config.sandboxing?.enabled) {
+      return { allowed: true, riskLevel: 'low' };
+    }
+
+    const sandbox = this.config.sandboxing;
+
+    // Check network access
+    if (!sandbox.networkAccess) {
+      const networkPatterns = [
+        /wget/i,
+        /curl/i,
+        /ssh/i,
+        /scp/i,
+        /rsync.*::/i,
+        /git\s+(clone|pull|push|fetch)/i,
+        /npm\s+(install|update)/i,
+        /pip\s+(install|upgrade)/i,
+      ];
+
+      for (const pattern of networkPatterns) {
+        if (pattern.test(command)) {
+          return {
+            allowed: false,
+            reason: 'Network access is disabled in sandbox mode',
+            riskLevel: 'medium',
+            suggestions: ['Enable network access or use offline alternatives'],
+          };
+        }
+      }
+    }
+
+    // Check file system access
+    if (sandbox.fileSystemAccess === 'read-only') {
+      const writePatterns = [
+        />\s*[^&]/,
+        />>/,
+        /touch/i,
+        /mkdir/i,
+        /rm/i,
+        /del/i,
+        /mv/i,
+        /cp.*\s+\S+$/i,
+        /echo.*>/,
+      ];
+
+      for (const pattern of writePatterns) {
+        if (pattern.test(command)) {
+          return {
+            allowed: false,
+            reason: 'Write operations are disabled in read-only sandbox mode',
+            riskLevel: 'medium',
+            suggestions: ['Switch to restricted or full file system access'],
+          };
+        }
+      }
+    }
+
+    return { allowed: true, riskLevel: 'low' };
+  }
+
+  async validateCommand(command: string): Promise<ValidationResult> {
+    const normalizedCommand = command.trim().toLowerCase();
+
+    // Check blocked commands first
+    for (const blocked of this.config.blockedCommands) {
+      if (normalizedCommand.includes(blocked.toLowerCase())) {
+        return {
+          allowed: false,
+          reason: `Command contains blocked pattern: ${blocked}`,
+          riskLevel: 'high',
+          suggestions: ['Use a safer alternative command'],
+        };
+      }
+    }
+
+    // Check dangerous patterns
+    for (const pattern of this.dangerousPatterns) {
+      if (pattern.test(normalizedCommand)) {
+        const riskLevel = this.assessRiskLevel(command);
+
+        if (this.config.level === 'strict' && riskLevel === 'high') {
+          return {
+            allowed: false,
+            reason: 'High-risk command blocked in strict mode',
+            riskLevel,
+            suggestions: ['Use a safer alternative or switch to moderate security level'],
+          };
+        }
+
+        if (this.config.confirmDangerous && riskLevel !== 'low') {
+          return {
+            allowed: false,
+            reason: 'Dangerous command requires confirmation',
+            riskLevel,
+            suggestions: ['Review command carefully before proceeding'],
+          };
+        }
+      }
+    }
+
+    // Check directory access
+    const directoryCheck = this.validateDirectoryAccess(command);
+    if (!directoryCheck.allowed) {
+      return directoryCheck;
+    }
+
+    // Check privilege escalation
+    const privilegeCheck = this.checkPrivilegeEscalation(command);
+    if (!privilegeCheck.allowed) {
+      return privilegeCheck;
+    }
+
+    // Check resource limits
+    const resourceCheck = this.validateResourceLimits(command);
+    if (!resourceCheck.allowed) {
+      return resourceCheck;
+    }
+
+    // Check sandboxing restrictions
+    const sandboxCheck = this.validateSandboxing(command);
+    if (!sandboxCheck.allowed) {
+      return sandboxCheck;
+    }
+
+    return {
+      allowed: true,
+      riskLevel: this.assessRiskLevel(command),
+    };
   }
 }
