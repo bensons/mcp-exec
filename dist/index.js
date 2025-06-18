@@ -59,6 +59,7 @@ const DEFAULT_CONFIG = {
         enabled: true,
         logLevel: 'info',
         retention: 30,
+        logDirectory: process.env.MCP_EXEC_LOG_DIR, // Support environment variable
         monitoring: {
             enabled: true,
             alertRetention: 7,
@@ -129,6 +130,13 @@ const GetAlertsSchema = zod_1.z.object({
 const AcknowledgeAlertSchema = zod_1.z.object({
     alertId: zod_1.z.string().describe('Alert ID to acknowledge'),
     acknowledgedBy: zod_1.z.string().describe('User acknowledging the alert'),
+});
+const GetAuditConfigSchema = zod_1.z.object({});
+const UpdateAuditConfigSchema = zod_1.z.object({
+    logLevel: zod_1.z.enum(['debug', 'info', 'warn', 'error']).optional().describe('Audit log level'),
+    retention: zod_1.z.number().optional().describe('Log retention in days'),
+    logFile: zod_1.z.string().optional().describe('Full path to audit log file'),
+    logDirectory: zod_1.z.string().optional().describe('Directory for audit log files'),
 });
 class MCPShellServer {
     server;
@@ -345,6 +353,27 @@ class MCPShellServer {
                                 acknowledgedBy: { type: 'string', description: 'User acknowledging the alert' },
                             },
                             required: ['alertId', 'acknowledgedBy'],
+                        },
+                    },
+                    {
+                        name: 'get_audit_config',
+                        description: 'Get current audit configuration including log file location',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {},
+                        },
+                    },
+                    {
+                        name: 'update_audit_config',
+                        description: 'Update audit configuration settings',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                logLevel: { type: 'string', enum: ['debug', 'info', 'warn', 'error'], description: 'Audit log level' },
+                                retention: { type: 'number', description: 'Log retention in days' },
+                                logFile: { type: 'string', description: 'Full path to audit log file' },
+                                logDirectory: { type: 'string', description: 'Directory for audit log files' },
+                            },
                         },
                     },
                 ],
@@ -667,6 +696,55 @@ class MCPShellServer {
                                         alertId: parsed.alertId,
                                         acknowledgedBy: parsed.acknowledgedBy,
                                         message: success ? 'Alert acknowledged successfully' : 'Alert not found or already acknowledged'
+                                    }, null, 2),
+                                },
+                            ],
+                        };
+                    }
+                    case 'get_audit_config': {
+                        return {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: JSON.stringify({
+                                        auditConfig: this.config.audit,
+                                        currentLogFile: this.auditLogger.getLogFilePath(),
+                                        environmentVariables: {
+                                            MCP_EXEC_AUDIT_LOG: process.env.MCP_EXEC_AUDIT_LOG || 'not set',
+                                            MCP_EXEC_LOG_DIR: process.env.MCP_EXEC_LOG_DIR || 'not set',
+                                        }
+                                    }, null, 2),
+                                },
+                            ],
+                        };
+                    }
+                    case 'update_audit_config': {
+                        const parsed = UpdateAuditConfigSchema.parse(args);
+                        // Update audit configuration
+                        if (parsed.logLevel) {
+                            this.config.audit.logLevel = parsed.logLevel;
+                        }
+                        if (parsed.retention !== undefined) {
+                            this.config.audit.retention = parsed.retention;
+                        }
+                        if (parsed.logFile) {
+                            this.config.audit.logFile = parsed.logFile;
+                        }
+                        if (parsed.logDirectory) {
+                            this.config.audit.logDirectory = parsed.logDirectory;
+                        }
+                        // Note: Log file location change requires server restart to take effect
+                        const requiresRestart = parsed.logFile || parsed.logDirectory;
+                        return {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: JSON.stringify({
+                                        success: true,
+                                        message: 'Audit configuration updated',
+                                        updatedConfig: this.config.audit,
+                                        currentLogFile: this.auditLogger.getLogFilePath(),
+                                        note: requiresRestart ? 'Log file location changes require server restart to take effect' : undefined
                                     }, null, 2),
                                 },
                             ],

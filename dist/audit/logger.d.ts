@@ -7,6 +7,8 @@ export interface AuditConfig {
     enabled: boolean;
     logLevel: 'debug' | 'info' | 'warn' | 'error';
     retention: number;
+    logFile?: string;
+    logDirectory?: string;
     monitoring?: MonitoringConfig;
 }
 export interface LogCommandOptions {
@@ -47,6 +49,8 @@ export declare class AuditLogger {
     getAlerts(filters?: any): import("./monitoring").Alert[];
     acknowledgeAlert(alertId: string, acknowledgedBy: string): boolean;
     getAlertRules(): import("./monitoring").AlertRule[];
+    private resolveLogFilePath;
+    getLogFilePath(): string;
     private initializeLogging;
     private loadExistingLogs;
     private writeLogEntry;

@@ -249,6 +249,8 @@ export interface ServerConfig {
     enabled: boolean;
     logLevel: 'debug' | 'info' | 'warn' | 'error';
     retention: number;
+    logFile?: string; // Full path to log file
+    logDirectory?: string; // Directory for log files
     monitoring?: {
       enabled: boolean;
       alertRetention: number;

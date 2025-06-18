@@ -48,7 +48,7 @@ class AuditLogger {
     monitoringSystem;
     constructor(config) {
         this.config = config;
-        this.logFile = path.join(process.cwd(), '.mcp-exec-audit.log');
+        this.logFile = this.resolveLogFilePath(config);
         this.logs = [];
         if (config.enabled) {
             this.initializeLogging();
@@ -315,8 +315,41 @@ class AuditLogger {
     getAlertRules() {
         return this.monitoringSystem?.getAlertRules() || [];
     }
+    resolveLogFilePath(config) {
+        // Priority order:
+        // 1. Explicit logFile path in config
+        // 2. Environment variable MCP_EXEC_AUDIT_LOG
+        // 3. logDirectory + default filename
+        // 4. Environment variable MCP_EXEC_LOG_DIR + default filename
+        // 5. Current working directory + default filename
+        const defaultFilename = '.mcp-exec-audit.log';
+        // 1. Explicit log file path
+        if (config.logFile) {
+            return path.resolve(config.logFile);
+        }
+        // 2. Environment variable for full log file path
+        if (process.env.MCP_EXEC_AUDIT_LOG) {
+            return path.resolve(process.env.MCP_EXEC_AUDIT_LOG);
+        }
+        // 3. Config log directory + default filename
+        if (config.logDirectory) {
+            return path.join(path.resolve(config.logDirectory), defaultFilename);
+        }
+        // 4. Environment variable for log directory + default filename
+        if (process.env.MCP_EXEC_LOG_DIR) {
+            return path.join(path.resolve(process.env.MCP_EXEC_LOG_DIR), defaultFilename);
+        }
+        // 5. Default: current working directory + default filename
+        return path.join(process.cwd(), defaultFilename);
+    }
+    getLogFilePath() {
+        return this.logFile;
+    }
     async initializeLogging() {
         try {
+            // Ensure log directory exists
+            const logDir = path.dirname(this.logFile);
+            await fs.mkdir(logDir, { recursive: true });
             // Ensure log file exists
             await fs.access(this.logFile);
         }

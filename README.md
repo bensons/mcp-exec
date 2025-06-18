@@ -158,9 +158,38 @@ const config = {
   output: {
     enableAiOptimizations: true,
     maxOutputLength: 10000
+  },
+  audit: {
+    enabled: true,
+    logLevel: 'info',
+    retention: 30,
+    logDirectory: '/var/log/mcp-exec',  // Optional: custom log directory
+    logFile: '/var/log/mcp-exec/audit.log'  // Optional: custom log file path
   }
 };
 ```
+
+### Environment Variables
+
+Configure audit logging location using environment variables:
+
+```bash
+# Set custom audit log file path
+export MCP_EXEC_AUDIT_LOG="/var/log/mcp-exec/audit.log"
+
+# Or set custom log directory (uses default filename)
+export MCP_EXEC_LOG_DIR="/var/log/mcp-exec"
+
+# Start the server
+mcp-exec
+```
+
+**Priority order for audit log location:**
+1. `config.audit.logFile` - Explicit log file path in configuration
+2. `MCP_EXEC_AUDIT_LOG` - Environment variable for full log file path
+3. `config.audit.logDirectory` - Log directory in configuration + default filename
+4. `MCP_EXEC_LOG_DIR` - Environment variable for log directory + default filename
+5. Current working directory + `.mcp-exec-audit.log` (default)
 
 ## Available Tools
 

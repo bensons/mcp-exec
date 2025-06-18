@@ -200,6 +200,8 @@ export interface ServerConfig {
         enabled: boolean;
         logLevel: 'debug' | 'info' | 'warn' | 'error';
         retention: number;
+        logFile?: string;
+        logDirectory?: string;
         monitoring?: {
             enabled: boolean;
             alertRetention: number;
