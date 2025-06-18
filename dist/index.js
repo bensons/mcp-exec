@@ -59,6 +59,11 @@ const DEFAULT_CONFIG = {
         enabled: true,
         logLevel: 'info',
         retention: 30,
+        monitoring: {
+            enabled: true,
+            alertRetention: 7,
+            maxAlertsPerHour: 100,
+        },
     },
 };
 // Tool schemas
@@ -104,6 +109,26 @@ const GetPendingConfirmationsSchema = zod_1.z.object({});
 const GetIntentSummarySchema = zod_1.z.object({});
 const SuggestNextCommandsSchema = zod_1.z.object({
     command: zod_1.z.string().describe('Current command to get suggestions for'),
+});
+const GenerateAuditReportSchema = zod_1.z.object({
+    startDate: zod_1.z.string().describe('Start date for report (ISO string)'),
+    endDate: zod_1.z.string().describe('End date for report (ISO string)'),
+    reportType: zod_1.z.enum(['standard', 'compliance']).optional().describe('Type of report to generate'),
+});
+const ExportLogsSchema = zod_1.z.object({
+    format: zod_1.z.enum(['json', 'csv', 'xml']).describe('Export format'),
+    startDate: zod_1.z.string().optional().describe('Start date filter (ISO string)'),
+    endDate: zod_1.z.string().optional().describe('End date filter (ISO string)'),
+    sessionId: zod_1.z.string().optional().describe('Filter by session ID'),
+});
+const GetAlertsSchema = zod_1.z.object({
+    severity: zod_1.z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Filter by severity'),
+    acknowledged: zod_1.z.boolean().optional().describe('Filter by acknowledgment status'),
+    limit: zod_1.z.number().optional().describe('Maximum number of alerts to return'),
+});
+const AcknowledgeAlertSchema = zod_1.z.object({
+    alertId: zod_1.z.string().describe('Alert ID to acknowledge'),
+    acknowledgedBy: zod_1.z.string().describe('User acknowledging the alert'),
 });
 class MCPShellServer {
     server;
@@ -269,6 +294,57 @@ class MCPShellServer {
                                 command: { type: 'string', description: 'Current command to get suggestions for' },
                             },
                             required: ['command'],
+                        },
+                    },
+                    {
+                        name: 'generate_audit_report',
+                        description: 'Generate comprehensive audit or compliance report',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                startDate: { type: 'string', description: 'Start date for report (ISO string)' },
+                                endDate: { type: 'string', description: 'End date for report (ISO string)' },
+                                reportType: { type: 'string', enum: ['standard', 'compliance'], description: 'Type of report to generate' },
+                            },
+                            required: ['startDate', 'endDate'],
+                        },
+                    },
+                    {
+                        name: 'export_logs',
+                        description: 'Export audit logs in various formats',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                format: { type: 'string', enum: ['json', 'csv', 'xml'], description: 'Export format' },
+                                startDate: { type: 'string', description: 'Start date filter (ISO string)' },
+                                endDate: { type: 'string', description: 'End date filter (ISO string)' },
+                                sessionId: { type: 'string', description: 'Filter by session ID' },
+                            },
+                            required: ['format'],
+                        },
+                    },
+                    {
+                        name: 'get_alerts',
+                        description: 'Get security and monitoring alerts',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                severity: { type: 'string', enum: ['low', 'medium', 'high', 'critical'], description: 'Filter by severity' },
+                                acknowledged: { type: 'boolean', description: 'Filter by acknowledgment status' },
+                                limit: { type: 'number', description: 'Maximum number of alerts to return' },
+                            },
+                        },
+                    },
+                    {
+                        name: 'acknowledge_alert',
+                        description: 'Acknowledge a security alert',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                alertId: { type: 'string', description: 'Alert ID to acknowledge' },
+                                acknowledgedBy: { type: 'string', description: 'User acknowledging the alert' },
+                            },
+                            required: ['alertId', 'acknowledgedBy'],
                         },
                     },
                 ],
@@ -510,6 +586,87 @@ class MCPShellServer {
                                         currentCommand: parsed.command,
                                         suggestions,
                                         count: suggestions.length
+                                    }, null, 2),
+                                },
+                            ],
+                        };
+                    }
+                    case 'generate_audit_report': {
+                        const parsed = GenerateAuditReportSchema.parse(args);
+                        const timeRange = {
+                            start: new Date(parsed.startDate),
+                            end: new Date(parsed.endDate),
+                        };
+                        let report;
+                        if (parsed.reportType === 'compliance') {
+                            report = await this.auditLogger.generateComplianceReport(timeRange);
+                        }
+                        else {
+                            report = await this.auditLogger.generateReport(timeRange);
+                        }
+                        return {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: JSON.stringify({
+                                        reportType: parsed.reportType || 'standard',
+                                        timeRange,
+                                        report
+                                    }, null, 2),
+                                },
+                            ],
+                        };
+                    }
+                    case 'export_logs': {
+                        const parsed = ExportLogsSchema.parse(args);
+                        const filters = {};
+                        if (parsed.startDate && parsed.endDate) {
+                            filters.timeRange = {
+                                start: new Date(parsed.startDate),
+                                end: new Date(parsed.endDate),
+                            };
+                        }
+                        if (parsed.sessionId) {
+                            filters.sessionId = parsed.sessionId;
+                        }
+                        const exportedData = await this.auditLogger.exportLogs(parsed.format, filters);
+                        return {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: exportedData,
+                                },
+                            ],
+                        };
+                    }
+                    case 'get_alerts': {
+                        const parsed = GetAlertsSchema.parse(args);
+                        const alerts = this.auditLogger.getAlerts(parsed);
+                        return {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: JSON.stringify({
+                                        alerts,
+                                        count: alerts.length,
+                                        filters: parsed
+                                    }, null, 2),
+                                },
+                            ],
+                        };
+                    }
+                    case 'acknowledge_alert': {
+                        const parsed = AcknowledgeAlertSchema.parse(args);
+                        const success = this.auditLogger.acknowledgeAlert(parsed.alertId, parsed.acknowledgedBy);
+                        return {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: JSON.stringify({
+                                        success,
+                                        alertId: parsed.alertId,
+                                        acknowledgedBy: parsed.acknowledgedBy,
+                                        message: success ? 'Alert acknowledged successfully' : 'Alert not found or already acknowledged'
                                     }, null, 2),
                                 },
                             ],

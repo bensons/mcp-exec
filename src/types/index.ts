@@ -249,5 +249,16 @@ export interface ServerConfig {
     enabled: boolean;
     logLevel: 'debug' | 'info' | 'warn' | 'error';
     retention: number;
+    monitoring?: {
+      enabled: boolean;
+      alertRetention: number;
+      maxAlertsPerHour: number;
+      webhookUrl?: string;
+      emailNotifications?: {
+        enabled: boolean;
+        recipients: string[];
+        smtpConfig?: any;
+      };
+    };
   };
 }

@@ -40,16 +40,22 @@ exports.AuditLogger = void 0;
 const fs = __importStar(require("fs/promises"));
 const path = __importStar(require("path"));
 const uuid_1 = require("uuid");
+const monitoring_1 = require("./monitoring");
 class AuditLogger {
     config;
     logFile;
     logs;
+    monitoringSystem;
     constructor(config) {
         this.config = config;
         this.logFile = path.join(process.cwd(), '.mcp-exec-audit.log');
         this.logs = [];
         if (config.enabled) {
             this.initializeLogging();
+        }
+        // Initialize monitoring if configured
+        if (config.monitoring) {
+            this.monitoringSystem = new monitoring_1.MonitoringSystem(config.monitoring);
         }
     }
     async logCommand(options) {
@@ -69,6 +75,10 @@ class AuditLogger {
         };
         await this.writeLogEntry(logEntry);
         this.logs.push(logEntry);
+        // Process monitoring alerts
+        if (this.monitoringSystem) {
+            await this.monitoringSystem.processLogEntry(logEntry);
+        }
         await this.enforceRetention();
     }
     async logError(options) {
@@ -183,6 +193,127 @@ class AuditLogger {
             topCommands,
             riskDistribution,
         };
+    }
+    async generateComplianceReport(timeRange) {
+        const logsInRange = await this.queryLogs({ timeRange });
+        // Compliance metrics
+        const privilegedCommands = logsInRange.filter(log => log.command.toLowerCase().includes('sudo') ||
+            log.command.toLowerCase().includes('su '));
+        const fileModifications = logsInRange.filter(log => log.result.metadata.commandType === 'file-operation' &&
+            (log.command.includes('rm ') || log.command.includes('mv ') || log.command.includes('cp ')));
+        const networkOperations = logsInRange.filter(log => log.result.metadata.commandType === 'network-operation');
+        const failedSecurityChecks = logsInRange.filter(log => !log.securityCheck.allowed);
+        // User activity analysis
+        const userActivity = new Map();
+        logsInRange.forEach(log => {
+            if (log.userId) {
+                userActivity.set(log.userId, (userActivity.get(log.userId) || 0) + 1);
+            }
+        });
+        // Session analysis
+        const sessionActivity = new Map();
+        logsInRange.forEach(log => {
+            sessionActivity.set(log.sessionId, (sessionActivity.get(log.sessionId) || 0) + 1);
+        });
+        return {
+            timeRange,
+            summary: {
+                totalCommands: logsInRange.length,
+                privilegedCommands: privilegedCommands.length,
+                fileModifications: fileModifications.length,
+                networkOperations: networkOperations.length,
+                securityViolations: failedSecurityChecks.length,
+            },
+            userActivity: Array.from(userActivity.entries()).map(([user, count]) => ({ user, count })),
+            sessionActivity: Array.from(sessionActivity.entries()).map(([session, count]) => ({ session, count })),
+            securityEvents: failedSecurityChecks.map(log => ({
+                timestamp: log.timestamp,
+                command: log.command,
+                reason: log.securityCheck.reason,
+                riskLevel: log.securityCheck.riskLevel,
+                userId: log.userId,
+                sessionId: log.sessionId,
+            })),
+            privilegedOperations: privilegedCommands.map(log => ({
+                timestamp: log.timestamp,
+                command: log.command,
+                userId: log.userId,
+                sessionId: log.sessionId,
+                success: log.result.summary.success,
+            })),
+        };
+    }
+    async exportLogs(format, filters) {
+        const logs = await this.queryLogs(filters || {});
+        switch (format) {
+            case 'json':
+                return JSON.stringify(logs, null, 2);
+            case 'csv':
+                return this.exportToCsv(logs);
+            case 'xml':
+                return this.exportToXml(logs);
+            default:
+                throw new Error(`Unsupported export format: ${format}`);
+        }
+    }
+    exportToCsv(logs) {
+        const headers = [
+            'timestamp',
+            'sessionId',
+            'userId',
+            'command',
+            'exitCode',
+            'riskLevel',
+            'success',
+            'executionTime',
+            'commandType'
+        ];
+        const rows = logs.map(log => [
+            log.timestamp.toISOString(),
+            log.sessionId,
+            log.userId || '',
+            `"${log.command.replace(/"/g, '""')}"`,
+            log.result.exitCode,
+            log.securityCheck.riskLevel,
+            log.result.summary.success,
+            log.result.metadata.executionTime,
+            log.result.metadata.commandType
+        ]);
+        return [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
+    }
+    exportToXml(logs) {
+        const xmlLogs = logs.map(log => `
+    <log>
+      <timestamp>${log.timestamp.toISOString()}</timestamp>
+      <sessionId>${log.sessionId}</sessionId>
+      <userId>${log.userId || ''}</userId>
+      <command><![CDATA[${log.command}]]></command>
+      <exitCode>${log.result.exitCode}</exitCode>
+      <riskLevel>${log.securityCheck.riskLevel}</riskLevel>
+      <success>${log.result.summary.success}</success>
+      <executionTime>${log.result.metadata.executionTime}</executionTime>
+      <commandType>${log.result.metadata.commandType}</commandType>
+    </log>`).join('');
+        return `<?xml version="1.0" encoding="UTF-8"?>
+<auditLogs>
+  <exportDate>${new Date().toISOString()}</exportDate>
+  <totalEntries>${logs.length}</totalEntries>
+  <logs>${xmlLogs}
+  </logs>
+</auditLogs>`;
+    }
+    // Monitoring system access methods
+    getMonitoringSystem() {
+        return this.monitoringSystem;
+    }
+    getAlerts(filters) {
+        return this.monitoringSystem?.getAlerts(filters) || [];
+    }
+    acknowledgeAlert(alertId, acknowledgedBy) {
+        return this.monitoringSystem?.acknowledgeAlert(alertId, acknowledgedBy) || false;
+    }
+    getAlertRules() {
+        return this.monitoringSystem?.getAlertRules() || [];
     }
     async initializeLogging() {
         try {
