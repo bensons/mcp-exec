@@ -107,7 +107,7 @@ class MonitoringSystem {
             session: alert.logEntry.sessionId,
         };
         // In a real implementation, use fetch or axios
-        console.log('Webhook notification:', JSON.stringify(payload, null, 2));
+        console.error('Webhook notification:', JSON.stringify(payload, null, 2));
     }
     async sendEmailNotification(alert) {
         if (!this.config.emailNotifications?.enabled)
@@ -115,7 +115,7 @@ class MonitoringSystem {
         const subject = `Security Alert: ${alert.ruleName} (${alert.severity.toUpperCase()})`;
         const body = alert.message;
         // In a real implementation, use nodemailer or similar
-        console.log('Email notification:', { subject, body });
+        console.error('Email notification:', { subject, body });
     }
     acknowledgeAlert(alertId, acknowledgedBy) {
         const alert = this.alerts.find(a => a.id === alertId);

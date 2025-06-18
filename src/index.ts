@@ -884,12 +884,12 @@ if (require.main === module) {
 
   // Graceful shutdown
   process.on('SIGINT', () => {
-    console.log('Shutting down MCP Shell Server...');
+    console.error('Shutting down MCP Shell Server...');
     process.exit(0);
   });
 
   process.on('SIGTERM', () => {
-    console.log('Shutting down MCP Shell Server...');
+    console.error('Shutting down MCP Shell Server...');
     process.exit(0);
   });
 }

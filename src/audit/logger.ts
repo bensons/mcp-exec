@@ -468,17 +468,17 @@ export class AuditLogger {
       // Load existing logs
       await this.loadExistingLogs();
 
-      // Log successful initialization
-      console.log(`✅ Audit logging initialized: ${this.logFile}`);
+      // Log successful initialization to stderr (not stdout to avoid interfering with MCP protocol)
+      console.error(`✅ Audit logging initialized: ${this.logFile}`);
 
     } catch (error) {
       // If we can't write to the configured location, try fallback
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.warn(`⚠️  Failed to initialize audit log at ${this.logFile}: ${errorMessage}`);
+      console.error(`⚠️  Failed to initialize audit log at ${this.logFile}: ${errorMessage}`);
 
       // Try fallback location
       const fallbackPath = this.getFallbackLogPath();
-      console.log(`🔄 Attempting fallback location: ${fallbackPath}`);
+      console.error(`🔄 Attempting fallback location: ${fallbackPath}`);
 
       this.logFile = fallbackPath;
 
@@ -487,11 +487,11 @@ export class AuditLogger {
         await fs.mkdir(fallbackDir, { recursive: true });
         await fs.writeFile(this.logFile, '');
         await this.loadExistingLogs();
-        console.log(`✅ Audit logging initialized at fallback location: ${this.logFile}`);
+        console.error(`✅ Audit logging initialized at fallback location: ${this.logFile}`);
       } catch (fallbackError) {
         const fallbackErrorMessage = fallbackError instanceof Error ? fallbackError.message : 'Unknown error';
         console.error(`❌ Failed to initialize audit logging even at fallback location: ${fallbackErrorMessage}`);
-        console.log(`🚫 Audit logging will be disabled for this session`);
+        console.error(`🚫 Audit logging will be disabled for this session`);
         this.config.enabled = false;
       }
     }

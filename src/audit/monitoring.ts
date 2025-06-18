@@ -158,7 +158,7 @@ export class MonitoringSystem {
     };
 
     // In a real implementation, use fetch or axios
-    console.log('Webhook notification:', JSON.stringify(payload, null, 2));
+    console.error('Webhook notification:', JSON.stringify(payload, null, 2));
   }
 
   private async sendEmailNotification(alert: Alert): Promise<void> {
@@ -168,7 +168,7 @@ export class MonitoringSystem {
     const body = alert.message;
 
     // In a real implementation, use nodemailer or similar
-    console.log('Email notification:', { subject, body });
+    console.error('Email notification:', { subject, body });
   }
 
   acknowledgeAlert(alertId: string, acknowledgedBy: string): boolean {
