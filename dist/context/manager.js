@@ -135,6 +135,31 @@ class ContextManager {
         }
         return [...this.fileSystemChanges];
     }
+    async setWorkingDirectory(directory) {
+        try {
+            const resolvedDir = path.resolve(directory);
+            const stats = await fs.stat(resolvedDir);
+            if (stats.isDirectory()) {
+                this.currentDirectory = resolvedDir;
+                return true;
+            }
+        }
+        catch (error) {
+            // Directory doesn't exist or not accessible
+        }
+        return false;
+    }
+    getSessionId() {
+        return this.sessionId;
+    }
+    async clearHistory() {
+        this.commandHistory = [];
+        this.outputCache.clear();
+        this.fileSystemChanges = [];
+        if (this.config.sessionPersistence) {
+            await this.persistSession();
+        }
+    }
     async updateWorkingDirectory(command, currentWorkingDir, output) {
         // Check if command was a directory change
         const cdMatch = command.match(/^cd\s+(.+)$/i);
@@ -142,7 +167,21 @@ class ContextManager {
             const targetDir = cdMatch[1].trim().replace(/['"]/g, '');
             try {
                 let newDir;
-                if (path.isAbsolute(targetDir)) {
+                // Handle special directory shortcuts
+                if (targetDir === '~') {
+                    newDir = process.env.HOME || process.env.USERPROFILE || currentWorkingDir;
+                }
+                else if (targetDir === '-') {
+                    // Previous directory - for now, just keep current
+                    return;
+                }
+                else if (targetDir === '..') {
+                    newDir = path.dirname(currentWorkingDir);
+                }
+                else if (targetDir === '.') {
+                    newDir = currentWorkingDir;
+                }
+                else if (path.isAbsolute(targetDir)) {
                     newDir = targetDir;
                 }
                 else {
@@ -158,6 +197,12 @@ class ContextManager {
                 // Directory doesn't exist or not accessible, keep current directory
             }
         }
+        // Also check for pushd/popd commands
+        const pushdMatch = command.match(/^pushd\s+(.+)$/i);
+        if (pushdMatch && output.exitCode === 0) {
+            const targetDir = pushdMatch[1].trim().replace(/['"]/g, '');
+            await this.setWorkingDirectory(path.resolve(currentWorkingDir, targetDir));
+        }
     }
     updateEnvironmentVariables(environment) {
         // Update environment variables that may have changed
@@ -170,12 +215,29 @@ class ContextManager {
             this.extractEnvironmentChanges(entry.command);
         }
     }
+    extractEnvironmentChangesFromCommand(command) {
+        const changes = {};
+        // Extract environment variables from the current command
+        this.extractEnvironmentChanges(command);
+        // Return the changes that were made
+        return changes;
+    }
     extractEnvironmentChanges(command) {
-        // Unix-style export
+        // Unix-style export with value
         const exportMatch = command.match(/export\s+(\w+)=(.+)/i);
         if (exportMatch) {
             const [, key, value] = exportMatch;
             this.environmentVariables.set(key, value.replace(/['"]/g, ''));
+            return;
+        }
+        // Unix-style export without value (exports existing variable)
+        const exportOnlyMatch = command.match(/export\s+(\w+)$/i);
+        if (exportOnlyMatch) {
+            const [, key] = exportOnlyMatch;
+            // Keep existing value if it exists
+            if (!this.environmentVariables.has(key) && process.env[key]) {
+                this.environmentVariables.set(key, process.env[key]);
+            }
             return;
         }
         // Windows-style set
@@ -185,11 +247,23 @@ class ContextManager {
             this.environmentVariables.set(key, value.replace(/['"]/g, ''));
             return;
         }
-        // Inline variable assignment
+        // Inline variable assignment (VAR=value command)
         const inlineMatch = command.match(/^(\w+)=(.+?)\s+/);
         if (inlineMatch) {
             const [, key, value] = inlineMatch;
             this.environmentVariables.set(key, value.replace(/['"]/g, ''));
+            return;
+        }
+        // Multiple inline assignments
+        const multipleInlineMatches = command.match(/^((?:\w+=\S+\s+)+)/);
+        if (multipleInlineMatches) {
+            const assignments = multipleInlineMatches[1];
+            const assignmentPattern = /(\w+)=(\S+)/g;
+            let match;
+            while ((match = assignmentPattern.exec(assignments)) !== null) {
+                const [, key, value] = match;
+                this.environmentVariables.set(key, value.replace(/['"]/g, ''));
+            }
         }
     }
     async trackFileSystemChanges(command, workingDirectory, commandId) {

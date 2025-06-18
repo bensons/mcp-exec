@@ -75,6 +75,18 @@ const GetHistorySchema = z.object({
   filter: z.string().optional().describe('Filter commands by pattern'),
 });
 
+const SetWorkingDirectorySchema = z.object({
+  directory: z.string().describe('Directory path to set as working directory'),
+});
+
+const ClearHistorySchema = z.object({
+  confirm: z.boolean().optional().describe('Confirm clearing history'),
+});
+
+const GetFileSystemChangesSchema = z.object({
+  since: z.string().optional().describe('ISO date string to filter changes since'),
+});
+
 class MCPShellServer {
   private server: Server;
   private shellExecutor: ShellExecutor;
@@ -155,6 +167,37 @@ class MCPShellServer {
               },
             },
           },
+          {
+            name: 'set_working_directory',
+            description: 'Set the current working directory for subsequent commands',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                directory: { type: 'string', description: 'Directory path to set as working directory' },
+              },
+              required: ['directory'],
+            },
+          },
+          {
+            name: 'clear_history',
+            description: 'Clear command history and session data',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                confirm: { type: 'boolean', description: 'Confirm clearing history' },
+              },
+            },
+          },
+          {
+            name: 'get_filesystem_changes',
+            description: 'Get tracked file system changes from command executions',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                since: { type: 'string', description: 'ISO date string to filter changes since' },
+              },
+            },
+          },
         ],
       };
     });
@@ -196,12 +239,76 @@ class MCPShellServer {
           case 'get_history': {
             const parsed = GetHistorySchema.parse(args);
             const history = await this.contextManager.getHistory(parsed.limit, parsed.filter);
-            
+
             return {
               content: [
                 {
                   type: 'text',
                   text: JSON.stringify(history, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'set_working_directory': {
+            const parsed = SetWorkingDirectorySchema.parse(args);
+            const success = await this.contextManager.setWorkingDirectory(parsed.directory);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success,
+                    directory: success ? parsed.directory : 'Failed to set directory',
+                    message: success ? 'Working directory updated' : 'Directory does not exist or is not accessible'
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'clear_history': {
+            const parsed = ClearHistorySchema.parse(args);
+            if (parsed.confirm !== false) {
+              await this.contextManager.clearHistory();
+
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      success: true,
+                      message: 'Command history and session data cleared'
+                    }, null, 2),
+                  },
+                ],
+              };
+            } else {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      success: false,
+                      message: 'History clearing cancelled - set confirm to true to proceed'
+                    }, null, 2),
+                  },
+                ],
+              };
+            }
+          }
+
+          case 'get_filesystem_changes': {
+            const parsed = GetFileSystemChangesSchema.parse(args);
+            const since = parsed.since ? new Date(parsed.since) : undefined;
+            const changes = await this.contextManager.getFileSystemChanges(since);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(changes, null, 2),
                 },
               ],
             };
@@ -227,9 +334,12 @@ class MCPShellServer {
   }
 
   async start(): Promise<void> {
+    // Load previous session if configured
+    await this.contextManager.loadSession();
+
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    
+
     // Log server start
     await this.auditLogger.log({
       level: 'info',

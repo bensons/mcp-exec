@@ -29,8 +29,12 @@ export declare class ContextManager {
     getHistory(limit?: number, filter?: string): Promise<CommandHistoryEntry[]>;
     getOutput(commandId: string): Promise<CommandOutput | undefined>;
     getFileSystemChanges(since?: Date): Promise<FileSystemDiff[]>;
+    setWorkingDirectory(directory: string): Promise<boolean>;
+    getSessionId(): string;
+    clearHistory(): Promise<void>;
     private updateWorkingDirectory;
     private updateEnvironmentVariables;
+    private extractEnvironmentChangesFromCommand;
     private extractEnvironmentChanges;
     private trackFileSystemChanges;
     private findRelatedCommands;
