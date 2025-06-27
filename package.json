@@ -11,10 +11,13 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "watch": "nodemon --exec tsx src/index.ts",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node tests/test-build.js",
+    "test:server": "node tests/test-mcp-server.js",
+    "test:ssh": "node tests/test-ssh-comprehensive.js",
+    "test:lifecycle": "node tests/test-lifecycle.js",
+    "test:all": "npm run test && npm run test:server && npm run test:ssh && npm run test:lifecycle",
     "clean": "rm -rf dist",
-    "setup-claude": "node setup-claude-desktop.js",
-    "test-server": "node test-mcp-server.js",
+    "setup-claude": "node tests/setup-claude-desktop.js",
     "postbuild": "chmod +x dist/index.js"
   },
   "repository": {

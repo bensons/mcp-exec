@@ -12,7 +12,7 @@ class ImprovedSSHTester {
     this.server = null;
     this.messageId = 1;
     this.responses = new Map();
-    this.serverPath = path.resolve(__dirname, 'dist', 'index.js');
+    this.serverPath = path.resolve(__dirname, '..', 'index.js');
   }
 
   async startServer() {

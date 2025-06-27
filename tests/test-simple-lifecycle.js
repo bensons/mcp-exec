@@ -10,7 +10,7 @@ const path = require('path');
 async function testBasicLifecycle() {
   console.log('🧪 Testing Basic MCP Server Lifecycle\n');
 
-  const serverPath = path.join(__dirname, 'dist', 'index.js');
+  const serverPath = path.join(__dirname, '..', 'index.js');
   
   console.log('📡 Test: Basic startup and SIGTERM shutdown');
   

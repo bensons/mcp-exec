@@ -31,6 +31,7 @@ logs/
 .augment/*
 .claude/
 .claude/*
+CLAUDE.md
 
 # IDE and editor files
 .vscode/

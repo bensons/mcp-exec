@@ -9,7 +9,7 @@ const path = require('path');
 
 function testMCPServer() {
   return new Promise((resolve, reject) => {
-    const serverPath = path.resolve(__dirname, 'dist', 'index.js');
+    const serverPath = path.resolve(__dirname, '..', 'dist', 'index.js');
     
     console.log('🧪 Testing MCP server functionality...');
     console.log(`Server path: ${serverPath}`);

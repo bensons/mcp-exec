@@ -9,7 +9,7 @@ const path = require('path');
 
 class LifecycleTest {
   constructor() {
-    this.serverPath = path.join(__dirname, 'dist', 'index.js');
+    this.serverPath = path.join(__dirname, '..', 'index.js');
     this.tests = [];
     this.results = [];
   }
