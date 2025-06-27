@@ -28,7 +28,10 @@ const DEFAULT_CONFIG: ServerConfig = {
   security: {
     level: 'moderate',
     confirmDangerous: true,
-    allowedDirectories: [process.cwd()],
+    allowedDirectories: [
+      process.cwd(),
+      '/tmp',
+    ].filter(dir => dir !== ''),
     blockedCommands: [
       'rm -rf /',
       'format',
