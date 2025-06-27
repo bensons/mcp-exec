@@ -1,86 +1,88 @@
-# MCP-Exec: Enhanced Shell Command Execution Server
+# MCP-Exec
 
-A sophisticated Model Context Protocol (MCP) server that provides secure, context-aware shell command execution with advanced AI optimizations, comprehensive audit logging, and intelligent monitoring.
+A secure, context-aware Model Context Protocol (MCP) server for shell command execution with AI optimizations.
 
-## Features
+## Overview
 
-### 🔒 Advanced Security
-- **Multi-level security policies**: Strict, moderate, and permissive modes
-- **Command validation**: Pattern-based dangerous command detection
-- **Sandboxing**: Configurable network and file system access controls
-- **Resource limits**: Memory, file size, and process count restrictions
-- **Confirmation system**: Interactive approval for high-risk operations
+**MCP-Exec** is a TypeScript-based MCP server that provides intelligent shell command execution capabilities for AI assistants like Claude Desktop, Claude Code, and Augment Code. It combines multi-layered security, context preservation, and enhanced output formatting to create a powerful tool for AI-assisted development and system administration.
 
-### 🧠 AI Optimizations
-- **Intelligent output processing**: Automatic detection and parsing of JSON, YAML, CSV
-- **Command intent tracking**: Understands the purpose and context of commands
-- **Smart suggestions**: AI-powered next command recommendations
-- **Output enhancement**: Command-specific formatting for better readability
-- **Noise reduction**: Removes progress indicators and unnecessary output
+The server implements the Model Context Protocol specification with STDIO transport, providing 16 comprehensive tools for secure shell interaction while maintaining session state and providing AI-optimized output formatting.
 
-### 📊 Context Preservation
-- **Session persistence**: Maintains state across server restarts
-- **Working directory tracking**: Intelligent cd command handling
-- **Environment variables**: Persistent environment state management
-- **Command history**: Relationship tracking between commands
-- **File system monitoring**: Tracks changes made by commands
+## ✨ Key Features
 
-### 📋 Comprehensive Audit & Compliance
-- **Immutable audit logs**: Detailed logging of all operations
-- **Real-time monitoring**: Configurable alert rules and notifications
-- **Compliance reporting**: Automated security and usage reports
-- **Log export**: Multiple formats (JSON, CSV, XML)
-- **Alert management**: Acknowledgment and tracking system
+### 🔒 Multi-layered Security
 
-## Installation
+- **Configurable Security Levels**: Strict, moderate, and permissive modes
+- **Command Validation**: Pattern-based dangerous command detection and blocking
+- **Interactive Confirmation**: Approval prompts for high-risk operations
+- **Resource Limits**: Memory, file size, and process restrictions
+- **Directory Controls**: Configurable allowed/blocked directory access
+- **Sandboxing**: Isolated execution environments with restricted permissions
+
+### 🧠 Context Preservation
+
+- **Session Management**: Maintains state across multiple AI interactions
+- **Working Directory Tracking**: Preserves directory changes between commands
+- **Environment Variables**: Persistent environment state management
+- **Command History**: Detailed history with relationships and AI context
+- **File System Monitoring**: Tracks changes and side effects
+
+### 🎨 Enhanced Output Formatting
+
+- **Rich Markdown Display**: Beautiful formatting optimized for Claude Desktop
+- **Structured Data Parsing**: Automatic detection of JSON, YAML, CSV formats
+- **Visual Indicators**: Icons, emojis, and color coding for quick recognition
+- **AI-Optimized Summaries**: Intelligent output summarization and suggestions
+- **Error Categorization**: Clear error messages with actionable suggestions
+
+### 🌍 Cross-platform Support
+
+- **Windows, macOS, Linux**: Full cross-platform compatibility
+- **Shell Detection**: Automatic platform-specific shell selection
+- **Path Handling**: Proper path resolution across operating systems
+
+### 📋 Comprehensive Audit System
+
+- **Immutable Logging**: Cryptographically signed audit trails
+- **Real-time Monitoring**: Live monitoring with configurable alerts
+- **Multiple Export Formats**: JSON, CSV, XML export capabilities
+- **Compliance Reporting**: Detailed audit reports for security compliance
+- **Privacy Controls**: Configurable sensitive data redaction
+
+## 🚀 Quick Start
+
+### Installation
 
 ```bash
-npm install -g mcp-exec
-```
-
-Or clone and build from source:
-
-```bash
+# Clone the repository
 git clone https://github.com/bensons/mcp-exec.git
 cd mcp-exec
+
+# Install dependencies
 npm install
+
+# Build the project
 npm run build
-npm run setup-claude  # Automatically configure Claude Desktop
 ```
 
-### Automated Setup
+### Configure Claude Desktop
 
-For the easiest setup experience:
+The automated setup script will configure Claude Desktop for you:
 
 ```bash
-# Clone and build
-git clone https://github.com/bensons/mcp-exec.git
-cd mcp-exec
-npm install
-npm run build
-
-# Automatically configure Claude Desktop
 npm run setup-claude
-
-# Test the server (optional)
-npm run test-server
 ```
 
-This will automatically:
-1. Build the TypeScript project
-2. Create the appropriate Claude Desktop configuration file
-3. Set up reasonable default security settings
-4. Verify the server works correctly
+This script:
 
-## Quick Start
+- Detects your operating system (macOS, Linux, Windows)
+- Locates the Claude Desktop configuration file
+- Adds the MCP-Exec server configuration
+- Sets up default security settings
 
-### Claude Desktop Integration
+### Manual Configuration
 
-To use this MCP server with Claude Desktop, add the following configuration to your Claude Desktop settings:
-
-#### macOS/Linux Configuration
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `~/.config/claude/claude_desktop_config.json` (Linux):
+If you prefer manual setup, add this to your Claude Desktop configuration:
 
 ```json
 {
@@ -89,180 +91,264 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
       "command": "node",
       "args": ["/path/to/mcp-exec/dist/index.js"],
       "env": {
-        "MCP_EXEC_SECURITY_LEVEL": "moderate"
+        "MCP_EXEC_SECURITY_LEVEL": "moderate",
+        "MCP_EXEC_CONFIRM_DANGEROUS": "true",
+        "MCP_EXEC_AUDIT_ENABLED": "true"
       }
     }
   }
 }
 ```
 
-#### Windows Configuration
+### Start Using
 
-Add to `%APPDATA%\Claude\claude_desktop_config.json`:
+1. **Restart Claude Desktop** to load the MCP server
+2. **Test the integration** by asking Claude to execute a simple command
+3. **Explore the tools** - try asking Claude to show command history or change directories
 
-```json
-{
-  "mcpServers": {
-    "mcp-exec": {
-      "command": "node",
-      "args": ["C:\\path\\to\\mcp-exec\\dist\\index.js"],
-      "env": {
-        "MCP_EXEC_SECURITY_LEVEL": "moderate"
-      }
-    }
-  }
-}
-```
+## 🛠️ Available Tools
 
-#### Using Global Installation
-
-If you installed globally with `npm install -g mcp-exec`:
-
-```json
-{
-  "mcpServers": {
-    "mcp-exec": {
-      "command": "mcp-exec"
-    }
-  }
-}
-```
-
-### Basic Usage
-
-Start the MCP server directly (for testing):
-
-```bash
-node dist/index.js
-```
-
-The server communicates via STDIO and implements the Model Context Protocol specification.
-
-### Configuration
-
-Create a configuration file or set environment variables:
-
-```typescript
-const config = {
-  security: {
-    level: 'moderate',
-    confirmDangerous: true,
-    allowedDirectories: ['/home/user/projects'],
-    timeout: 300000
-  },
-  context: {
-    preserveWorkingDirectory: true,
-    sessionPersistence: true,
-    maxHistorySize: 1000
-  },
-  output: {
-    enableAiOptimizations: true,
-    maxOutputLength: 10000
-  },
-  audit: {
-    enabled: true,
-    logLevel: 'info',
-    retention: 30,
-    logDirectory: '/var/log/mcp-exec',  // Optional: custom log directory
-    logFile: '/var/log/mcp-exec/audit.log'  // Optional: custom log file path
-  }
-};
-```
-
-### Environment Variables
-
-Configure audit logging location using environment variables:
-
-```bash
-# Set custom audit log file path
-export MCP_EXEC_AUDIT_LOG="/var/log/mcp-exec/audit.log"
-
-# Or set custom log directory (uses default filename)
-export MCP_EXEC_LOG_DIR="/var/log/mcp-exec"
-
-# Start the server
-mcp-exec
-```
-
-**Priority order for audit log location:**
-1. `config.audit.logFile` - Explicit log file path in configuration
-2. `MCP_EXEC_AUDIT_LOG` - Environment variable for full log file path
-3. `config.audit.logDirectory` - Log directory in configuration + default filename
-4. `MCP_EXEC_LOG_DIR` - Environment variable for log directory + default filename
-5. Current working directory + `.mcp-exec-audit.log` (default)
-
-## Available Tools
-
-Once configured with Claude Desktop, you'll have access to these MCP tools:
+The server provides 16 comprehensive MCP tools organized into categories:
 
 ### Core Execution Tools
-- **`execute_command`** - Execute shell commands with security validation
-- **`confirm_command`** - Confirm execution of dangerous commands
-- **`get_context`** - Get current execution context and environment
-- **`set_working_directory`** - Change the working directory for subsequent commands
 
-### History and Context Tools
-- **`get_history`** - View command execution history with filtering
-- **`clear_history`** - Clear command history and session data
-- **`get_filesystem_changes`** - Track file system changes from commands
+- **`execute_command`** - Execute shell commands with full security validation
+- **`confirm_command`** - Interactive confirmation system for dangerous operations
 
-### Security Tools
+### Context Management Tools
+
+- **`get_context`** - Retrieve current execution context and environment details
+- **`get_history`** - View formatted command execution history with AI context
+- **`set_working_directory`** - Change and persist working directory across sessions
+
+### Security Management Tools
+
 - **`update_security_config`** - Modify security settings and policies
-- **`get_security_status`** - View current security configuration
-- **`get_pending_confirmations`** - List commands awaiting confirmation
+- **`get_security_status`** - View current security configuration and restrictions
 
-### AI Enhancement Tools
-- **`get_intent_summary`** - Get AI insights about command patterns
-- **`suggest_next_commands`** - Get AI-suggested follow-up commands
+### AI Assistance Tools
+
+- **`get_intent_summary`** - Analyze command patterns and user intent
+- **`suggest_next_commands`** - AI-powered suggestions for follow-up commands
 
 ### Audit and Monitoring Tools
-- **`generate_audit_report`** - Create comprehensive audit reports
-- **`export_logs`** - Export audit logs in various formats
-- **`get_alerts`** - View security and monitoring alerts
-- **`acknowledge_alert`** - Acknowledge security alerts
 
-## Security Levels
+- **`generate_audit_report`** - Create detailed audit reports with filtering
+- **`export_logs`** - Export audit logs in multiple formats (JSON, CSV, XML)
+- **`get_alerts`** - View security alerts and operational warnings
 
-The server supports three security levels:
+### Additional Tools
 
-### Strict Mode
-- Blocks all potentially dangerous commands
-- Requires explicit confirmation for file operations
-- Restricts directory access to configured paths
-- Maximum security with minimal convenience
+- **`get_environment`** - View environment variables and system information
+- **`monitor_resources`** - Real-time resource usage monitoring
+- **`validate_command`** - Pre-validate commands without execution
+- **`get_suggestions`** - Context-aware command suggestions
 
-### Moderate Mode (Default)
-- Allows most commands with confirmation for dangerous ones
-- Balanced security and usability
-- Suitable for most development workflows
+## ⚙️ Configuration
 
-### Permissive Mode
-- Minimal restrictions on command execution
-- Only blocks extremely dangerous operations
-- Maximum convenience with basic safety nets
+### Security Levels
 
-## Environment Variables
+Choose the appropriate security level for your use case:
+
+#### 🔒 Strict Mode
+
+- **Use Case**: Production environments, shared systems
+- **Behavior**: Blocks most dangerous operations, requires explicit approval
+- **Commands Blocked**: File deletions, system modifications, network operations
+- **Confirmation**: Required for all medium and high-risk commands
+
+#### ⚖️ Moderate Mode (Default)
+
+- **Use Case**: Development environments, personal systems
+- **Behavior**: Balanced security with confirmation prompts
+- **Commands Blocked**: Only highly dangerous operations (rm -rf /, format, etc.)
+- **Confirmation**: Required for high-risk commands only
+
+#### 🔓 Permissive Mode
+
+- **Use Case**: Advanced users, isolated environments
+- **Behavior**: Minimal restrictions, maximum flexibility
+- **Commands Blocked**: Only system-destroying operations
+- **Confirmation**: Optional, can be disabled
+
+### Environment Variables
 
 Configure the server behavior using environment variables:
 
 ```bash
-# Security level (strict, moderate, permissive)
-MCP_EXEC_SECURITY_LEVEL=moderate
+# Security Configuration
+MCP_EXEC_SECURITY_LEVEL=moderate          # strict|moderate|permissive
+MCP_EXEC_CONFIRM_DANGEROUS=true           # Enable confirmation prompts
+MCP_EXEC_BLOCKED_COMMANDS="rm -rf /,format" # Custom blocked commands
+MCP_EXEC_ALLOWED_DIRECTORIES="~/projects,/tmp" # Allowed directories
 
-# Enable/disable dangerous command confirmation
-MCP_EXEC_CONFIRM_DANGEROUS=true
+# Output Configuration
+MCP_EXEC_MAX_OUTPUT_LENGTH=10000          # Maximum output length
+MCP_EXEC_FORMAT_OUTPUT=true               # Enable enhanced formatting
+MCP_EXEC_STRIP_ANSI=true                  # Remove ANSI color codes
 
-# Maximum command timeout in milliseconds
-MCP_EXEC_TIMEOUT=300000
+# Audit Configuration
+MCP_EXEC_AUDIT_ENABLED=true               # Enable audit logging
+MCP_EXEC_AUDIT_LEVEL=info                 # debug|info|warn|error
+MCP_EXEC_AUDIT_RETENTION=30               # Days to retain logs
 
-# Maximum output length in characters
-MCP_EXEC_MAX_OUTPUT=10000
-
-# Enable AI optimizations
-MCP_EXEC_AI_OPTIMIZATIONS=true
+# Performance Configuration
+MCP_EXEC_COMMAND_TIMEOUT=300000           # Command timeout (ms)
+MCP_EXEC_MAX_MEMORY=1024                  # Memory limit (MB)
+MCP_EXEC_MAX_PROCESSES=10                 # Process limit
 ```
 
-## Troubleshooting
+### Runtime Configuration
+
+You can also modify settings at runtime using the `update_security_config` tool:
+
+```javascript
+// Example: Update security level
+{
+  "securityLevel": "strict",
+  "confirmDangerous": true,
+  "blockedCommands": ["rm -rf", "format", "dd if="],
+  "allowedDirectories": ["/home/user/safe", "/tmp"]
+}
+```
+
+## 🏗️ Development
+
+### Build Commands
+
+```bash
+npm run build        # Compile TypeScript to JavaScript
+npm run dev          # Run in development mode with tsx
+npm run watch        # Auto-reload development server with nodemon
+npm run start        # Run the compiled server from dist/
+npm run clean        # Remove the dist directory
+```
+
+### Testing
+
+The project includes comprehensive test suites organized in the `tests/` directory:
+
+```bash
+# Core Tests
+npm test             # Build verification test
+npm run test:server  # MCP server functionality test
+npm run test:lifecycle # Server lifecycle management test
+
+# Feature Tests
+npm run test:ssh     # SSH command execution test
+npm run test:all     # Run all test suites
+
+# Individual Tests
+node tests/test-mcp-server.js           # Basic server functionality
+node tests/test-enhanced-output.js      # Output formatting
+node tests/test-ssh-comprehensive.js    # SSH command testing
+```
+
+## 🏛️ Architecture
+
+The codebase follows a modular architecture with clear separation of concerns:
+
+### Core Structure
+
+```text
+src/
+├── index.ts           # MCP server entry point - handles all tool registrations and request routing
+├── core/
+│   └── executor.ts    # Command execution engine with cross-platform support
+├── security/
+│   ├── manager.ts     # Security validation, sandboxing, and policy enforcement
+│   └── confirmation.ts # Interactive confirmation system for dangerous commands
+├── context/
+│   └── manager.ts     # Session persistence and state management
+├── audit/
+│   ├── logger.ts      # Immutable audit logging system
+│   └── monitoring.ts  # Real-time monitoring and alert management
+├── utils/
+│   ├── output-processor.ts # AI-optimized output parsing and formatting
+│   └── intent-tracker.ts   # Command intent analysis and suggestions
+└── types/
+    └── index.ts       # Shared TypeScript type definitions
+```
+
+### Key Design Patterns
+
+1. **MCP Tool Registration**: All tools are registered in `index.ts` using the MCP SDK's server.tool() method. Each tool has schema validation using Zod.
+
+2. **Security Layers**: The security system uses a multi-tier approach:
+   - Pattern matching for dangerous commands in `security/manager.ts`
+   - Configurable security levels (strict/moderate/permissive)
+   - Optional confirmation system for high-risk operations
+
+3. **Context Preservation**: The `context/manager.ts` maintains:
+   - Working directory state across commands
+   - Environment variables
+   - Command history with relationships
+   - File system change tracking
+
+4. **AI Optimizations**: The output processor in `utils/output-processor.ts` intelligently:
+   - Detects and parses structured data (JSON, YAML, CSV)
+   - Removes noise from outputs (progress bars, ANSI codes)
+   - Provides command-specific formatting
+
+5. **Audit System**: Comprehensive logging in `audit/` with:
+   - Immutable append-only logs
+   - Real-time monitoring with configurable alert rules
+   - Multiple export formats (JSON, CSV, XML)
+
+### MCP Protocol Implementation
+
+The server uses STDIO transport and implements 16 MCP tools:
+
+- Command execution tools: `execute_command`, `confirm_command`
+- Context tools: `get_context`, `get_history`, `set_working_directory`
+- Security tools: `update_security_config`, `get_security_status`
+- AI tools: `get_intent_summary`, `suggest_next_commands`
+- Audit tools: `generate_audit_report`, `export_logs`, `get_alerts`
+
+## 🎨 Enhanced Output Formatting
+
+The MCP server includes sophisticated output formatting that transforms raw command execution results into beautifully formatted, easy-to-read displays optimized for Claude Desktop's interface.
+
+### Key Features
+
+#### 🎨 Rich Markdown Formatting
+
+- **Headers and Sections**: Clear organization with markdown headers
+- **Code Blocks**: Syntax-highlighted command input and output
+- **Visual Icons**: Emojis and symbols for quick visual recognition
+- **Structured Layout**: Logical flow from command to results
+
+#### 📋 Enhanced Command Output
+
+Every command execution now includes:
+
+```markdown
+## Command Execution
+**Command:** `your-command-here`
+**Context:** AI context description
+**Details:** ⏱️ 123ms | ✅ Exit code: 0 | 📂 Type: file-operation
+
+### Input
+```bash
+your-command-here
+```
+
+### 📄 Output
+```text
+Command output here
+```
+
+### 📋 Summary
+✅ **Result:** Command completed successfully
+🔄 **Side Effects:** Modified 3 file(s)
+
+### 💡 Suggestions
+**Next Steps:**
+• Suggested follow-up command
+• Another helpful suggestion
+```
+
+## 🔧 Troubleshooting
 
 ### Claude Desktop Not Detecting the Server
 
@@ -278,7 +364,7 @@ MCP_EXEC_AI_OPTIMIZATIONS=true
 
 3. **Test the server manually**:
    ```bash
-   npm run test-server  # Verify server functionality
+   npm run test:server  # Verify server functionality
    ```
 
 4. **Restart Claude Desktop** after making configuration changes
@@ -310,4 +396,26 @@ The server includes comprehensive security features. If commands are being block
 2. **Review blocked commands**: Check the audit logs for security violations
 3. **Use confirmation system**: Dangerous commands require explicit confirmation
 
-For more help, check the [GitHub Issues](https://github.com/bensons/mcp-exec/issues) or create a new issue.
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new functionality
+5. Ensure all tests pass
+6. Submit a pull request
+
+## 📄 License
+
+MIT License - see LICENSE file for details.
+
+## 🆘 Support
+
+- Check the documentation for detailed information
+- Run `npm run test:server` to verify functionality
+- Check [GitHub Issues](https://github.com/bensons/mcp-exec/issues) for common problems
+- The server includes comprehensive error handling and logging
+
+---
+
+🎉 **Your MCP-Exec server is ready to enhance your Claude Desktop experience with powerful shell execution capabilities!**
