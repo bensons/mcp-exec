@@ -183,20 +183,30 @@ export class ShellExecutor {
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     return new Promise((resolve, reject) => {
       const { timeout, ...spawnOptions } = options;
-      
-      // Determine shell and command based on platform
-      let shellCommand: string;
-      let shellArgs: string[];
-      
-      if (process.platform === 'win32') {
-        shellCommand = 'cmd.exe';
-        shellArgs = ['/c', command, ...args];
+
+      // Determine execution method based on shell option
+      let execCommand: string;
+      let execArgs: string[];
+
+      if (spawnOptions.shell) {
+        // When shell=true, let Node.js handle the shell execution
+        execCommand = command;
+        execArgs = args;
       } else {
-        shellCommand = '/bin/sh';
-        shellArgs = ['-c', `${command} ${args.join(' ')}`];
+        // When shell=false, manually construct shell command
+        if (process.platform === 'win32') {
+          execCommand = 'cmd.exe';
+          execArgs = ['/c', command, ...args];
+        } else {
+          execCommand = '/bin/sh';
+          const fullCommand = args.length > 0 ? `${command} ${args.join(' ')}` : command;
+          execArgs = ['-c', fullCommand];
+        }
       }
 
-      const child = spawn(shellCommand, shellArgs, {
+
+
+      const child = spawn(execCommand, execArgs, {
         ...spawnOptions,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -227,7 +237,9 @@ export class ShellExecutor {
         if (timeoutId) {
           clearTimeout(timeoutId);
         }
-        
+
+
+
         resolve({
           stdout,
           stderr,

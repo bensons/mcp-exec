@@ -133,18 +133,27 @@ class ShellExecutor {
     async executeWithTimeout(command, args, options) {
         return new Promise((resolve, reject) => {
             const { timeout, ...spawnOptions } = options;
-            // Determine shell and command based on platform
-            let shellCommand;
-            let shellArgs;
-            if (process.platform === 'win32') {
-                shellCommand = 'cmd.exe';
-                shellArgs = ['/c', command, ...args];
+            // Determine execution method based on shell option
+            let execCommand;
+            let execArgs;
+            if (spawnOptions.shell) {
+                // When shell=true, let Node.js handle the shell execution
+                execCommand = command;
+                execArgs = args;
             }
             else {
-                shellCommand = '/bin/sh';
-                shellArgs = ['-c', `${command} ${args.join(' ')}`];
+                // When shell=false, manually construct shell command
+                if (process.platform === 'win32') {
+                    execCommand = 'cmd.exe';
+                    execArgs = ['/c', command, ...args];
+                }
+                else {
+                    execCommand = '/bin/sh';
+                    const fullCommand = args.length > 0 ? `${command} ${args.join(' ')}` : command;
+                    execArgs = ['-c', fullCommand];
+                }
             }
-            const child = (0, child_process_1.spawn)(shellCommand, shellArgs, {
+            const child = (0, child_process_1.spawn)(execCommand, execArgs, {
                 ...spawnOptions,
                 stdio: ['pipe', 'pipe', 'pipe'],
             });
