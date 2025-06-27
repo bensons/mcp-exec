@@ -189,6 +189,11 @@ export interface ServerConfig {
         sessionPersistence: boolean;
         maxHistorySize: number;
     };
+    lifecycle: {
+        inactivityTimeout: number;
+        gracefulShutdownTimeout: number;
+        enableHeartbeat: boolean;
+    };
     output: {
         formatStructured: boolean;
         stripAnsi: boolean;

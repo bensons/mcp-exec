@@ -321,8 +321,9 @@ class AuditLogger {
         // 2. Environment variable MCP_EXEC_AUDIT_LOG
         // 3. logDirectory + default filename
         // 4. Environment variable MCP_EXEC_LOG_DIR + default filename
-        // 5. User home directory + default filename (safer than cwd)
-        // 6. Temp directory + default filename (fallback)
+        // 5. User home directory + default filename (safer default)
+        // 6. Current working directory + default filename (fallback)
+        // 7. Temp directory + default filename (final fallback)
         const defaultFilename = '.mcp-exec-audit.log';
         // 1. Explicit log file path
         if (config.logFile) {
@@ -340,15 +341,15 @@ class AuditLogger {
         if (process.env.MCP_EXEC_LOG_DIR) {
             return path.join(path.resolve(process.env.MCP_EXEC_LOG_DIR), defaultFilename);
         }
-        // 5. Try current working directory, but check if it's writable
-        const cwd = process.cwd();
-        if (this.isDirectoryWritable(cwd)) {
-            return path.join(cwd, defaultFilename);
-        }
-        // 6. Use user home directory as safer default
+        // 5. Use user home directory as safer default (before trying cwd)
         const homeDir = process.env.HOME || process.env.USERPROFILE;
         if (homeDir && this.isDirectoryWritable(homeDir)) {
             return path.join(homeDir, defaultFilename);
+        }
+        // 6. Try current working directory as fallback
+        const cwd = process.cwd();
+        if (this.isDirectoryWritable(cwd)) {
+            return path.join(cwd, defaultFilename);
         }
         // 7. Final fallback: temp directory
         const tempDir = process.env.TMPDIR || process.env.TEMP || '/tmp';

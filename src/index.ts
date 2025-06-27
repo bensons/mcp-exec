@@ -59,6 +59,11 @@ const DEFAULT_CONFIG: ServerConfig = {
     sessionPersistence: true,
     maxHistorySize: 1000,
   },
+  lifecycle: {
+    inactivityTimeout: parseInt(process.env.MCP_EXEC_INACTIVITY_TIMEOUT || '300000'), // 5 minutes default
+    gracefulShutdownTimeout: parseInt(process.env.MCP_EXEC_SHUTDOWN_TIMEOUT || '5000'), // 5 seconds default
+    enableHeartbeat: process.env.MCP_EXEC_ENABLE_HEARTBEAT !== 'false', // enabled by default
+  },
   output: {
     formatStructured: true,
     stripAnsi: true,
@@ -189,6 +194,11 @@ class MCPShellServer {
   private confirmationManager: ConfirmationManager;
   private displayFormatter: DisplayFormatter;
   private config: ServerConfig;
+  private isShuttingDown: boolean = false;
+  private transport?: any;
+  private shutdownTimeout?: NodeJS.Timeout;
+  private heartbeatInterval?: NodeJS.Timeout;
+  private lastActivity: number = Date.now();
 
   constructor(config: Partial<ServerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -439,6 +449,9 @@ class MCPShellServer {
 
     // Handle tool calls
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      // Update activity on any tool call
+      this.updateActivity();
+
       const { name, arguments: args } = request.params;
 
       try {
@@ -896,8 +909,12 @@ class MCPShellServer {
     // Load previous session if configured
     await this.contextManager.loadSession();
 
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
+    this.transport = new StdioServerTransport();
+
+    // Set up connection monitoring
+    this.setupConnectionMonitoring();
+
+    await this.server.connect(this.transport);
 
     // Log server start with audit log location info
     await this.auditLogger.log({
@@ -911,6 +928,152 @@ class MCPShellServer {
         nodeVersion: process.version,
       },
     });
+  }
+
+  private setupConnectionMonitoring(): void {
+    // Monitor stdin for closure (indicates client disconnection)
+    process.stdin.on('end', () => {
+      console.error('📡 Client disconnected (stdin closed)');
+      this.gracefulShutdown('Client disconnection');
+    });
+
+    process.stdin.on('error', (error) => {
+      console.error('📡 Stdin error:', error.message);
+      this.gracefulShutdown('Stdin error');
+    });
+
+    // Monitor for broken pipe (client closed connection)
+    process.stdout.on('error', (error) => {
+      console.error('📡 Stdout error:', error.message);
+      this.gracefulShutdown('Stdout error');
+    });
+
+    // Monitor stdin for data to track activity
+    process.stdin.on('data', () => {
+      this.updateActivity();
+    });
+
+    // Start heartbeat monitoring
+    this.startHeartbeat();
+  }
+
+  private updateActivity(): void {
+    this.lastActivity = Date.now();
+  }
+
+  private startHeartbeat(): void {
+    if (!this.config.lifecycle.enableHeartbeat) {
+      return;
+    }
+
+    // Check for activity every 30 seconds
+    this.heartbeatInterval = setInterval(() => {
+      const timeSinceLastActivity = Date.now() - this.lastActivity;
+
+      if (timeSinceLastActivity > this.config.lifecycle.inactivityTimeout) {
+        console.error(`⏰ No activity for ${Math.round(timeSinceLastActivity / 1000)}s, shutting down`);
+        this.gracefulShutdown('Inactivity timeout');
+      }
+    }, 30000);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = undefined;
+    }
+  }
+
+  private async cleanupResources(): Promise<void> {
+    console.error('🧹 Cleaning up resources...');
+
+    try {
+      // Cleanup shell executor (kill any running processes)
+      if (this.shellExecutor && typeof (this.shellExecutor as any).cleanup === 'function') {
+        await (this.shellExecutor as any).cleanup();
+        console.error('🔧 Shell executor cleaned up');
+      }
+
+      // Cleanup audit logger (flush any pending logs)
+      if (this.auditLogger && typeof (this.auditLogger as any).flush === 'function') {
+        await (this.auditLogger as any).flush();
+        console.error('📝 Audit logs flushed');
+      }
+
+      // Clear any pending confirmations
+      if (this.confirmationManager && typeof (this.confirmationManager as any).cleanup === 'function') {
+        (this.confirmationManager as any).cleanup();
+        console.error('✅ Confirmations cleared');
+      }
+
+      // Remove stdin/stdout listeners to prevent memory leaks
+      process.stdin.removeAllListeners('end');
+      process.stdin.removeAllListeners('error');
+      process.stdin.removeAllListeners('data');
+      process.stdout.removeAllListeners('error');
+      console.error('🎧 Event listeners removed');
+
+    } catch (error) {
+      console.error('⚠️  Error during resource cleanup:', error);
+    }
+  }
+
+  async gracefulShutdown(reason: string): Promise<void> {
+    if (this.isShuttingDown) {
+      return; // Already shutting down
+    }
+
+    this.isShuttingDown = true;
+    console.error(`🔄 Initiating graceful shutdown: ${reason}`);
+
+    try {
+      // Stop heartbeat monitoring
+      this.stopHeartbeat();
+
+      // Set a timeout to force exit if graceful shutdown takes too long
+      this.shutdownTimeout = setTimeout(() => {
+        console.error('⚠️  Graceful shutdown timed out, forcing exit');
+        process.exit(1);
+      }, this.config.lifecycle.gracefulShutdownTimeout);
+
+      // Log shutdown
+      await this.auditLogger.log({
+        level: 'info',
+        message: 'MCP Shell Server shutting down',
+        context: {
+          reason,
+          pid: process.pid,
+          uptime: process.uptime(),
+        },
+      });
+
+      // Save session state
+      if (this.config.context.sessionPersistence) {
+        await (this.contextManager as any).persistSession();
+        console.error('💾 Session state saved');
+      }
+
+      // Cleanup resources
+      await this.cleanupResources();
+
+      // Close transport connection
+      if (this.transport && typeof this.transport.close === 'function') {
+        await this.transport.close();
+        console.error('🔌 Transport connection closed');
+      }
+
+      // Clear shutdown timeout
+      if (this.shutdownTimeout) {
+        clearTimeout(this.shutdownTimeout);
+      }
+
+      console.error('✅ Graceful shutdown completed');
+      process.exit(0);
+
+    } catch (error) {
+      console.error('❌ Error during graceful shutdown:', error);
+      process.exit(1);
+    }
   }
 
   private formatContextDisplay(context: any): string {
@@ -1075,15 +1238,28 @@ if (require.main === module) {
     process.exit(1);
   });
 
-  // Graceful shutdown
+  // Enhanced signal handling for graceful shutdown
   process.on('SIGINT', () => {
-    console.error('Shutting down MCP Shell Server...');
-    process.exit(0);
+    server.gracefulShutdown('SIGINT received');
   });
 
   process.on('SIGTERM', () => {
-    console.error('Shutting down MCP Shell Server...');
-    process.exit(0);
+    server.gracefulShutdown('SIGTERM received');
+  });
+
+  process.on('SIGHUP', () => {
+    server.gracefulShutdown('SIGHUP received');
+  });
+
+  // Handle uncaught exceptions and unhandled rejections
+  process.on('uncaughtException', (error) => {
+    console.error('Uncaught exception:', error);
+    server.gracefulShutdown('Uncaught exception');
+  });
+
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled rejection at:', promise, 'reason:', reason);
+    server.gracefulShutdown('Unhandled rejection');
   });
 }
 

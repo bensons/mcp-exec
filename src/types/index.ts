@@ -238,6 +238,11 @@ export interface ServerConfig {
     sessionPersistence: boolean;
     maxHistorySize: number;
   };
+  lifecycle: {
+    inactivityTimeout: number; // milliseconds before shutdown due to inactivity
+    gracefulShutdownTimeout: number; // milliseconds to wait for graceful shutdown
+    enableHeartbeat: boolean; // whether to enable heartbeat monitoring
+  };
   output: {
     formatStructured: boolean;
     stripAnsi: boolean;
