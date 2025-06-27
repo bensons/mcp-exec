@@ -26,6 +26,12 @@ logs/
 .env.local
 .env.*.local
 
+# AI Agent Files
+.augment/
+.augment/*
+.claude/
+.claude/*
+
 # IDE and editor files
 .vscode/
 .idea/
