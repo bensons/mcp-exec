@@ -245,6 +245,16 @@ export interface ServerConfig {
     enableAiOptimizations: boolean;
     maxOutputLength: number;
   };
+  display: {
+    showCommandHeader: boolean;
+    showExecutionTime: boolean;
+    showExitCode: boolean;
+    formatCodeBlocks: boolean;
+    includeMetadata: boolean;
+    includeSuggestions: boolean;
+    useMarkdown: boolean;
+    colorizeOutput: boolean;
+  };
   audit: {
     enabled: boolean;
     logLevel: 'debug' | 'info' | 'warn' | 'error';

@@ -20,6 +20,7 @@ import { SecurityManager } from './security/manager';
 import { ContextManager } from './context/manager';
 import { AuditLogger } from './audit/logger';
 import { ConfirmationManager } from './security/confirmation';
+import { DisplayFormatter } from './utils/display-formatter';
 import { ServerConfig } from './types/index';
 
 // Default configuration
@@ -61,6 +62,16 @@ const DEFAULT_CONFIG: ServerConfig = {
     summarizeVerbose: true,
     enableAiOptimizations: true,
     maxOutputLength: 10000, // 10KB max output
+  },
+  display: {
+    showCommandHeader: true,
+    showExecutionTime: true,
+    showExitCode: true,
+    formatCodeBlocks: true,
+    includeMetadata: true,
+    includeSuggestions: true,
+    useMarkdown: true,
+    colorizeOutput: false,
   },
   audit: {
     enabled: true,
@@ -173,6 +184,7 @@ class MCPShellServer {
   private contextManager: ContextManager;
   private auditLogger: AuditLogger;
   private confirmationManager: ConfirmationManager;
+  private displayFormatter: DisplayFormatter;
   private config: ServerConfig;
 
   constructor(config: Partial<ServerConfig> = {}) {
@@ -195,6 +207,7 @@ class MCPShellServer {
     this.contextManager = new ContextManager(this.config.context);
     this.auditLogger = new AuditLogger(this.config.audit);
     this.confirmationManager = new ConfirmationManager();
+    this.displayFormatter = new DisplayFormatter(this.config.display);
     this.shellExecutor = new ShellExecutor(
       this.securityManager,
       this.contextManager,
@@ -430,40 +443,61 @@ class MCPShellServer {
           case 'execute_command': {
             const parsed = ExecuteCommandSchema.parse(args);
             const result = await this.shellExecutor.executeCommand(parsed);
-            
+
+            // Build the full command string for display
+            const fullCommand = parsed.args && parsed.args.length > 0
+              ? `${parsed.command} ${parsed.args.join(' ')}`
+              : parsed.command;
+
+            // Format the output for enhanced display
+            const formattedOutput = this.displayFormatter.formatCommandOutput(
+              fullCommand,
+              result,
+              {
+                showInput: true,
+                aiContext: parsed.aiContext
+              }
+            );
+
             return {
               content: [
                 {
                   type: 'text',
-                  text: JSON.stringify(result, null, 2),
+                  text: formattedOutput,
                 },
               ],
             };
           }
 
           case 'get_context': {
-            const parsed = GetContextSchema.parse(args);
+            const parsed = GetContextSchema.parse(args || {});
             const context = await this.contextManager.getCurrentContext(parsed.sessionId);
-            
+
+            // Format context information nicely
+            const formattedContext = this.formatContextDisplay(context);
+
             return {
               content: [
                 {
                   type: 'text',
-                  text: JSON.stringify(context, null, 2),
+                  text: formattedContext,
                 },
               ],
             };
           }
 
           case 'get_history': {
-            const parsed = GetHistorySchema.parse(args);
+            const parsed = GetHistorySchema.parse(args || {});
             const history = await this.contextManager.getHistory(parsed.limit, parsed.filter);
+
+            // Format history nicely
+            const formattedHistory = this.formatHistoryDisplay(history, parsed.limit);
 
             return {
               content: [
                 {
                   type: 'text',
-                  text: JSON.stringify(history, null, 2),
+                  text: formattedHistory,
                 },
               ],
             };
@@ -580,19 +614,23 @@ class MCPShellServer {
           }
 
           case 'get_security_status': {
+            const securityData = {
+              securityConfig: this.config.security,
+              pendingConfirmations: this.confirmationManager.getAllPendingConfirmations().length,
+              serverInfo: {
+                version: '1.0.0',
+                platform: process.platform,
+                nodeVersion: process.version,
+              }
+            };
+
+            const formattedStatus = this.formatSecurityStatusDisplay(securityData);
+
             return {
               content: [
                 {
                   type: 'text',
-                  text: JSON.stringify({
-                    securityConfig: this.config.security,
-                    pendingConfirmations: this.confirmationManager.getAllPendingConfirmations().length,
-                    serverInfo: {
-                      version: '1.0.0',
-                      platform: process.platform,
-                      nodeVersion: process.version,
-                    }
-                  }, null, 2),
+                  text: formattedStatus,
                 },
               ],
             };
@@ -870,6 +908,158 @@ class MCPShellServer {
         nodeVersion: process.version,
       },
     });
+  }
+
+  private formatContextDisplay(context: any): string {
+    const lines: string[] = [];
+
+    lines.push('## Current Context');
+    lines.push('');
+    lines.push(`**Session ID:** ${context.sessionId || 'default'}`);
+    lines.push(`**Working Directory:** \`${context.currentDirectory || process.cwd()}\``);
+
+    if (context.environmentVariables && Object.keys(context.environmentVariables).length > 0) {
+      lines.push('');
+      lines.push('**Environment Variables:**');
+      Object.entries(context.environmentVariables).forEach(([key, value]) => {
+        lines.push(`• \`${key}\` = \`${value}\``);
+      });
+    }
+
+    if (context.commandHistory && context.commandHistory.length > 0) {
+      lines.push('');
+      lines.push(`**Recent Commands:** ${context.commandHistory.length} in history`);
+    }
+
+    if (context.fileSystemChanges && context.fileSystemChanges.length > 0) {
+      lines.push('');
+      lines.push(`**File System Changes:** ${context.fileSystemChanges.length} tracked changes`);
+    }
+
+    return lines.join('\n');
+  }
+
+  private formatHistoryDisplay(history: any[], limit?: number): string {
+    const lines: string[] = [];
+
+    lines.push('## Command History');
+    lines.push('');
+
+    if (history.length === 0) {
+      lines.push('*No commands in history*');
+      return lines.join('\n');
+    }
+
+    lines.push(`**Showing ${history.length} command(s)${limit ? ` (limit: ${limit})` : ''}**`);
+    lines.push('');
+
+    history.forEach((entry, index) => {
+      const timestamp = new Date(entry.timestamp).toLocaleString();
+      const success = entry.output?.summary?.success ? '✅' : '❌';
+
+      lines.push(`### ${index + 1}. ${success} \`${entry.command}\``);
+      lines.push(`**Time:** ${timestamp}`);
+      lines.push(`**Directory:** \`${entry.workingDirectory || 'unknown'}\``);
+
+      if (entry.output?.summary?.mainResult) {
+        lines.push(`**Result:** ${entry.output.summary.mainResult}`);
+      }
+
+      if (entry.aiContext) {
+        lines.push(`**AI Context:** ${entry.aiContext}`);
+      }
+
+      lines.push('');
+    });
+
+    return lines.join('\n');
+  }
+
+  private formatSecurityStatusDisplay(securityData: any): string {
+    const lines: string[] = [];
+
+    lines.push('## Security Status');
+    lines.push('');
+
+    const config = securityData.securityConfig;
+
+    // Security level with icon
+    const levelIcons = {
+      strict: '🔒',
+      moderate: '⚖️',
+      permissive: '🔓'
+    };
+    const levelIcon = levelIcons[config.level as keyof typeof levelIcons] || '❓';
+    lines.push(`**Security Level:** ${levelIcon} ${config.level.toUpperCase()}`);
+
+    // Confirmation settings
+    const confirmIcon = config.confirmDangerous ? '✅' : '❌';
+    lines.push(`**Dangerous Command Confirmation:** ${confirmIcon} ${config.confirmDangerous ? 'Enabled' : 'Disabled'}`);
+
+    // Timeout
+    lines.push(`**Command Timeout:** ${Math.round(config.timeout / 1000)}s`);
+
+    // Sandboxing
+    if (config.sandboxing) {
+      lines.push('');
+      lines.push('**Sandboxing Configuration:**');
+      const sandboxIcon = config.sandboxing.enabled ? '✅' : '❌';
+      lines.push(`• Enabled: ${sandboxIcon} ${config.sandboxing.enabled ? 'Yes' : 'No'}`);
+
+      if (config.sandboxing.enabled) {
+        const networkIcon = config.sandboxing.networkAccess ? '🌐' : '🚫';
+        lines.push(`• Network Access: ${networkIcon} ${config.sandboxing.networkAccess ? 'Allowed' : 'Blocked'}`);
+        lines.push(`• File System Access: 📁 ${config.sandboxing.fileSystemAccess}`);
+      }
+    }
+
+    // Resource limits
+    if (config.resourceLimits) {
+      lines.push('');
+      lines.push('**Resource Limits:**');
+      if (config.resourceLimits.maxMemoryUsage) {
+        lines.push(`• Memory: 💾 ${config.resourceLimits.maxMemoryUsage}MB`);
+      }
+      if (config.resourceLimits.maxFileSize) {
+        lines.push(`• File Size: 📄 ${config.resourceLimits.maxFileSize}MB`);
+      }
+      if (config.resourceLimits.maxProcesses) {
+        lines.push(`• Max Processes: ⚙️ ${config.resourceLimits.maxProcesses}`);
+      }
+    }
+
+    // Blocked commands
+    if (config.blockedCommands && config.blockedCommands.length > 0) {
+      lines.push('');
+      lines.push('**Blocked Commands:**');
+      config.blockedCommands.forEach((cmd: string) => {
+        lines.push(`• \`${cmd}\``);
+      });
+    }
+
+    // Allowed directories
+    if (config.allowedDirectories && config.allowedDirectories.length > 0) {
+      lines.push('');
+      lines.push('**Allowed Directories:**');
+      config.allowedDirectories.forEach((dir: string) => {
+        lines.push(`• \`${dir}\``);
+      });
+    }
+
+    // Pending confirmations
+    if (securityData.pendingConfirmations > 0) {
+      lines.push('');
+      lines.push(`**Pending Confirmations:** ⏳ ${securityData.pendingConfirmations}`);
+    }
+
+    // Server info
+    lines.push('');
+    lines.push('**Server Information:**');
+    lines.push(`• Version: ${securityData.serverInfo.version}`);
+    lines.push(`• Platform: ${securityData.serverInfo.platform}`);
+    lines.push(`• Node.js: ${securityData.serverInfo.nodeVersion}`);
+
+    return lines.join('\n');
   }
 }
 

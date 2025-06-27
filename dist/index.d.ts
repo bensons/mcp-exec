@@ -11,10 +11,14 @@ declare class MCPShellServer {
     private contextManager;
     private auditLogger;
     private confirmationManager;
+    private displayFormatter;
     private config;
     constructor(config?: Partial<ServerConfig>);
     private setupHandlers;
     start(): Promise<void>;
+    private formatContextDisplay;
+    private formatHistoryDisplay;
+    private formatSecurityStatusDisplay;
 }
 export { MCPShellServer };
 //# sourceMappingURL=index.d.ts.map
