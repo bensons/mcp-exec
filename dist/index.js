@@ -175,6 +175,10 @@ const SendToSessionSchema = zod_1.z.object({
     input: zod_1.z.string().describe('Input to send to the session'),
     addNewline: zod_1.z.boolean().optional().default(true).describe('Whether to add a newline to the input'),
 });
+const TerminateTerminalSessionSchema = zod_1.z.object({
+    sessionId: zod_1.z.string().describe('Terminal session ID to terminate'),
+    force: zod_1.z.boolean().optional().default(false).describe('Force termination without graceful shutdown'),
+});
 const GetContextSchema = zod_1.z.object({
     sessionId: zod_1.z.string().optional().describe('Session ID to get context for'),
 });
@@ -362,7 +366,7 @@ class MCPShellServer {
                     },
                     {
                         name: 'start_terminal_session',
-                        description: 'Start a new terminal session with full PTY support and browser-based viewing. The terminal will start with the system shell and persist even after commands exit, providing a continuous shell environment.',
+                        description: 'Start a new terminal session with full PTY support and browser-based viewing. The terminal provides a persistent shell environment that continues running even after individual commands exit. Use kill_session to terminate the entire terminal session.',
                         inputSchema: {
                             type: 'object',
                             properties: {
@@ -393,6 +397,18 @@ class MCPShellServer {
                                 addNewline: { type: 'boolean', default: true, description: 'Whether to add a newline to the input' },
                             },
                             required: ['sessionId', 'input'],
+                        },
+                    },
+                    {
+                        name: 'terminate_terminal_session',
+                        description: 'Explicitly terminate a terminal session and its PTY process. This is different from sending "exit" commands, which only exit individual programs within the terminal.',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                sessionId: { type: 'string', description: 'Terminal session ID to terminate' },
+                                force: { type: 'boolean', default: false, description: 'Force termination without graceful shutdown' },
+                            },
+                            required: ['sessionId'],
                         },
                     },
                     {
@@ -832,7 +848,7 @@ class MCPShellServer {
                                 content: [
                                     {
                                         type: 'text',
-                                        text: `🖥️ **Terminal Session Started**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Terminal (PTY-based)\n**Viewer URL:** ${viewerUrl}\n\n**Features:**\n• Full terminal emulation with colors and cursor control\n• Persistent shell environment (survives command exits)\n• Live browser-based viewing\n• Use \`send_to_session\` to send commands`,
+                                        text: `🖥️ **Terminal Session Started**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Terminal (PTY-based)\n**Viewer URL:** ${viewerUrl}\n\n**Important - Terminal Session Behavior:**\n• **Persistent Environment**: This terminal session will continue running even after individual commands exit\n• **Shell Persistence**: When you send \`exit\` to a command like \`bash\`, it exits that command but returns to the parent shell\n• **Session Termination**: Use \`kill_session\` to terminate the entire terminal session\n• **Live Viewing**: Monitor the session in real-time via the browser viewer\n\n**Usage:**\n• Use \`send_to_session\` to send commands\n• Use \`read_session_output\` to read terminal output\n• Use \`kill_session\` to terminate when done`,
                                     },
                                 ],
                             };
@@ -898,6 +914,51 @@ class MCPShellServer {
                                     {
                                         type: 'text',
                                         text: `❌ **Failed to send input to session:** ${error instanceof Error ? error.message : 'Unknown error'}`,
+                                    },
+                                ],
+                            };
+                        }
+                    }
+                    case 'terminate_terminal_session': {
+                        const parsed = TerminateTerminalSessionSchema.parse(args);
+                        this.auditLogger.log({
+                            level: 'debug',
+                            message: 'Terminate terminal session request received',
+                            context: {
+                                sessionId: parsed.sessionId,
+                                force: parsed.force,
+                            }
+                        });
+                        try {
+                            // Check if this is a terminal session
+                            const terminalSession = this.terminalSessionManager?.getSession(parsed.sessionId);
+                            if (!terminalSession) {
+                                return {
+                                    content: [
+                                        {
+                                            type: 'text',
+                                            text: `❌ **Terminal session not found**\n\nSession ID \`${parsed.sessionId}\` is not a terminal session or does not exist.\n\n**Note:** This tool is specifically for terminal sessions. Use \`kill_session\` for interactive sessions.`,
+                                        },
+                                    ],
+                                };
+                            }
+                            // Terminate the terminal session
+                            await this.terminalSessionManager.killSession(parsed.sessionId);
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: `✅ **Terminal Session Terminated**\n\n**Session ID:** \`${parsed.sessionId}\`\n**Method:** ${parsed.force ? 'Force termination' : 'Graceful termination'}\n\nThe PTY process and all associated shell processes have been terminated.`,
+                                    },
+                                ],
+                            };
+                        }
+                        catch (error) {
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: `❌ **Failed to terminate terminal session:** ${error instanceof Error ? error.message : 'Unknown error'}`,
                                     },
                                 ],
                             };
