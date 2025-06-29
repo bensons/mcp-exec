@@ -30,8 +30,8 @@ import { ServerConfig } from './types/index';
 // Default configuration
 const DEFAULT_CONFIG: ServerConfig = {
   security: {
-    level: 'moderate',
-    confirmDangerous: true,
+    level: 'permissive',
+    confirmDangerous: false,
     allowedDirectories: [
       process.cwd(),
       '/tmp',
@@ -92,7 +92,7 @@ const DEFAULT_CONFIG: ServerConfig = {
   },
   audit: {
     enabled: true,
-    logLevel: 'info',
+    logLevel: 'debug',
     retention: 30,
     logDirectory: process.env.MCP_EXEC_LOG_DIR ||
                   (process.env.HOME && path.join(process.env.HOME, '.mcp-exec')) ||
@@ -104,7 +104,7 @@ const DEFAULT_CONFIG: ServerConfig = {
     },
   },
   terminalViewer: {
-    enabled: false, // Disabled by default
+    enabled: true, // Disabled by default
     port: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_PORT || '3000'),
     host: process.env.MCP_EXEC_TERMINAL_VIEWER_HOST || '127.0.0.1',
     maxSessions: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_MAX_SESSIONS || '10'),
