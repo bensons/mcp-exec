@@ -86,7 +86,10 @@ function connectWebSocket() {
             console.log('WebSocket connected');
             showConnectionStatus('connected');
             reconnectAttempts = 0;
-            
+
+            // Hide loading state and show terminal
+            hideLoading();
+
             // Send initial resize
             sendResize();
         };
@@ -119,12 +122,23 @@ function connectWebSocket() {
         websocket.onerror = function(error) {
             console.error('WebSocket error:', error);
             showConnectionStatus('disconnected');
+            // Hide loading state even on error to show the terminal
+            hideLoading();
         };
         
     } catch (error) {
         console.error('Error creating WebSocket:', error);
         showError('Connection failed', 'Unable to connect to the terminal session. Please check your connection and try again.');
     }
+
+    // Fallback: Hide loading after 5 seconds even if WebSocket doesn't connect
+    setTimeout(() => {
+        const loadingDiv = document.querySelector('.loading');
+        if (loadingDiv) {
+            console.warn('WebSocket connection timeout, hiding loading state');
+            hideLoading();
+        }
+    }, 5000);
 }
 
 function handleWebSocketMessage(message) {
@@ -263,6 +277,22 @@ function showLoading(message = 'Loading terminal...') {
             <div class="loading-text">${message}</div>
         </div>
     `;
+}
+
+function hideLoading() {
+    const terminalElement = document.getElementById('terminal');
+    // Clear any loading content and let the terminal take over
+    const loadingDiv = terminalElement.querySelector('.loading');
+    if (loadingDiv) {
+        loadingDiv.remove();
+    }
+
+    // Ensure terminal is visible and properly fitted
+    if (terminal && fitAddon) {
+        setTimeout(() => {
+            fitAddon.fit();
+        }, 100);
+    }
 }
 
 function toggleFullscreen() {
