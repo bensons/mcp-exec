@@ -257,6 +257,11 @@ MCP_EXEC_MAX_SESSIONS=10                  # Maximum concurrent sessions
 MCP_EXEC_SESSION_TIMEOUT=1800000          # Session timeout (30 minutes)
 MCP_EXEC_SESSION_BUFFER_SIZE=1000         # Session output buffer size
 
+# Server Lifecycle
+MCP_EXEC_INACTIVITY_TIMEOUT=0             # Inactivity timeout in ms (0 = disabled, recommended for MCP)
+MCP_EXEC_SHUTDOWN_TIMEOUT=5000            # Graceful shutdown timeout (5 seconds)
+MCP_EXEC_ENABLE_HEARTBEAT=true            # Enable connection monitoring
+
 # Output Formatting
 MCP_EXEC_FORMAT_STRUCTURED=true           # Format output in structured format
 MCP_EXEC_STRIP_ANSI=true                  # Strip ANSI escape codes
@@ -558,6 +563,20 @@ npm run build
 2. **Verify dependencies**: Run `npm install` to ensure all dependencies are installed
 3. **Check build output**: Run `npm run build` and verify `dist/index.js` exists
 4. **Test manually**: Run `node dist/index.js` and check for error messages
+
+### Server Shutting Down Prematurely
+
+If the MCP server is shutting down unexpectedly:
+
+1. **Inactivity timeout disabled by default**: The server now disables inactivity timeout by default (v1.0.0+) to prevent premature shutdowns
+2. **Check for explicit timeout**: If you've set `MCP_EXEC_INACTIVITY_TIMEOUT` to a value > 0, the server will shut down after that period of inactivity
+3. **Monitor connection**: The server will only shut down when the client actually disconnects or on explicit timeout
+4. **Check logs**: Look for messages like "No activity for Xs, shutting down" in the server output
+
+To completely disable inactivity timeout:
+```bash
+export MCP_EXEC_INACTIVITY_TIMEOUT=0  # 0 = disabled (default)
+```
 
 ### Security Warnings
 

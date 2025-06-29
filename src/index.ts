@@ -74,7 +74,9 @@ const DEFAULT_CONFIG: ServerConfig = {
     outputBufferSize: parseInt(process.env.MCP_EXEC_SESSION_BUFFER_SIZE || '1000'),
   },
   lifecycle: {
-    inactivityTimeout: parseInt(process.env.MCP_EXEC_INACTIVITY_TIMEOUT || '300000'), // 5 minutes default
+    // For MCP servers, inactivity timeout should be disabled by default since clients
+    // don't send continuous data. Only shut down when client actually disconnects.
+    inactivityTimeout: parseInt(process.env.MCP_EXEC_INACTIVITY_TIMEOUT || '0'), // 0 = disabled by default
     gracefulShutdownTimeout: parseInt(process.env.MCP_EXEC_SHUTDOWN_TIMEOUT || '5000'), // 5 seconds default
     enableHeartbeat: process.env.MCP_EXEC_ENABLE_HEARTBEAT !== 'false', // enabled by default
   },
@@ -2329,6 +2331,12 @@ Please start by enabling the terminal viewer service.`,
 
   private startHeartbeat(): void {
     if (!this.config.lifecycle.enableHeartbeat) {
+      return;
+    }
+
+    // If inactivity timeout is disabled (0), don't start inactivity monitoring
+    if (this.config.lifecycle.inactivityTimeout <= 0) {
+      console.error('🔄 Inactivity timeout disabled - server will only shut down on client disconnection');
       return;
     }
 
