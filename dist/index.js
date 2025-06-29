@@ -340,6 +340,7 @@ class MCPShellServer {
                     {
                         name: 'execute_command',
                         description: 'Execute a shell command with security validation and context preservation. Use enableTerminalViewer for browser-viewable terminal sessions.',
+                        openWorldHint: true,
                         inputSchema: {
                             type: 'object',
                             properties: {
@@ -367,6 +368,7 @@ class MCPShellServer {
                     {
                         name: 'start_interactive_session',
                         description: 'Start a new interactive shell session for command execution. The session will run the specified command (or default shell) and terminate when the process exits.',
+                        openWorldHint: true,
                         inputSchema: {
                             type: 'object',
                             properties: {
@@ -382,6 +384,7 @@ class MCPShellServer {
                     {
                         name: 'start_terminal_session',
                         description: 'Start a new terminal session with full PTY support and browser-based viewing. The terminal provides a persistent shell environment that continues running even after individual commands exit. Use kill_session to terminate the entire terminal session.',
+                        openWorldHint: true,
                         inputSchema: {
                             type: 'object',
                             properties: {
@@ -404,6 +407,7 @@ class MCPShellServer {
                     {
                         name: 'send_to_session',
                         description: 'Send input to an existing interactive or terminal session',
+                        openWorldHint: true,
                         inputSchema: {
                             type: 'object',
                             properties: {
