@@ -18,6 +18,8 @@ import {
 import { z } from 'zod';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { MCPLogger, MCPLoggerConfig, isValidLogLevel } from './audit/mcp-logger';
+import { LogLevel, LegacyLogLevel } from './types/index';
 
 import { ShellExecutor } from './core/executor';
 import { SecurityManager } from './security/manager';
@@ -95,7 +97,7 @@ const DEFAULT_CONFIG: ServerConfig = {
   },
   audit: {
     enabled: process.env.MCP_EXEC_AUDIT_ENABLED !== 'false', // Enabled by default
-    logLevel: (process.env.MCP_EXEC_AUDIT_LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'debug',
+    logLevel: (process.env.MCP_EXEC_AUDIT_LOG_LEVEL as LogLevel | LegacyLogLevel) || 'debug',
     retention: parseInt(process.env.MCP_EXEC_AUDIT_RETENTION || '30'),
     logDirectory: process.env.MCP_EXEC_LOG_DIR ||
                   (process.env.HOME && path.join(process.env.HOME, '.mcp-exec')) ||
@@ -106,6 +108,15 @@ const DEFAULT_CONFIG: ServerConfig = {
       maxAlertsPerHour: parseInt(process.env.MCP_EXEC_MAX_ALERTS_PER_HOUR || '100'),
     },
   },
+
+  // MCP Logging Configuration
+  mcpLogging: {
+    enabled: process.env.MCP_EXEC_MCP_LOGGING_ENABLED !== 'false', // Enabled by default
+    minLevel: (process.env.MCP_EXEC_MCP_LOG_LEVEL as LogLevel) || 'info',
+    rateLimitPerMinute: parseInt(process.env.MCP_EXEC_MCP_RATE_LIMIT || '60'),
+    maxQueueSize: parseInt(process.env.MCP_EXEC_MCP_QUEUE_SIZE || '100'),
+    includeContext: process.env.MCP_EXEC_MCP_INCLUDE_CONTEXT !== 'false', // Enabled by default
+  } as MCPLoggerConfig,
   terminalViewer: {
     enabled: process.env.MCP_EXEC_TERMINAL_VIEWER_ENABLED === 'true', // Disabled by default
     port: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_PORT || '3000'),
@@ -268,6 +279,7 @@ class MCPShellServer {
   private securityManager: SecurityManager;
   private contextManager: ContextManager;
   private auditLogger: AuditLogger;
+  private mcpLogger: MCPLogger;
   private confirmationManager: ConfirmationManager;
   private displayFormatter: DisplayFormatter;
   private terminalViewerService?: TerminalViewerService;
@@ -292,14 +304,22 @@ class MCPShellServer {
           tools: {},
           resources: {},
           prompts: {},
+          logging: {}, // MCP logging capability
         },
       }
     );
 
     // Initialize components
-    this.securityManager = new SecurityManager(this.config.security);
-    this.contextManager = new ContextManager(this.config.context);
     this.auditLogger = new AuditLogger(this.config.audit);
+    this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+    this.contextManager = new ContextManager(this.config.context, this.auditLogger);
+    this.mcpLogger = new MCPLogger(this.config.mcpLogging || {
+      enabled: true,
+      minLevel: 'info',
+      rateLimitPerMinute: 60,
+      maxQueueSize: 100,
+      includeContext: true
+    });
     this.confirmationManager = new ConfirmationManager();
     this.displayFormatter = new DisplayFormatter(this.config.display);
 
@@ -314,6 +334,14 @@ class MCPShellServer {
         terminalViewerEnabled: this.config.terminalViewer.enabled,
         sessionPersistence: this.config.context.sessionPersistence,
       }
+    });
+
+    // Log server initialization at info level for MCP clients
+    this.mcpLogger.info('MCP Shell Execution Server initialized', 'mcp-server', {
+      version: '1.0.0',
+      securityLevel: this.config.security.level,
+      mcpLoggingEnabled: this.config.mcpLogging?.enabled,
+      mcpLogLevel: this.config.mcpLogging?.minLevel
     });
 
     // Initialize terminal components
@@ -343,6 +371,22 @@ class MCPShellServer {
       this.auditLogger,
       this.config
     );
+
+    // Set up MCP logger notification callback
+    this.mcpLogger.setNotificationCallback((message) => {
+      try {
+        // Only send notifications if server is connected
+        if (this.transport) {
+          this.server.notification({
+            method: 'notifications/message',
+            params: message as any
+          });
+        }
+      } catch (error) {
+        // Silently ignore notification errors to avoid infinite loops
+        console.error('Failed to send MCP log notification:', error instanceof Error ? error.message : 'Unknown error');
+      }
+    });
 
     this.setupHandlers();
   }
@@ -1983,47 +2027,95 @@ Please start by enabling the terminal viewer service.`,
 
       throw new Error(`Unknown resource: ${uri}`);
     });
+
+    // MCP Logging handlers
+    const LoggingSetLevelSchema = z.object({
+      method: z.literal('logging/setLevel'),
+      params: z.object({
+        level: z.string().describe('Minimum log level to send to client')
+      })
+    });
+
+    this.server.setRequestHandler(LoggingSetLevelSchema, async (request) => {
+      const { level } = request.params;
+
+      if (!isValidLogLevel(level)) {
+        throw new Error(`Invalid log level: ${level}. Valid levels are: emergency, alert, critical, error, warning, notice, info, debug`);
+      }
+
+      this.mcpLogger.setMinLevel(level as LogLevel);
+
+      // Log the level change
+      this.mcpLogger.notice(`MCP log level changed to: ${level}`, 'mcp-server');
+
+      return {};
+    });
   }
 
   async start(): Promise<void> {
-    // Load previous session if configured
-    await this.contextManager.loadSession();
+    try {
+      this.mcpLogger.info('Starting MCP Shell Execution Server', 'mcp-server');
 
-    this.transport = new StdioServerTransport();
+      // Load previous session if configured
+      await this.contextManager.loadSession();
+      this.mcpLogger.debug('Context manager session loaded', 'mcp-server');
 
-    // Set up connection monitoring
-    this.setupConnectionMonitoring();
+      this.transport = new StdioServerTransport();
 
-    await this.server.connect(this.transport);
+      // Set up connection monitoring
+      this.setupConnectionMonitoring();
+      this.mcpLogger.debug('Connection monitoring configured', 'mcp-server');
 
-    // Log server start with audit log location info
-    await this.auditLogger.log({
-      level: 'info',
-      message: 'MCP Shell Server started',
-      context: {
-        config: this.config,
-        auditLogLocation: this.auditLogger.getLogFilePath(),
-        pid: process.pid,
-        platform: process.platform,
-        nodeVersion: process.version,
-      },
-    });
+      await this.server.connect(this.transport);
+      this.mcpLogger.info('MCP server transport connected', 'mcp-server');
+
+      // Process any queued MCP log messages now that transport is ready
+      this.mcpLogger.processQueuedMessages();
+
+      // Log server start with audit log location info
+      await this.auditLogger.log({
+        level: 'info',
+        message: 'MCP Shell Server started',
+        context: {
+          config: this.config,
+          auditLogLocation: this.auditLogger.getLogFilePath(),
+          pid: process.pid,
+          platform: process.platform,
+          nodeVersion: process.version,
+        },
+      });
+
+      this.mcpLogger.notice('MCP Shell Execution Server started successfully', 'mcp-server', {
+        capabilities: ['tools', 'resources', 'prompts', 'logging'],
+        securityLevel: this.config.security.level,
+        auditLogLocation: this.auditLogger.getLogFilePath()
+      });
+
+    } catch (error) {
+      this.mcpLogger.critical('Failed to start MCP server', 'mcp-server', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
   }
 
   private setupConnectionMonitoring(): void {
     // Monitor stdin for closure (indicates client disconnection)
     process.stdin.on('end', () => {
+      this.mcpLogger.warning('Client disconnected (stdin closed)', 'connection-monitor');
       console.error('📡 Client disconnected (stdin closed)');
       this.gracefulShutdown('Client disconnection');
     });
 
     process.stdin.on('error', (error) => {
+      this.mcpLogger.error('Stdin error detected', 'connection-monitor', { error: error.message });
       console.error('📡 Stdin error:', error.message);
       this.gracefulShutdown('Stdin error');
     });
 
     // Monitor for broken pipe (client closed connection)
     process.stdout.on('error', (error) => {
+      this.mcpLogger.error('Stdout error detected', 'connection-monitor', { error: error.message });
       console.error('📡 Stdout error:', error.message);
       this.gracefulShutdown('Stdout error');
     });
@@ -2035,6 +2127,7 @@ Please start by enabling the terminal viewer service.`,
 
     // Start heartbeat monitoring
     this.startHeartbeat();
+    this.mcpLogger.debug('Heartbeat monitoring started', 'connection-monitor');
   }
 
   private updateActivity(): void {

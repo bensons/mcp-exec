@@ -139,10 +139,43 @@ export interface Command {
   dependsOn?: string[]; // IDs of commands that must complete first
 }
 
+// RFC 5424 Syslog Severity Levels
+export type LogLevel =
+  | 'emergency'    // 0: System is unusable
+  | 'alert'        // 1: Action must be taken immediately
+  | 'critical'     // 2: Critical conditions
+  | 'error'        // 3: Error conditions
+  | 'warning'      // 4: Warning conditions
+  | 'notice'       // 5: Normal but significant condition
+  | 'info'         // 6: Informational messages
+  | 'debug';       // 7: Debug-level messages
+
+// Legacy log levels for backward compatibility
+export type LegacyLogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+// Log level numeric values (RFC 5424)
+export const LOG_LEVELS: Record<LogLevel, number> = {
+  emergency: 0,
+  alert: 1,
+  critical: 2,
+  error: 3,
+  warning: 4,
+  notice: 5,
+  info: 6,
+  debug: 7
+};
+
+// MCP Log Message for client notifications
+export interface MCPLogMessage {
+  level: LogLevel;
+  logger?: string;
+  data: any;
+}
+
 export interface AuditLogger {
-  // Log levels
-  logLevel: 'debug' | 'info' | 'warn' | 'error';
-  
+  // Log levels (updated to support RFC 5424)
+  logLevel: LogLevel;
+
   // Log entry structure
   logEntry: {
     timestamp: Date;
@@ -154,17 +187,17 @@ export interface AuditLogger {
     securityCheck: ValidationResult;
     aiIntent?: string;
   };
-  
+
   // Storage options
   storage: {
     type: 'file' | 'database' | 'remote';
     retention: number; // days
     encryption: boolean;
   };
-  
+
   // Query interface
   queryLogs(filters: LogFilters): Promise<LogEntry[]>;
-  
+
   // Analytics
   generateReport(timeRange: TimeRange): Promise<AuditReport>;
 }
@@ -269,7 +302,7 @@ export interface ServerConfig {
   };
   audit: {
     enabled: boolean;
-    logLevel: 'debug' | 'info' | 'warn' | 'error';
+    logLevel: LogLevel | LegacyLogLevel;
     retention: number;
     logFile?: string; // Full path to log file
     logDirectory?: string; // Directory for log files
@@ -284,6 +317,13 @@ export interface ServerConfig {
         smtpConfig?: any;
       };
     };
+  };
+  mcpLogging?: {
+    enabled: boolean;
+    minLevel: LogLevel;
+    rateLimitPerMinute: number;
+    maxQueueSize: number;
+    includeContext: boolean;
   };
   terminalViewer: {
     enabled: boolean;

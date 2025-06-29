@@ -13,13 +13,16 @@ import {
   LogEntry,
   LogFilters,
   TimeRange,
-  AuditReport
+  AuditReport,
+  LogLevel,
+  LegacyLogLevel,
+  LOG_LEVELS
 } from '../types/index';
 import { MonitoringSystem, MonitoringConfig } from './monitoring';
 
 export interface AuditConfig {
   enabled: boolean;
-  logLevel: 'debug' | 'info' | 'warn' | 'error';
+  logLevel: LogLevel | LegacyLogLevel; // Support both RFC 5424 and legacy levels
   retention: number;
   logFile?: string; // Full path to log file
   logDirectory?: string; // Directory for log files
@@ -43,9 +46,10 @@ export interface LogErrorOptions {
 }
 
 export interface LogOptions {
-  level: 'debug' | 'info' | 'warn' | 'error';
+  level: LogLevel | LegacyLogLevel;
   message: string;
   context?: any;
+  logger?: string; // Optional logger name for categorization
 }
 
 export class AuditLogger {
@@ -149,12 +153,15 @@ export class AuditLogger {
       return;
     }
 
+    const normalizedLevel = this.normalizeLogLevel(options.level);
     const logLine = {
       timestamp: new Date().toISOString(),
-      level: options.level.toUpperCase(),
+      level: normalizedLevel.toUpperCase(),
       message: options.message,
       context: options.context,
+      logger: options.logger,
       pid: process.pid,
+      severity: LOG_LEVELS[normalizedLevel], // RFC 5424 numeric severity
     };
 
     try {
@@ -162,6 +169,39 @@ export class AuditLogger {
     } catch (error) {
       console.error('Failed to write to audit log:', error);
     }
+  }
+
+  // Convenience methods for RFC 5424 log levels
+  async emergency(message: string, context?: any, logger?: string): Promise<void> {
+    return this.log({ level: 'emergency', message, context, logger });
+  }
+
+  async alert(message: string, context?: any, logger?: string): Promise<void> {
+    return this.log({ level: 'alert', message, context, logger });
+  }
+
+  async critical(message: string, context?: any, logger?: string): Promise<void> {
+    return this.log({ level: 'critical', message, context, logger });
+  }
+
+  async error(message: string, context?: any, logger?: string): Promise<void> {
+    return this.log({ level: 'error', message, context, logger });
+  }
+
+  async warning(message: string, context?: any, logger?: string): Promise<void> {
+    return this.log({ level: 'warning', message, context, logger });
+  }
+
+  async notice(message: string, context?: any, logger?: string): Promise<void> {
+    return this.log({ level: 'notice', message, context, logger });
+  }
+
+  async info(message: string, context?: any, logger?: string): Promise<void> {
+    return this.log({ level: 'info', message, context, logger });
+  }
+
+  async debug(message: string, context?: any, logger?: string): Promise<void> {
+    return this.log({ level: 'debug', message, context, logger });
   }
 
   async queryLogs(filters: LogFilters): Promise<LogEntry[]> {
@@ -539,12 +579,35 @@ export class AuditLogger {
     }
   }
 
-  private shouldLog(level: string): boolean {
-    const levels = ['debug', 'info', 'warn', 'error'];
-    const configLevelIndex = levels.indexOf(this.config.logLevel);
-    const messageLevelIndex = levels.indexOf(level);
-    
-    return messageLevelIndex >= configLevelIndex;
+  private shouldLog(level: LogLevel | LegacyLogLevel): boolean {
+    // Convert legacy levels to RFC 5424 levels
+    const normalizedLevel = this.normalizeLogLevel(level);
+    const normalizedConfigLevel = this.normalizeLogLevel(this.config.logLevel);
+
+    // Lower numbers = higher priority in RFC 5424
+    const messageLevel = LOG_LEVELS[normalizedLevel];
+    const configLevel = LOG_LEVELS[normalizedConfigLevel];
+
+    return messageLevel <= configLevel;
+  }
+
+  private normalizeLogLevel(level: LogLevel | LegacyLogLevel): LogLevel {
+    // Convert legacy levels to RFC 5424 equivalents
+    switch (level) {
+      case 'warn': return 'warning';
+      case 'debug': return 'debug';
+      case 'info': return 'info';
+      case 'error': return 'error';
+      // RFC 5424 levels pass through unchanged
+      case 'emergency':
+      case 'alert':
+      case 'critical':
+      case 'warning':
+      case 'notice':
+        return level;
+      default:
+        return 'info'; // Safe default
+    }
   }
 
   private async enforceRetention(): Promise<void> {

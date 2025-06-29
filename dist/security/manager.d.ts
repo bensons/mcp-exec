@@ -2,6 +2,7 @@
  * Security manager for command validation and sandboxing
  */
 import { ValidationResult } from '../types/index';
+import { AuditLogger } from '../audit/logger';
 export interface SecurityConfig {
     level: 'strict' | 'moderate' | 'permissive';
     confirmDangerous: boolean;
@@ -23,7 +24,8 @@ export declare class SecurityManager {
     private config;
     private dangerousPatterns;
     private systemDirectories;
-    constructor(config: SecurityConfig);
+    private auditLogger?;
+    constructor(config: SecurityConfig, auditLogger?: AuditLogger);
     private initializeDangerousPatterns;
     private initializeSystemDirectories;
     private validateDirectoryAccess;

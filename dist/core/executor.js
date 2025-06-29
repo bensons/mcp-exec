@@ -35,13 +35,34 @@ class ShellExecutor {
             message: 'ShellExecutor.executeCommand called',
             context: { command: options.command }
         });
+        // Log command execution at info level
+        await this.auditLogger.info('Executing shell command', {
+            commandId,
+            command: options.command,
+            args: options.args,
+            cwd: options.cwd
+        }, 'shell-executor');
         try {
             // Security validation
             const fullCommand = this.buildFullCommand(options);
+            await this.auditLogger.debug('Validating command security', {
+                commandId,
+                fullCommand
+            }, 'security-validator');
             const securityCheck = await this.securityManager.validateCommand(fullCommand);
             if (!securityCheck.allowed) {
+                await this.auditLogger.warning('Command blocked by security policy', {
+                    commandId,
+                    fullCommand,
+                    reason: securityCheck.reason,
+                    riskLevel: securityCheck.riskLevel
+                }, 'security-validator');
                 throw new Error(`Command blocked by security policy: ${securityCheck.reason}`);
             }
+            await this.auditLogger.debug('Command passed security validation', {
+                commandId,
+                riskLevel: securityCheck.riskLevel
+            }, 'security-validator');
             // Analyze command intent
             const intent = this.intentTracker.analyzeIntent(fullCommand, options.aiContext);
             // Get current context
@@ -55,12 +76,22 @@ class ShellExecutor {
                 ...options.env,
             };
             // Execute command
+            await this.auditLogger.debug('Starting command execution', {
+                commandId,
+                workingDirectory,
+                timeout: options.timeout || this.config.security.timeout
+            }, 'command-executor');
             const result = await this.executeWithTimeout(options.command, options.args || [], {
                 cwd: workingDirectory,
                 env: environment,
                 shell: options.shell !== undefined ? options.shell : true,
                 timeout: options.timeout || this.config.security.timeout,
             });
+            await this.auditLogger.info('Command executed successfully', {
+                commandId,
+                exitCode: result.exitCode,
+                executionTime: Date.now() - startTime
+            }, 'command-executor');
             // Process output
             const processedOutput = await this.outputProcessor.process(result, fullCommand);
             // Enhance output with intent information
@@ -95,6 +126,12 @@ class ShellExecutor {
             return processedOutput;
         }
         catch (error) {
+            await this.auditLogger.error('Command execution failed', {
+                commandId,
+                command: this.buildFullCommand(options),
+                error: error instanceof Error ? error.message : 'Unknown error',
+                executionTime: Date.now() - startTime
+            }, 'command-executor');
             const errorOutput = {
                 stdout: '',
                 stderr: error instanceof Error ? error.message : 'Unknown error',

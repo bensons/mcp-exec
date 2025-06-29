@@ -62,11 +62,21 @@ The mcp-exec server supports comprehensive configuration through environment var
 | Environment Variable | Type | Default | Description |
 |---------------------|------|---------|-------------|
 | `MCP_EXEC_AUDIT_ENABLED` | `boolean` | `true` | Enable audit logging |
-| `MCP_EXEC_AUDIT_LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error` | `debug` | Audit log level |
+| `MCP_EXEC_AUDIT_LOG_LEVEL` | `emergency` \| `alert` \| `critical` \| `error` \| `warning` \| `notice` \| `info` \| `debug` | `debug` | Audit log level (RFC 5424 compliant) |
 | `MCP_EXEC_AUDIT_RETENTION` | `number` | `30` | Audit log retention in days |
 | `MCP_EXEC_MONITORING_ENABLED` | `boolean` | `true` | Enable monitoring and alerts |
 | `MCP_EXEC_ALERT_RETENTION` | `number` | `7` | Alert retention in days |
 | `MCP_EXEC_MAX_ALERTS_PER_HOUR` | `number` | `100` | Maximum alerts per hour |
+
+## 🔗 MCP Logging Configuration
+
+| Environment Variable | Type | Default | Description |
+|---------------------|------|---------|-------------|
+| `MCP_EXEC_MCP_LOGGING_ENABLED` | `boolean` | `true` | Enable MCP client logging notifications |
+| `MCP_EXEC_MCP_LOG_LEVEL` | `emergency` \| `alert` \| `critical` \| `error` \| `warning` \| `notice` \| `info` \| `debug` | `info` | Minimum log level for MCP notifications |
+| `MCP_EXEC_MCP_RATE_LIMIT` | `number` | `60` | Maximum MCP log messages per minute |
+| `MCP_EXEC_MCP_QUEUE_SIZE` | `number` | `100` | Maximum queued MCP log messages |
+| `MCP_EXEC_MCP_INCLUDE_CONTEXT` | `boolean` | `true` | Include context data in MCP log messages |
 
 ## 📝 Usage Examples
 

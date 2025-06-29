@@ -102,8 +102,16 @@ export interface Command {
     shell?: boolean | string;
     dependsOn?: string[];
 }
+export type LogLevel = 'emergency' | 'alert' | 'critical' | 'error' | 'warning' | 'notice' | 'info' | 'debug';
+export type LegacyLogLevel = 'debug' | 'info' | 'warn' | 'error';
+export declare const LOG_LEVELS: Record<LogLevel, number>;
+export interface MCPLogMessage {
+    level: LogLevel;
+    logger?: string;
+    data: any;
+}
 export interface AuditLogger {
-    logLevel: 'debug' | 'info' | 'warn' | 'error';
+    logLevel: LogLevel;
     logEntry: {
         timestamp: Date;
         sessionId: string;
@@ -220,7 +228,7 @@ export interface ServerConfig {
     };
     audit: {
         enabled: boolean;
-        logLevel: 'debug' | 'info' | 'warn' | 'error';
+        logLevel: LogLevel | LegacyLogLevel;
         retention: number;
         logFile?: string;
         logDirectory?: string;
@@ -235,6 +243,13 @@ export interface ServerConfig {
                 smtpConfig?: any;
             };
         };
+    };
+    mcpLogging?: {
+        enabled: boolean;
+        minLevel: LogLevel;
+        rateLimitPerMinute: number;
+        maxQueueSize: number;
+        includeContext: boolean;
     };
     terminalViewer: {
         enabled: boolean;

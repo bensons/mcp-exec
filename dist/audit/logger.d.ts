@@ -1,11 +1,11 @@
 /**
  * Comprehensive audit logging system
  */
-import { CommandOutput, CommandContext, ValidationResult, LogEntry, LogFilters, TimeRange, AuditReport } from '../types/index';
+import { CommandOutput, CommandContext, ValidationResult, LogEntry, LogFilters, TimeRange, AuditReport, LogLevel, LegacyLogLevel } from '../types/index';
 import { MonitoringSystem, MonitoringConfig } from './monitoring';
 export interface AuditConfig {
     enabled: boolean;
-    logLevel: 'debug' | 'info' | 'warn' | 'error';
+    logLevel: LogLevel | LegacyLogLevel;
     retention: number;
     logFile?: string;
     logDirectory?: string;
@@ -26,9 +26,10 @@ export interface LogErrorOptions {
     context: CommandContext;
 }
 export interface LogOptions {
-    level: 'debug' | 'info' | 'warn' | 'error';
+    level: LogLevel | LegacyLogLevel;
     message: string;
     context?: any;
+    logger?: string;
 }
 export declare class AuditLogger {
     private config;
@@ -39,6 +40,14 @@ export declare class AuditLogger {
     logCommand(options: LogCommandOptions): Promise<void>;
     logError(options: LogErrorOptions): Promise<void>;
     log(options: LogOptions): Promise<void>;
+    emergency(message: string, context?: any, logger?: string): Promise<void>;
+    alert(message: string, context?: any, logger?: string): Promise<void>;
+    critical(message: string, context?: any, logger?: string): Promise<void>;
+    error(message: string, context?: any, logger?: string): Promise<void>;
+    warning(message: string, context?: any, logger?: string): Promise<void>;
+    notice(message: string, context?: any, logger?: string): Promise<void>;
+    info(message: string, context?: any, logger?: string): Promise<void>;
+    debug(message: string, context?: any, logger?: string): Promise<void>;
     queryLogs(filters: LogFilters): Promise<LogEntry[]>;
     generateReport(timeRange: TimeRange): Promise<AuditReport>;
     generateComplianceReport(timeRange: TimeRange): Promise<any>;
@@ -57,6 +66,7 @@ export declare class AuditLogger {
     private loadExistingLogs;
     private writeLogEntry;
     private shouldLog;
+    private normalizeLogLevel;
     private enforceRetention;
 }
 //# sourceMappingURL=logger.d.ts.map

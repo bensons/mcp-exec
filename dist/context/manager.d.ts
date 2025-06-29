@@ -2,6 +2,7 @@
  * Context manager for preserving state across command executions
  */
 import { CommandHistoryEntry, CommandOutput, FileSystemDiff, CommandContext } from '../types/index';
+import { AuditLogger } from '../audit/logger';
 export interface ContextConfig {
     preserveWorkingDirectory: boolean;
     sessionPersistence: boolean;
@@ -25,7 +26,8 @@ export declare class ContextManager {
     private commandHistory;
     private outputCache;
     private fileSystemChanges;
-    constructor(config: ContextConfig);
+    private auditLogger?;
+    constructor(config: ContextConfig, auditLogger?: AuditLogger);
     getCurrentContext(sessionId?: string): Promise<CommandContext>;
     updateAfterCommand(options: UpdateCommandOptions): Promise<void>;
     getHistory(limit?: number, filter?: string): Promise<CommandHistoryEntry[]>;

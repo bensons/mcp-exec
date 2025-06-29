@@ -10,6 +10,7 @@ declare class MCPShellServer {
     private securityManager;
     private contextManager;
     private auditLogger;
+    private mcpLogger;
     private confirmationManager;
     private displayFormatter;
     private terminalViewerService?;

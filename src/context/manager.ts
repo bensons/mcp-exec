@@ -10,8 +10,10 @@ import {
   CommandHistoryEntry,
   CommandOutput,
   FileSystemDiff,
-  CommandContext
+  CommandContext,
+  LogLevel
 } from '../types/index';
+import { AuditLogger } from '../audit/logger';
 
 export interface ContextConfig {
   preserveWorkingDirectory: boolean;
@@ -38,9 +40,11 @@ export class ContextManager {
   private commandHistory: CommandHistoryEntry[];
   private outputCache: Map<string, CommandOutput>;
   private fileSystemChanges: FileSystemDiff[];
+  private auditLogger?: AuditLogger;
 
-  constructor(config: ContextConfig) {
+  constructor(config: ContextConfig, auditLogger?: AuditLogger) {
     this.config = config;
+    this.auditLogger = auditLogger;
     this.sessionId = uuidv4();
     this.currentDirectory = process.cwd();
     this.environmentVariables = new Map();
@@ -54,6 +58,15 @@ export class ContextManager {
         this.environmentVariables.set(key, value);
       }
     });
+
+    // Log context manager initialization
+    this.auditLogger?.notice('Context manager initialized', {
+      sessionId: this.sessionId,
+      currentDirectory: this.currentDirectory,
+      preserveWorkingDirectory: config.preserveWorkingDirectory,
+      sessionPersistence: config.sessionPersistence,
+      maxHistorySize: config.maxHistorySize
+    }, 'context-manager');
   }
 
   async getCurrentContext(sessionId?: string): Promise<CommandContext> {
@@ -72,6 +85,14 @@ export class ContextManager {
 
   async updateAfterCommand(options: UpdateCommandOptions): Promise<void> {
     const { id, command, workingDirectory, environment, output, aiContext, sessionId, sessionType } = options;
+
+    this.auditLogger?.debug('Updating context after command execution', {
+      commandId: id,
+      command: command.substring(0, 50),
+      workingDirectory,
+      sessionId,
+      sessionType
+    }, 'context-manager');
 
     // Update working directory if command changed it
     if (this.config.preserveWorkingDirectory) {

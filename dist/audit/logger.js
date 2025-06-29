@@ -40,6 +40,7 @@ exports.AuditLogger = void 0;
 const fs = __importStar(require("fs/promises"));
 const path = __importStar(require("path"));
 const uuid_1 = require("uuid");
+const index_1 = require("../types/index");
 const monitoring_1 = require("./monitoring");
 class AuditLogger {
     config;
@@ -127,12 +128,15 @@ class AuditLogger {
         if (!shouldLog) {
             return;
         }
+        const normalizedLevel = this.normalizeLogLevel(options.level);
         const logLine = {
             timestamp: new Date().toISOString(),
-            level: options.level.toUpperCase(),
+            level: normalizedLevel.toUpperCase(),
             message: options.message,
             context: options.context,
+            logger: options.logger,
             pid: process.pid,
+            severity: index_1.LOG_LEVELS[normalizedLevel], // RFC 5424 numeric severity
         };
         try {
             await fs.appendFile(this.logFile, JSON.stringify(logLine) + '\n');
@@ -140,6 +144,31 @@ class AuditLogger {
         catch (error) {
             console.error('Failed to write to audit log:', error);
         }
+    }
+    // Convenience methods for RFC 5424 log levels
+    async emergency(message, context, logger) {
+        return this.log({ level: 'emergency', message, context, logger });
+    }
+    async alert(message, context, logger) {
+        return this.log({ level: 'alert', message, context, logger });
+    }
+    async critical(message, context, logger) {
+        return this.log({ level: 'critical', message, context, logger });
+    }
+    async error(message, context, logger) {
+        return this.log({ level: 'error', message, context, logger });
+    }
+    async warning(message, context, logger) {
+        return this.log({ level: 'warning', message, context, logger });
+    }
+    async notice(message, context, logger) {
+        return this.log({ level: 'notice', message, context, logger });
+    }
+    async info(message, context, logger) {
+        return this.log({ level: 'info', message, context, logger });
+    }
+    async debug(message, context, logger) {
+        return this.log({ level: 'debug', message, context, logger });
     }
     async queryLogs(filters) {
         let filteredLogs = [...this.logs];
@@ -454,10 +483,31 @@ class AuditLogger {
         }
     }
     shouldLog(level) {
-        const levels = ['debug', 'info', 'warn', 'error'];
-        const configLevelIndex = levels.indexOf(this.config.logLevel);
-        const messageLevelIndex = levels.indexOf(level);
-        return messageLevelIndex >= configLevelIndex;
+        // Convert legacy levels to RFC 5424 levels
+        const normalizedLevel = this.normalizeLogLevel(level);
+        const normalizedConfigLevel = this.normalizeLogLevel(this.config.logLevel);
+        // Lower numbers = higher priority in RFC 5424
+        const messageLevel = index_1.LOG_LEVELS[normalizedLevel];
+        const configLevel = index_1.LOG_LEVELS[normalizedConfigLevel];
+        return messageLevel <= configLevel;
+    }
+    normalizeLogLevel(level) {
+        // Convert legacy levels to RFC 5424 equivalents
+        switch (level) {
+            case 'warn': return 'warning';
+            case 'debug': return 'debug';
+            case 'info': return 'info';
+            case 'error': return 'error';
+            // RFC 5424 levels pass through unchanged
+            case 'emergency':
+            case 'alert':
+            case 'critical':
+            case 'warning':
+            case 'notice':
+                return level;
+            default:
+                return 'info'; // Safe default
+        }
     }
     async enforceRetention() {
         if (this.config.retention <= 0) {

@@ -48,8 +48,10 @@ class ContextManager {
     commandHistory;
     outputCache;
     fileSystemChanges;
-    constructor(config) {
+    auditLogger;
+    constructor(config, auditLogger) {
         this.config = config;
+        this.auditLogger = auditLogger;
         this.sessionId = (0, uuid_1.v4)();
         this.currentDirectory = process.cwd();
         this.environmentVariables = new Map();
@@ -62,6 +64,14 @@ class ContextManager {
                 this.environmentVariables.set(key, value);
             }
         });
+        // Log context manager initialization
+        this.auditLogger?.notice('Context manager initialized', {
+            sessionId: this.sessionId,
+            currentDirectory: this.currentDirectory,
+            preserveWorkingDirectory: config.preserveWorkingDirectory,
+            sessionPersistence: config.sessionPersistence,
+            maxHistorySize: config.maxHistorySize
+        }, 'context-manager');
     }
     async getCurrentContext(sessionId) {
         return {
@@ -78,6 +88,13 @@ class ContextManager {
     }
     async updateAfterCommand(options) {
         const { id, command, workingDirectory, environment, output, aiContext, sessionId, sessionType } = options;
+        this.auditLogger?.debug('Updating context after command execution', {
+            commandId: id,
+            command: command.substring(0, 50),
+            workingDirectory,
+            sessionId,
+            sessionType
+        }, 'context-manager');
         // Update working directory if command changed it
         if (this.config.preserveWorkingDirectory) {
             await this.updateWorkingDirectory(command, workingDirectory, output);

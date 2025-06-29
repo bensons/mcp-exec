@@ -4,7 +4,8 @@
 
 import * as path from 'path';
 import * as os from 'os';
-import { ValidationResult } from '../types/index';
+import { ValidationResult, LogLevel } from '../types/index';
+import { AuditLogger } from '../audit/logger';
 
 export interface SecurityConfig {
   level: 'strict' | 'moderate' | 'permissive';
@@ -28,11 +29,22 @@ export class SecurityManager {
   private config: SecurityConfig;
   private dangerousPatterns: RegExp[] = [];
   private systemDirectories: string[] = [];
+  private auditLogger?: AuditLogger;
 
-  constructor(config: SecurityConfig) {
+  constructor(config: SecurityConfig, auditLogger?: AuditLogger) {
     this.config = config;
+    this.auditLogger = auditLogger;
     this.initializeDangerousPatterns();
     this.initializeSystemDirectories();
+
+    // Log security manager initialization
+    this.auditLogger?.notice('Security manager initialized', {
+      securityLevel: config.level,
+      confirmDangerous: config.confirmDangerous,
+      allowedDirectories: config.allowedDirectories,
+      blockedCommandsCount: config.blockedCommands.length,
+      sandboxingEnabled: config.sandboxing?.enabled || false
+    }, 'security-manager');
   }
 
 
@@ -331,9 +343,20 @@ export class SecurityManager {
   async validateCommand(command: string): Promise<ValidationResult> {
     const normalizedCommand = command.trim().toLowerCase();
 
+    this.auditLogger?.debug('Starting command validation', {
+      command: command.substring(0, 100), // Truncate for logging
+      securityLevel: this.config.level
+    }, 'security-validator');
+
     // Check blocked commands first
     for (const blocked of this.config.blockedCommands) {
       if (normalizedCommand.includes(blocked.toLowerCase())) {
+        this.auditLogger?.warning('Command blocked by explicit block list', {
+          command: command.substring(0, 100),
+          blockedPattern: blocked,
+          securityLevel: this.config.level
+        }, 'security-validator');
+
         return {
           allowed: false,
           reason: `Command contains blocked pattern: ${blocked}`,
@@ -348,7 +371,20 @@ export class SecurityManager {
       if (pattern.test(normalizedCommand)) {
         const riskLevel = this.assessRiskLevel(command);
 
+        this.auditLogger?.warning('Dangerous pattern detected in command', {
+          command: command.substring(0, 100),
+          pattern: pattern.source,
+          riskLevel,
+          securityLevel: this.config.level
+        }, 'security-validator');
+
         if (this.config.level === 'strict' && riskLevel === 'high') {
+          this.auditLogger?.alert('High-risk command blocked in strict mode', {
+            command: command.substring(0, 100),
+            riskLevel,
+            securityLevel: this.config.level
+          }, 'security-validator');
+
           return {
             allowed: false,
             reason: 'High-risk command blocked in strict mode',
@@ -358,6 +394,12 @@ export class SecurityManager {
         }
 
         if (this.config.confirmDangerous && riskLevel !== 'low') {
+          this.auditLogger?.notice('Dangerous command requires confirmation', {
+            command: command.substring(0, 100),
+            riskLevel,
+            confirmDangerous: this.config.confirmDangerous
+          }, 'security-validator');
+
           return {
             allowed: false,
             reason: 'Dangerous command requires confirmation',
@@ -392,9 +434,18 @@ export class SecurityManager {
       return sandboxCheck;
     }
 
+    const finalRiskLevel = this.assessRiskLevel(command);
+
+    this.auditLogger?.debug('Command validation completed', {
+      command: command.substring(0, 100),
+      allowed: true,
+      riskLevel: finalRiskLevel,
+      securityLevel: this.config.level
+    }, 'security-validator');
+
     return {
       allowed: true,
-      riskLevel: this.assessRiskLevel(command),
+      riskLevel: finalRiskLevel,
     };
   }
 }
