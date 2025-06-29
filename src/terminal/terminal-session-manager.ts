@@ -37,10 +37,15 @@ export class TerminalSessionManager {
   }
 
   async startSession(options: TerminalStartSessionOptions): Promise<string> {
+    console.log(`[DEBUG] TerminalSessionManager.startSession called with enableTerminalViewer: ${options.enableTerminalViewer}`);
+
     // If terminal viewer is not requested, use fallback
     if (!options.enableTerminalViewer) {
+      console.log(`[DEBUG] Terminal viewer not requested, using fallback session manager`);
       return this.fallbackSessionManager.startSession(options);
     }
+
+    console.log(`[DEBUG] Creating terminal session, current sessions: ${this.sessions.size}/${this.terminalViewerConfig.maxSessions}`);
 
     // Check session limit
     if (this.sessions.size >= this.terminalViewerConfig.maxSessions) {
@@ -81,9 +86,11 @@ export class TerminalSessionManager {
 
     // Set up PTY event handlers
     this.setupPtyHandlers(session);
+    console.log(`[DEBUG] PTY handlers set up for session ${sessionId}`);
 
     // Store session
     this.sessions.set(sessionId, session);
+    console.log(`[DEBUG] Terminal session ${sessionId} created and stored, total sessions: ${this.sessions.size}`);
 
     return sessionId;
   }
@@ -180,12 +187,16 @@ export class TerminalSessionManager {
   }
 
   async sendInput(options: SendInputOptions): Promise<void> {
+    console.log(`[DEBUG] TerminalSessionManager.sendInput called for session ${options.sessionId}`);
     const session = this.sessions.get(options.sessionId);
-    
+
     if (!session) {
+      console.log(`[DEBUG] Session ${options.sessionId} not found in terminal sessions, trying fallback manager`);
       // Try fallback session manager
       return this.fallbackSessionManager.sendInput(options);
     }
+
+    console.log(`[DEBUG] Found terminal session ${options.sessionId}, status: ${session.status}`);
 
     if (session.status !== 'running') {
       throw new Error(`Session ${options.sessionId} is not running (status: ${session.status})`);

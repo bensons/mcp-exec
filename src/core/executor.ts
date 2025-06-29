@@ -54,9 +54,12 @@ export class ShellExecutor {
     const commandId = uuidv4();
     const startTime = Date.now();
 
+    console.log(`[DEBUG] ShellExecutor.executeCommand called with session: ${options.session}, command: ${options.command}`);
+
     try {
       // Handle session-based execution
       if (options.session) {
+        console.log(`[DEBUG] Session-based execution requested for session: ${options.session}`);
         return await this.executeWithSession(options, commandId, startTime);
       }
 
@@ -352,12 +355,14 @@ export class ShellExecutor {
   async sendToSession(options: ExecuteCommandOptions, commandId: string, startTime: number): Promise<CommandOutput> {
     try {
       const sessionId = options.session!;
+      console.log(`[DEBUG] ShellExecutor.sendToSession called for session: ${sessionId}`);
 
       // Send input to session
       await this.sessionManager.sendInput({
         sessionId,
         input: this.buildFullCommand(options),
       });
+      console.log(`[DEBUG] Input sent to session ${sessionId} via InteractiveSessionManager`);
 
       // Wait for output
       await new Promise(resolve => setTimeout(resolve, 1000));

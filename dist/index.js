@@ -44,6 +44,7 @@ const stdio_js_1 = require("@modelcontextprotocol/sdk/server/stdio.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const zod_1 = require("zod");
 const path = __importStar(require("path"));
+const uuid_1 = require("uuid");
 const executor_1 = require("./core/executor");
 const manager_1 = require("./security/manager");
 const manager_2 = require("./context/manager");
@@ -258,6 +259,19 @@ class MCPShellServer {
         this.auditLogger = new logger_1.AuditLogger(this.config.audit);
         this.confirmationManager = new confirmation_1.ConfirmationManager();
         this.displayFormatter = new display_formatter_1.DisplayFormatter(this.config.display);
+        // Debug logging for initialization
+        console.log(`[DEBUG] MCP Server components initialized - security: ${this.config.security.level}, audit: ${this.config.audit.enabled}, terminalViewer: ${this.config.terminalViewer.enabled}`);
+        this.auditLogger.log({
+            level: 'debug',
+            message: 'MCP Server components initialized',
+            context: {
+                securityLevel: this.config.security.level,
+                auditEnabled: this.config.audit.enabled,
+                auditLogLevel: this.config.audit.logLevel,
+                terminalViewerEnabled: this.config.terminalViewer.enabled,
+                sessionPersistence: this.config.context.sessionPersistence,
+            }
+        });
         // Initialize terminal components
         this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer);
         // Auto-start terminal viewer service if enabled in config
@@ -554,10 +568,40 @@ class MCPShellServer {
                 switch (name) {
                     case 'execute_command': {
                         const parsed = ExecuteCommandSchema.parse(args);
+                        // Debug logging for command execution
+                        console.log(`[DEBUG] Execute command request: ${parsed.command} ${(parsed.args || []).join(' ')} (session: ${parsed.session}, terminalViewer: ${parsed.enableTerminalViewer})`);
+                        this.auditLogger.log({
+                            level: 'debug',
+                            message: 'Execute command request received',
+                            context: {
+                                command: parsed.command,
+                                args: parsed.args,
+                                session: parsed.session,
+                                enableTerminalViewer: parsed.enableTerminalViewer,
+                                cwd: parsed.cwd,
+                                hasAiContext: !!parsed.aiContext,
+                            }
+                        });
                         // Check if this is for an existing terminal session
                         if (parsed.session && parsed.session !== 'new') {
+                            console.log(`[DEBUG] Checking for existing session: ${parsed.session}`);
+                            this.auditLogger.log({
+                                level: 'debug',
+                                message: 'Checking for existing session',
+                                context: { sessionId: parsed.session, sessionType: 'lookup' }
+                            });
                             const terminalSession = this.terminalSessionManager?.getSession(parsed.session);
                             if (terminalSession) {
+                                console.log(`[DEBUG] Found terminal session ${parsed.session}, routing to TerminalSessionManager`);
+                                this.auditLogger.log({
+                                    level: 'debug',
+                                    message: 'Found terminal session, routing to TerminalSessionManager',
+                                    context: {
+                                        sessionId: parsed.session,
+                                        sessionStatus: terminalSession.status,
+                                        sessionCommand: terminalSession.command
+                                    }
+                                });
                                 // This is a terminal session - handle it via terminal session manager
                                 try {
                                     await this.terminalSessionManager.sendInput({
@@ -593,12 +637,31 @@ class MCPShellServer {
                         }
                         // Handle terminal viewer option
                         if (parsed.enableTerminalViewer) {
+                            this.auditLogger.log({
+                                level: 'debug',
+                                message: 'Terminal viewer requested for command execution',
+                                context: {
+                                    command: parsed.command,
+                                    hasExistingService: !!this.terminalViewerService,
+                                    serviceEnabled: this.terminalViewerService?.isEnabled() || false
+                                }
+                            });
                             try {
                                 // Ensure terminal viewer service is running
                                 if (!this.terminalViewerService) {
+                                    this.auditLogger.log({
+                                        level: 'debug',
+                                        message: 'Creating new TerminalViewerService instance',
+                                        context: { port: this.config.terminalViewer.port }
+                                    });
                                     this.terminalViewerService = new viewer_service_1.TerminalViewerService(this.config.terminalViewer);
                                 }
                                 if (!this.terminalViewerService.isEnabled()) {
+                                    this.auditLogger.log({
+                                        level: 'debug',
+                                        message: 'Starting terminal viewer service',
+                                        context: { port: this.config.terminalViewer.port }
+                                    });
                                     await this.terminalViewerService.start();
                                 }
                                 // Create terminal session using enhanced session manager
@@ -1033,9 +1096,24 @@ class MCPShellServer {
                         };
                     }
                     case 'list_sessions': {
+                        this.auditLogger.log({
+                            level: 'debug',
+                            message: 'Listing sessions from both managers',
+                            context: { requestId: (0, uuid_1.v4)() }
+                        });
                         // Get sessions from both managers
                         const regularSessions = await this.shellExecutor.listSessions();
                         const terminalSessions = this.terminalSessionManager?.listSessions() || [];
+                        this.auditLogger.log({
+                            level: 'debug',
+                            message: 'Sessions retrieved from managers',
+                            context: {
+                                regularSessionCount: regularSessions.length,
+                                terminalSessionCount: terminalSessions.length,
+                                regularSessionIds: regularSessions.map(s => s.sessionId),
+                                terminalSessionIds: terminalSessions.map(s => s.sessionId),
+                            }
+                        });
                         // Combine all sessions
                         const allSessions = [
                             ...regularSessions.map(session => ({
@@ -1076,11 +1154,25 @@ class MCPShellServer {
                     }
                     case 'kill_session': {
                         const parsed = KillSessionSchema.parse(args);
+                        this.auditLogger.log({
+                            level: 'debug',
+                            message: 'Kill session request received',
+                            context: { sessionId: parsed.sessionId }
+                        });
                         try {
                             // Try terminal session manager first
                             if (this.terminalSessionManager) {
                                 const terminalSession = this.terminalSessionManager.getSession(parsed.sessionId);
                                 if (terminalSession) {
+                                    this.auditLogger.log({
+                                        level: 'debug',
+                                        message: 'Found session in TerminalSessionManager, terminating',
+                                        context: {
+                                            sessionId: parsed.sessionId,
+                                            sessionStatus: terminalSession.status,
+                                            sessionCommand: terminalSession.command
+                                        }
+                                    });
                                     await this.terminalSessionManager.killSession(parsed.sessionId);
                                     // Also remove from terminal viewer service if it exists
                                     if (this.terminalViewerService) {
