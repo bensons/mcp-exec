@@ -14,16 +14,30 @@ let maxReconnectAttempts = 5;
 let reconnectDelay = 1000;
 
 function initTerminal(sid, h, p) {
+    console.log('[DEBUG] initTerminal called with:', { sessionId: sid, host: h, port: p });
     sessionId = sid;
     host = h;
     port = p;
-    
+
+    console.log('[DEBUG] Calling setupTerminal...');
     setupTerminal();
+    console.log('[DEBUG] Calling connectWebSocket...');
     connectWebSocket();
+    console.log('[DEBUG] Calling setupEventListeners...');
     setupEventListeners();
+    console.log('[DEBUG] initTerminal completed');
 }
 
 function setupTerminal() {
+    console.log('[DEBUG] setupTerminal started');
+
+    // Check if Terminal is available
+    if (typeof Terminal === 'undefined') {
+        console.error('[ERROR] Terminal (XTerm.js) is not loaded!');
+        return;
+    }
+
+    console.log('[DEBUG] Creating Terminal instance...');
     // Create terminal instance
     terminal = new Terminal({
         cursorBlink: true,
@@ -58,40 +72,71 @@ function setupTerminal() {
         scrollback: 10000
     });
 
+    console.log('[DEBUG] Terminal instance created, adding addons...');
+
+    // Check if addons are available
+    if (typeof FitAddon === 'undefined') {
+        console.error('[ERROR] FitAddon is not loaded!');
+        return;
+    }
+    if (typeof WebLinksAddon === 'undefined') {
+        console.error('[ERROR] WebLinksAddon is not loaded!');
+        return;
+    }
+
     // Add addons
     fitAddon = new FitAddon.FitAddon();
     webLinksAddon = new WebLinksAddon.WebLinksAddon();
-    
+
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(webLinksAddon);
+    console.log('[DEBUG] Addons loaded');
 
     // Open terminal in the container
     const terminalElement = document.getElementById('terminal');
+    if (!terminalElement) {
+        console.error('[ERROR] Terminal element not found!');
+        return;
+    }
+
+    console.log('[DEBUG] Opening terminal in container...');
     terminal.open(terminalElement);
-    
+
     // Fit terminal to container
+    console.log('[DEBUG] Fitting terminal to container...');
     fitAddon.fit();
+    console.log('[DEBUG] setupTerminal completed');
 }
 
 function connectWebSocket() {
+    console.log('[DEBUG] connectWebSocket started');
+    console.log('[DEBUG] Connection params:', { sessionId, host, port });
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${host}:${port}/terminal/${sessionId}`;
-    
+    console.log('[DEBUG] WebSocket URL:', wsUrl);
+
     showConnectionStatus('connecting');
-    
+
     try {
+        console.log('[DEBUG] Creating WebSocket...');
         websocket = new WebSocket(wsUrl);
+        console.log('[DEBUG] WebSocket created, setting up handlers...');
         
         websocket.onopen = function(event) {
+            console.log('[DEBUG] WebSocket onopen fired');
             console.log('WebSocket connected');
             showConnectionStatus('connected');
             reconnectAttempts = 0;
 
             // Hide loading state and show terminal
+            console.log('[DEBUG] Calling hideLoading...');
             hideLoading();
 
             // Send initial resize
+            console.log('[DEBUG] Sending initial resize...');
             sendResize();
+            console.log('[DEBUG] WebSocket onopen completed');
         };
         
         websocket.onmessage = function(event) {
@@ -280,19 +325,33 @@ function showLoading(message = 'Loading terminal...') {
 }
 
 function hideLoading() {
+    console.log('[DEBUG] hideLoading called');
     const terminalElement = document.getElementById('terminal');
+    if (!terminalElement) {
+        console.error('[ERROR] Terminal element not found in hideLoading');
+        return;
+    }
+
     // Clear any loading content and let the terminal take over
     const loadingDiv = terminalElement.querySelector('.loading');
     if (loadingDiv) {
+        console.log('[DEBUG] Removing loading div');
         loadingDiv.remove();
+    } else {
+        console.log('[DEBUG] No loading div found to remove');
     }
 
     // Ensure terminal is visible and properly fitted
     if (terminal && fitAddon) {
+        console.log('[DEBUG] Fitting terminal after hiding loading');
         setTimeout(() => {
             fitAddon.fit();
+            console.log('[DEBUG] Terminal fitted');
         }, 100);
+    } else {
+        console.log('[DEBUG] Terminal or fitAddon not available for fitting');
     }
+    console.log('[DEBUG] hideLoading completed');
 }
 
 function toggleFullscreen() {
@@ -326,5 +385,7 @@ window.addEventListener('beforeunload', () => {
 
 // Initialize loading state
 document.addEventListener('DOMContentLoaded', () => {
+    console.log('[DEBUG] DOMContentLoaded fired, showing loading state');
     showLoading();
+    console.log('[DEBUG] Loading state shown');
 });

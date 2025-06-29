@@ -131,7 +131,16 @@ export class TerminalViewerService {
     <script src="/static/xterm-addon-web-links.js"></script>
     <script src="/static/terminal.js"></script>
     <script>
-        initTerminal('${sessionId}', '${this.config.host}', ${this.config.port});
+        window.addEventListener('load', function() {
+            console.log('[DEBUG] Window loaded, checking if initTerminal exists...');
+            if (typeof initTerminal === 'function') {
+                console.log('[DEBUG] initTerminal function found, calling it...');
+                initTerminal('${sessionId}', '${this.config.host}', ${this.config.port});
+            } else {
+                console.error('[ERROR] initTerminal function not found!');
+                alert('Error: initTerminal function not found. Check if terminal.js loaded correctly.');
+            }
+        });
     </script>
 </body>
 </html>`;
