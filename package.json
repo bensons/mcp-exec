@@ -7,7 +7,7 @@
     "mcp-exec": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/terminal && cp -r src/terminal/static dist/terminal/",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "watch": "nodemon --exec tsx src/index.ts",
