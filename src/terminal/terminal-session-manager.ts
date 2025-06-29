@@ -37,8 +37,8 @@ export class TerminalSessionManager {
   }
 
   async startSession(options: TerminalStartSessionOptions): Promise<string> {
-    // If terminal viewer is not enabled or not requested, use fallback
-    if (!options.enableTerminalViewer || !this.terminalViewerConfig.enabled) {
+    // If terminal viewer is not requested, use fallback
+    if (!options.enableTerminalViewer) {
       return this.fallbackSessionManager.startSession(options);
     }
 

@@ -541,38 +541,62 @@ class MCPShellServer {
                         const parsed = ExecuteCommandSchema.parse(args);
                         // Handle terminal viewer option
                         if (parsed.enableTerminalViewer) {
-                            // Ensure terminal viewer service is running
-                            if (!this.terminalViewerService) {
-                                this.terminalViewerService = new viewer_service_1.TerminalViewerService(this.config.terminalViewer);
+                            try {
+                                // Ensure terminal viewer service is running
+                                if (!this.terminalViewerService) {
+                                    this.terminalViewerService = new viewer_service_1.TerminalViewerService(this.config.terminalViewer);
+                                }
+                                if (!this.terminalViewerService.isEnabled()) {
+                                    await this.terminalViewerService.start();
+                                }
+                                // Create terminal session using enhanced session manager
+                                const sessionId = await this.terminalSessionManager.startSession({
+                                    ...parsed,
+                                    enableTerminalViewer: true,
+                                    terminalSize: { cols: 80, rows: 24 } // Default size
+                                });
+                                // Add session to terminal viewer service
+                                const terminalSession = this.terminalSessionManager.getSession(sessionId);
+                                if (terminalSession && this.terminalViewerService) {
+                                    this.terminalViewerService.addSession(terminalSession);
+                                }
+                                // Get viewer URL
+                                const viewerUrl = this.terminalViewerService?.getSessionUrl(sessionId) || 'Service not available';
+                                // Build the full command string for display
+                                const fullCommand = parsed.args && parsed.args.length > 0
+                                    ? `${parsed.command} ${parsed.args.join(' ')}`
+                                    : parsed.command;
+                                return {
+                                    content: [
+                                        {
+                                            type: 'text',
+                                            text: `🖥️ **Terminal Session Created**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Terminal Viewer URL:** ${viewerUrl}\n\n✨ You can now view this terminal session live in your browser!\n\n*The session will continue running and you can interact with it through the web interface.*`,
+                                        },
+                                    ],
+                                };
                             }
-                            if (!this.terminalViewerService.isEnabled()) {
-                                await this.terminalViewerService.start();
+                            catch (error) {
+                                // Fall back to regular execution if terminal viewer fails
+                                console.error('Terminal viewer error, falling back to regular execution:', error);
+                                const result = await this.shellExecutor.executeCommand(parsed);
+                                // Build the full command string for display
+                                const fullCommand = parsed.args && parsed.args.length > 0
+                                    ? `${parsed.command} ${parsed.args.join(' ')}`
+                                    : parsed.command;
+                                // Format the output for enhanced display
+                                const formattedOutput = this.displayFormatter.formatCommandOutput(fullCommand, result, {
+                                    showInput: true,
+                                    aiContext: parsed.aiContext
+                                });
+                                return {
+                                    content: [
+                                        {
+                                            type: 'text',
+                                            text: `⚠️ Terminal viewer failed, executed normally:\n\n${formattedOutput}`,
+                                        },
+                                    ],
+                                };
                             }
-                            // Create terminal session using enhanced session manager
-                            const sessionId = await this.terminalSessionManager.startSession({
-                                ...parsed,
-                                enableTerminalViewer: true,
-                                terminalSize: { cols: 80, rows: 24 } // Default size
-                            });
-                            // Add session to terminal viewer service
-                            const terminalSession = this.terminalSessionManager.getSession(sessionId);
-                            if (terminalSession) {
-                                this.terminalViewerService.addSession(terminalSession);
-                            }
-                            // Get viewer URL
-                            const viewerUrl = this.terminalViewerService.getSessionUrl(sessionId);
-                            // Build the full command string for display
-                            const fullCommand = parsed.args && parsed.args.length > 0
-                                ? `${parsed.command} ${parsed.args.join(' ')}`
-                                : parsed.command;
-                            return {
-                                content: [
-                                    {
-                                        type: 'text',
-                                        text: `🖥️ **Terminal Session Created**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Terminal Viewer URL:** ${viewerUrl}\n\n✨ You can now view this terminal session live in your browser!\n\n*The session will continue running and you can interact with it through the web interface.*`,
-                                    },
-                                ],
-                            };
                         }
                         else {
                             // Use standard execution
