@@ -362,6 +362,7 @@ class MCPShellServer {
         tools: [
           {
             name: 'execute_command',
+            title: 'Execute Shell Command',
             description: 'Execute a shell command with security validation and context preservation. Use enableTerminalViewer for browser-viewable terminal sessions.',
             openWorldHint: true,
             readOnlyHint: false,
@@ -393,6 +394,7 @@ class MCPShellServer {
           },
           {
             name: 'start_interactive_session',
+            title: 'Start Interactive Session',
             description: 'Start a new interactive shell session for command execution. The session will run the specified command (or default shell) and terminate when the process exits.',
             openWorldHint: true,
             readOnlyHint: false,
@@ -412,6 +414,7 @@ class MCPShellServer {
           },
           {
             name: 'start_terminal_session',
+            title: 'Start Terminal Session',
             description: 'Start a new terminal session with full PTY support and browser-based viewing. The terminal provides a persistent shell environment that continues running even after individual commands exit. Use kill_session to terminate the entire terminal session.',
             openWorldHint: true,
             readOnlyHint: false,
@@ -438,6 +441,7 @@ class MCPShellServer {
           },
           {
             name: 'send_to_session',
+            title: 'Send Input to Session',
             description: 'Send input to an existing interactive or terminal session',
             openWorldHint: true,
             readOnlyHint: false,
@@ -455,6 +459,7 @@ class MCPShellServer {
           },
           {
             name: 'terminate_terminal_session',
+            title: 'Terminate Terminal Session',
             description: 'Explicitly terminate a terminal session and its PTY process. This is different from sending "exit" commands, which only exit individual programs within the terminal.',
             inputSchema: {
               type: 'object',
@@ -467,6 +472,7 @@ class MCPShellServer {
           },
           {
             name: 'get_context',
+            title: 'Get Execution Context',
             description: 'Get current execution context including working directory and environment',
             inputSchema: {
               type: 'object',
@@ -477,6 +483,7 @@ class MCPShellServer {
           },
           {
             name: 'get_history',
+            title: 'Get Command History',
             description: 'Get command execution history with optional filtering',
             inputSchema: {
               type: 'object',
@@ -488,6 +495,7 @@ class MCPShellServer {
           },
           {
             name: 'set_working_directory',
+            title: 'Set Working Directory',
             description: 'Set the current working directory for subsequent commands',
             inputSchema: {
               type: 'object',
@@ -499,6 +507,7 @@ class MCPShellServer {
           },
           {
             name: 'clear_history',
+            title: 'Clear Command History',
             description: 'Clear command history and session data',
             inputSchema: {
               type: 'object',
@@ -509,6 +518,7 @@ class MCPShellServer {
           },
           {
             name: 'get_filesystem_changes',
+            title: 'Get File System Changes',
             description: 'Get tracked file system changes from command executions',
             inputSchema: {
               type: 'object',
@@ -519,6 +529,7 @@ class MCPShellServer {
           },
           {
             name: 'update_security_config',
+            title: 'Update Security Settings',
             description: 'Update security configuration settings',
             inputSchema: {
               type: 'object',
@@ -539,6 +550,7 @@ class MCPShellServer {
           },
           {
             name: 'get_security_status',
+            title: 'Get Security Status',
             description: 'Get current security configuration and status',
             inputSchema: {
               type: 'object',
@@ -547,6 +559,7 @@ class MCPShellServer {
           },
           {
             name: 'confirm_command',
+            title: 'Confirm Dangerous Command',
             description: 'Confirm execution of a dangerous command',
             inputSchema: {
               type: 'object',
@@ -558,6 +571,7 @@ class MCPShellServer {
           },
           {
             name: 'get_pending_confirmations',
+            title: 'Get Pending Confirmations',
             description: 'Get list of commands pending confirmation',
             inputSchema: {
               type: 'object',
@@ -566,6 +580,7 @@ class MCPShellServer {
           },
           {
             name: 'get_intent_summary',
+            title: 'Get AI Intent Summary',
             description: 'Get summary of command intents and AI optimization insights',
             inputSchema: {
               type: 'object',
@@ -574,6 +589,7 @@ class MCPShellServer {
           },
           {
             name: 'suggest_next_commands',
+            title: 'Suggest Next Commands',
             description: 'Get AI-suggested next commands based on current command',
             inputSchema: {
               type: 'object',
@@ -585,6 +601,7 @@ class MCPShellServer {
           },
           {
             name: 'generate_audit_report',
+            title: 'Generate Audit Report',
             description: 'Generate comprehensive audit or compliance report',
             inputSchema: {
               type: 'object',
@@ -598,6 +615,7 @@ class MCPShellServer {
           },
           {
             name: 'export_logs',
+            title: 'Export Audit Logs',
             description: 'Export audit logs in various formats',
             inputSchema: {
               type: 'object',
@@ -612,6 +630,7 @@ class MCPShellServer {
           },
           {
             name: 'get_alerts',
+            title: 'Get Security Alerts',
             description: 'Get security and monitoring alerts',
             inputSchema: {
               type: 'object',
@@ -624,6 +643,7 @@ class MCPShellServer {
           },
           {
             name: 'acknowledge_alert',
+            title: 'Acknowledge Alert',
             description: 'Acknowledge a security alert',
             inputSchema: {
               type: 'object',
@@ -636,6 +656,7 @@ class MCPShellServer {
           },
           {
             name: 'get_audit_config',
+            title: 'Get Audit Configuration',
             description: 'Get current audit configuration including log file location',
             inputSchema: {
               type: 'object',
@@ -644,6 +665,7 @@ class MCPShellServer {
           },
           {
             name: 'update_audit_config',
+            title: 'Update Audit Settings',
             description: 'Update audit configuration settings',
             inputSchema: {
               type: 'object',
@@ -657,6 +679,7 @@ class MCPShellServer {
           },
           {
             name: 'list_sessions',
+            title: 'List Active Sessions',
             description: 'List all active interactive sessions',
             inputSchema: {
               type: 'object',
@@ -665,6 +688,7 @@ class MCPShellServer {
           },
           {
             name: 'kill_session',
+            title: 'Kill Session',
             description: 'Terminate an interactive session',
             inputSchema: {
               type: 'object',
@@ -676,6 +700,7 @@ class MCPShellServer {
           },
           {
             name: 'read_session_output',
+            title: 'Read Session Output',
             description: 'Read buffered output from an interactive session',
             inputSchema: {
               type: 'object',
@@ -687,6 +712,7 @@ class MCPShellServer {
           },
           {
             name: 'toggle_terminal_viewer',
+            title: 'Toggle Terminal Viewer',
             description: 'Enable or disable the terminal viewer HTTP service for live terminal viewing in browser',
             inputSchema: {
               type: 'object',
@@ -699,6 +725,7 @@ class MCPShellServer {
           },
           {
             name: 'get_terminal_viewer_status',
+            title: 'Get Terminal Viewer Status',
             description: 'Get the current status of the terminal viewer service and active sessions',
             inputSchema: {
               type: 'object',
