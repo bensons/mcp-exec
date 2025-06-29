@@ -50,6 +50,8 @@ const manager_2 = require("./context/manager");
 const logger_1 = require("./audit/logger");
 const confirmation_1 = require("./security/confirmation");
 const display_formatter_1 = require("./utils/display-formatter");
+const viewer_service_1 = require("./terminal/viewer-service");
+const terminal_session_manager_1 = require("./terminal/terminal-session-manager");
 // Default configuration
 const DEFAULT_CONFIG = {
     security: {
@@ -126,6 +128,16 @@ const DEFAULT_CONFIG = {
             maxAlertsPerHour: 100,
         },
     },
+    terminalViewer: {
+        enabled: false, // Disabled by default
+        port: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_PORT || '3000'),
+        host: process.env.MCP_EXEC_TERMINAL_VIEWER_HOST || '127.0.0.1',
+        maxSessions: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_MAX_SESSIONS || '10'),
+        sessionTimeout: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_SESSION_TIMEOUT || '1800000'), // 30 minutes
+        bufferSize: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_BUFFER_SIZE || '1000'),
+        enableAuth: process.env.MCP_EXEC_TERMINAL_VIEWER_ENABLE_AUTH === 'true',
+        authToken: process.env.MCP_EXEC_TERMINAL_VIEWER_AUTH_TOKEN,
+    },
 };
 // Tool schemas
 const ExecuteCommandSchema = zod_1.z.object({
@@ -137,6 +149,7 @@ const ExecuteCommandSchema = zod_1.z.object({
     shell: zod_1.z.union([zod_1.z.boolean(), zod_1.z.string()]).optional().describe('Shell to use for execution'),
     aiContext: zod_1.z.string().optional().describe('AI context/intent for this command'),
     session: zod_1.z.string().optional().describe('Session ID for interactive execution, or "new" to start new session'),
+    enableTerminalViewer: zod_1.z.boolean().optional().describe('Enable terminal viewer for this command (creates viewable session in browser)'),
 });
 const GetContextSchema = zod_1.z.object({
     sessionId: zod_1.z.string().optional().describe('Session ID to get context for'),
@@ -206,6 +219,12 @@ const UpdateAuditConfigSchema = zod_1.z.object({
     logFile: zod_1.z.string().optional().describe('Full path to audit log file'),
     logDirectory: zod_1.z.string().optional().describe('Directory for audit log files'),
 });
+// Terminal Viewer Schemas
+const ToggleTerminalViewerSchema = zod_1.z.object({
+    enabled: zod_1.z.boolean().describe('Enable or disable the terminal viewer service'),
+    port: zod_1.z.number().optional().describe('Port for the terminal viewer service'),
+});
+const GetTerminalViewerStatusSchema = zod_1.z.object({});
 class MCPShellServer {
     server;
     shellExecutor;
@@ -214,6 +233,8 @@ class MCPShellServer {
     auditLogger;
     confirmationManager;
     displayFormatter;
+    terminalViewerService;
+    terminalSessionManager;
     config;
     isShuttingDown = false;
     transport;
@@ -228,6 +249,7 @@ class MCPShellServer {
         }, {
             capabilities: {
                 tools: {},
+                resources: {},
             },
         });
         // Initialize components
@@ -236,6 +258,8 @@ class MCPShellServer {
         this.auditLogger = new logger_1.AuditLogger(this.config.audit);
         this.confirmationManager = new confirmation_1.ConfirmationManager();
         this.displayFormatter = new display_formatter_1.DisplayFormatter(this.config.display);
+        // Initialize terminal components
+        this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer);
         this.shellExecutor = new executor_1.ShellExecutor(this.securityManager, this.contextManager, this.auditLogger, this.config);
         this.setupHandlers();
     }
@@ -258,6 +282,7 @@ class MCPShellServer {
                                 shell: { type: ['boolean', 'string'], description: 'Shell to use for execution' },
                                 session: { type: 'string', description: 'Session ID for interactive execution, or "new" to start new session' },
                                 aiContext: { type: 'string', description: 'AI context/intent for this command' },
+                                enableTerminalViewer: { type: 'boolean', description: 'Enable terminal viewer for this command (creates viewable session in browser)' },
                             },
                             required: ['command'],
                         },
@@ -482,6 +507,26 @@ class MCPShellServer {
                             required: ['sessionId'],
                         },
                     },
+                    {
+                        name: 'toggle_terminal_viewer',
+                        description: 'Enable or disable the terminal viewer HTTP service for live terminal viewing in browser',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                enabled: { type: 'boolean', description: 'Enable or disable the terminal viewer service' },
+                                port: { type: 'number', description: 'Port for the terminal viewer service (optional)' },
+                            },
+                            required: ['enabled'],
+                        },
+                    },
+                    {
+                        name: 'get_terminal_viewer_status',
+                        description: 'Get the current status of the terminal viewer service and active sessions',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {},
+                        },
+                    },
                 ],
             };
         });
@@ -494,24 +539,62 @@ class MCPShellServer {
                 switch (name) {
                     case 'execute_command': {
                         const parsed = ExecuteCommandSchema.parse(args);
-                        const result = await this.shellExecutor.executeCommand(parsed);
-                        // Build the full command string for display
-                        const fullCommand = parsed.args && parsed.args.length > 0
-                            ? `${parsed.command} ${parsed.args.join(' ')}`
-                            : parsed.command;
-                        // Format the output for enhanced display
-                        const formattedOutput = this.displayFormatter.formatCommandOutput(fullCommand, result, {
-                            showInput: true,
-                            aiContext: parsed.aiContext
-                        });
-                        return {
-                            content: [
-                                {
-                                    type: 'text',
-                                    text: formattedOutput,
-                                },
-                            ],
-                        };
+                        // Handle terminal viewer option
+                        if (parsed.enableTerminalViewer) {
+                            // Ensure terminal viewer service is running
+                            if (!this.terminalViewerService) {
+                                this.terminalViewerService = new viewer_service_1.TerminalViewerService(this.config.terminalViewer);
+                            }
+                            if (!this.terminalViewerService.isEnabled()) {
+                                await this.terminalViewerService.start();
+                            }
+                            // Create terminal session using enhanced session manager
+                            const sessionId = await this.terminalSessionManager.startSession({
+                                ...parsed,
+                                enableTerminalViewer: true,
+                                terminalSize: { cols: 80, rows: 24 } // Default size
+                            });
+                            // Add session to terminal viewer service
+                            const terminalSession = this.terminalSessionManager.getSession(sessionId);
+                            if (terminalSession) {
+                                this.terminalViewerService.addSession(terminalSession);
+                            }
+                            // Get viewer URL
+                            const viewerUrl = this.terminalViewerService.getSessionUrl(sessionId);
+                            // Build the full command string for display
+                            const fullCommand = parsed.args && parsed.args.length > 0
+                                ? `${parsed.command} ${parsed.args.join(' ')}`
+                                : parsed.command;
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: `🖥️ **Terminal Session Created**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Terminal Viewer URL:** ${viewerUrl}\n\n✨ You can now view this terminal session live in your browser!\n\n*The session will continue running and you can interact with it through the web interface.*`,
+                                    },
+                                ],
+                            };
+                        }
+                        else {
+                            // Use standard execution
+                            const result = await this.shellExecutor.executeCommand(parsed);
+                            // Build the full command string for display
+                            const fullCommand = parsed.args && parsed.args.length > 0
+                                ? `${parsed.command} ${parsed.args.join(' ')}`
+                                : parsed.command;
+                            // Format the output for enhanced display
+                            const formattedOutput = this.displayFormatter.formatCommandOutput(fullCommand, result, {
+                                showInput: true,
+                                aiContext: parsed.aiContext
+                            });
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: formattedOutput,
+                                    },
+                                ],
+                            };
+                        }
                     }
                     case 'get_context': {
                         const parsed = GetContextSchema.parse(args || {});
@@ -962,6 +1045,113 @@ class MCPShellServer {
                             };
                         }
                     }
+                    case 'toggle_terminal_viewer': {
+                        const parsed = ToggleTerminalViewerSchema.parse(args);
+                        try {
+                            if (parsed.enabled) {
+                                // Start terminal viewer service
+                                if (!this.terminalViewerService) {
+                                    const config = { ...this.config.terminalViewer };
+                                    if (parsed.port) {
+                                        config.port = parsed.port;
+                                    }
+                                    this.terminalViewerService = new viewer_service_1.TerminalViewerService(config);
+                                }
+                                if (!this.terminalViewerService.isEnabled()) {
+                                    await this.terminalViewerService.start();
+                                }
+                                const status = this.terminalViewerService.getStatus();
+                                return {
+                                    content: [
+                                        {
+                                            type: 'text',
+                                            text: `✅ Terminal viewer service enabled\n\n**Service Details:**\n• Host: ${status.host}\n• Port: ${status.port}\n• Active Sessions: ${status.totalSessions}\n\nYou can now use the \`enableTerminalViewer\` option in \`execute_command\` to create viewable terminal sessions.`,
+                                        },
+                                    ],
+                                };
+                            }
+                            else {
+                                // Stop terminal viewer service
+                                if (this.terminalViewerService && this.terminalViewerService.isEnabled()) {
+                                    await this.terminalViewerService.stop();
+                                }
+                                return {
+                                    content: [
+                                        {
+                                            type: 'text',
+                                            text: '✅ Terminal viewer service disabled',
+                                        },
+                                    ],
+                                };
+                            }
+                        }
+                        catch (error) {
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: `❌ Error toggling terminal viewer: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                                    },
+                                ],
+                                isError: true,
+                            };
+                        }
+                    }
+                    case 'get_terminal_viewer_status': {
+                        try {
+                            const isEnabled = this.terminalViewerService?.isEnabled() || false;
+                            if (!isEnabled) {
+                                return {
+                                    content: [
+                                        {
+                                            type: 'text',
+                                            text: '📺 **Terminal Viewer Status: Disabled**\n\nUse `toggle_terminal_viewer` with `enabled: true` to start the service.',
+                                        },
+                                    ],
+                                };
+                            }
+                            const status = this.terminalViewerService.getStatus();
+                            const sessions = status.activeSessions;
+                            let response = `📺 **Terminal Viewer Status: Enabled**\n\n`;
+                            response += `**Service Details:**\n`;
+                            response += `• Host: ${status.host}\n`;
+                            response += `• Port: ${status.port}\n`;
+                            response += `• Uptime: ${status.uptime ? Math.round(status.uptime / 1000) : 0}s\n`;
+                            response += `• Total Sessions: ${status.totalSessions}\n\n`;
+                            if (sessions.length > 0) {
+                                response += `**Active Terminal Sessions:**\n`;
+                                sessions.forEach(session => {
+                                    response += `• **${session.command}** (${session.status})\n`;
+                                    response += `  - Session ID: \`${session.sessionId}\`\n`;
+                                    response += `  - URL: ${session.url}\n`;
+                                    response += `  - Viewers: ${session.viewerCount}\n`;
+                                    response += `  - Started: ${session.startTime.toLocaleString()}\n\n`;
+                                });
+                            }
+                            else {
+                                response += `**No active terminal sessions**\n\nUse \`execute_command\` with \`enableTerminalViewer: true\` to create viewable sessions.`;
+                            }
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: response,
+                                    },
+                                ],
+                            };
+                        }
+                        catch (error) {
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: `❌ Error getting terminal viewer status: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                                    },
+                                ],
+                                isError: true,
+                            };
+                        }
+                    }
                     default:
                         throw new Error(`Unknown tool: ${name}`);
                 }
@@ -978,6 +1168,47 @@ class MCPShellServer {
                     isError: true,
                 };
             }
+        });
+        // List available resources
+        this.server.setRequestHandler(types_js_1.ListResourcesRequestSchema, async () => {
+            const resources = [];
+            // Add terminal viewer sessions resource if service is enabled
+            if (this.terminalViewerService?.isEnabled()) {
+                resources.push({
+                    uri: 'terminal-viewer://sessions',
+                    name: 'Terminal Viewer Sessions',
+                    description: 'Live terminal session URLs for browser viewing',
+                    mimeType: 'application/json',
+                });
+            }
+            return { resources };
+        });
+        // Read resource content
+        this.server.setRequestHandler(types_js_1.ReadResourceRequestSchema, async (request) => {
+            const { uri } = request.params;
+            if (uri === 'terminal-viewer://sessions') {
+                if (!this.terminalViewerService?.isEnabled()) {
+                    throw new Error('Terminal viewer service is not enabled');
+                }
+                const status = this.terminalViewerService.getStatus();
+                const resource = {
+                    uri,
+                    name: 'Terminal Viewer Sessions',
+                    description: 'Live terminal session URLs for browser viewing',
+                    mimeType: 'application/json',
+                    sessions: status.activeSessions,
+                };
+                return {
+                    contents: [
+                        {
+                            uri,
+                            mimeType: 'application/json',
+                            text: JSON.stringify(resource, null, 2),
+                        },
+                    ],
+                };
+            }
+            throw new Error(`Unknown resource: ${uri}`);
         });
     }
     async start() {
@@ -1101,6 +1332,16 @@ class MCPShellServer {
             if (this.config.context.sessionPersistence) {
                 await this.contextManager.persistSession();
                 console.error('💾 Session state saved');
+            }
+            // Shutdown terminal viewer service
+            if (this.terminalViewerService?.isEnabled()) {
+                await this.terminalViewerService.stop();
+                console.error('📺 Terminal viewer service stopped');
+            }
+            // Shutdown terminal session manager
+            if (this.terminalSessionManager) {
+                await this.terminalSessionManager.shutdown();
+                console.error('🖥️  Terminal sessions terminated');
             }
             // Shutdown interactive sessions
             await this.shellExecutor.shutdown();

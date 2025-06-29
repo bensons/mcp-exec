@@ -285,6 +285,16 @@ export interface ServerConfig {
       };
     };
   };
+  terminalViewer: {
+    enabled: boolean;
+    port: number;
+    host: string;
+    maxSessions: number;
+    sessionTimeout: number; // milliseconds
+    bufferSize: number; // lines
+    enableAuth: boolean;
+    authToken?: string;
+  };
 }
 
 // Interactive Session Types

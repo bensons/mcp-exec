@@ -12,6 +12,8 @@ declare class MCPShellServer {
     private auditLogger;
     private confirmationManager;
     private displayFormatter;
+    private terminalViewerService?;
+    private terminalSessionManager?;
     private config;
     private isShuttingDown;
     private transport?;

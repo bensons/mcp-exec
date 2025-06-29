@@ -236,6 +236,16 @@ export interface ServerConfig {
             };
         };
     };
+    terminalViewer: {
+        enabled: boolean;
+        port: number;
+        host: string;
+        maxSessions: number;
+        sessionTimeout: number;
+        bufferSize: number;
+        enableAuth: boolean;
+        authToken?: string;
+    };
 }
 export interface InteractiveSession {
     sessionId: string;
