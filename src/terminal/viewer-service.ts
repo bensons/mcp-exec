@@ -311,6 +311,29 @@ export class TerminalViewerService {
     }
   }
 
+  // Check if a session exists in the viewer service
+  hasSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
+  // Method to send input to a terminal session
+  sendInput(sessionId: string, input: string, addNewline: boolean = true): void {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.pty) {
+      throw new Error(`Session ${sessionId} not found or has no PTY`);
+    }
+
+    // Send input to PTY
+    const inputToSend = addNewline ? input + '\r' : input;
+    session.pty.write(inputToSend);
+
+    // Add input to buffer and broadcast to viewers
+    this.addToBuffer(session, input + (addNewline ? '\n' : ''), 'input');
+    this.broadcastToSession(sessionId, input + (addNewline ? '\r\n' : ''));
+
+    session.lastActivity = new Date();
+  }
+
   private broadcastToSession(sessionId: string, data: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;

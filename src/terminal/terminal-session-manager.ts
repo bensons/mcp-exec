@@ -84,9 +84,14 @@ export class TerminalSessionManager {
       aiContext: options.aiContext,
     };
 
-    // Set up PTY event handlers
-    this.setupPtyHandlers(session);
-    console.error(`[DEBUG] PTY handlers set up for session ${sessionId}`);
+    // Set up PTY event handlers only if not using terminal viewer
+    // The TerminalViewerService will set up its own handlers when the session is added
+    if (!options.enableTerminalViewer) {
+      this.setupPtyHandlers(session);
+      console.error(`[DEBUG] PTY handlers set up for session ${sessionId}`);
+    } else {
+      console.error(`[DEBUG] Skipping PTY handler setup for session ${sessionId} - will be handled by TerminalViewerService`);
+    }
 
     // Store session
     this.sessions.set(sessionId, session);

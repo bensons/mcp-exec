@@ -936,11 +936,18 @@ class MCPShellServer {
               // Try terminal session manager first
               const terminalSession = this.terminalSessionManager?.getSession(parsed.sessionId);
               if (terminalSession) {
-                await this.terminalSessionManager!.sendInput({
-                  sessionId: parsed.sessionId,
-                  input: parsed.input,
-                  addNewline: parsed.addNewline,
-                });
+                // If terminal viewer service is available and has this session, use it for input
+                // This ensures proper WebSocket broadcasting
+                if (this.terminalViewerService && this.terminalViewerService.hasSession(parsed.sessionId)) {
+                  this.terminalViewerService.sendInput(parsed.sessionId, parsed.input, parsed.addNewline);
+                } else {
+                  // Fallback to direct terminal session manager
+                  await this.terminalSessionManager!.sendInput({
+                    sessionId: parsed.sessionId,
+                    input: parsed.input,
+                    addNewline: parsed.addNewline,
+                  });
+                }
 
                 return {
                   content: [
