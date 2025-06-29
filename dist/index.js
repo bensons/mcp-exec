@@ -56,43 +56,44 @@ const terminal_session_manager_1 = require("./terminal/terminal-session-manager"
 // Default configuration
 const DEFAULT_CONFIG = {
     security: {
-        level: 'permissive',
-        confirmDangerous: false,
-        allowedDirectories: [
-            process.cwd(),
-            '/tmp',
-        ].filter(dir => dir !== ''),
-        blockedCommands: [
-            'rm -rf /',
-            'format',
-            'del /f /s /q C:\\',
-            'sudo rm -rf /',
-            'dd if=/dev/zero',
-            'mkfs',
-            'fdisk',
-            'parted'
-        ],
-        timeout: 300000, // 5 minutes
+        level: process.env.MCP_EXEC_SECURITY_LEVEL || 'permissive',
+        confirmDangerous: process.env.MCP_EXEC_CONFIRM_DANGEROUS === 'true',
+        allowedDirectories: process.env.MCP_EXEC_ALLOWED_DIRECTORIES
+            ? process.env.MCP_EXEC_ALLOWED_DIRECTORIES.split(',').map(dir => dir.trim())
+            : [process.cwd(), '/tmp'].filter(dir => dir !== ''),
+        blockedCommands: process.env.MCP_EXEC_BLOCKED_COMMANDS
+            ? process.env.MCP_EXEC_BLOCKED_COMMANDS.split(',').map(cmd => cmd.trim())
+            : [
+                'rm -rf /',
+                'format',
+                'del /f /s /q C:\\',
+                'sudo rm -rf /',
+                'dd if=/dev/zero',
+                'mkfs',
+                'fdisk',
+                'parted'
+            ],
+        timeout: parseInt(process.env.MCP_EXEC_TIMEOUT || '300000'), // 5 minutes
         resourceLimits: {
-            maxMemoryUsage: 1024, // 1GB
-            maxFileSize: 100, // 100MB
-            maxProcesses: 10,
+            maxMemoryUsage: parseInt(process.env.MCP_EXEC_MAX_MEMORY || '1024'), // 1GB
+            maxFileSize: parseInt(process.env.MCP_EXEC_MAX_FILE_SIZE || '100'), // 100MB
+            maxProcesses: parseInt(process.env.MCP_EXEC_MAX_PROCESSES || '10'),
         },
         sandboxing: {
-            enabled: false, // Disabled by default for compatibility
-            networkAccess: true,
-            fileSystemAccess: 'full',
+            enabled: process.env.MCP_EXEC_SANDBOXING_ENABLED === 'true', // Disabled by default for compatibility
+            networkAccess: process.env.MCP_EXEC_NETWORK_ACCESS !== 'false', // Enabled by default
+            fileSystemAccess: process.env.MCP_EXEC_FILESYSTEM_ACCESS || 'full',
         },
     },
     context: {
-        preserveWorkingDirectory: true,
-        sessionPersistence: true,
-        maxHistorySize: 1000,
+        preserveWorkingDirectory: process.env.MCP_EXEC_PRESERVE_WORKING_DIR !== 'false', // Enabled by default
+        sessionPersistence: process.env.MCP_EXEC_SESSION_PERSISTENCE !== 'false', // Enabled by default
+        maxHistorySize: parseInt(process.env.MCP_EXEC_MAX_HISTORY_SIZE || '1000'),
     },
     sessions: {
-        maxInteractiveSessions: 10,
-        sessionTimeout: 30 * 60 * 1000, // 30 minutes
-        outputBufferSize: 1000,
+        maxInteractiveSessions: parseInt(process.env.MCP_EXEC_MAX_SESSIONS || '10'),
+        sessionTimeout: parseInt(process.env.MCP_EXEC_SESSION_TIMEOUT || '1800000'), // 30 minutes
+        outputBufferSize: parseInt(process.env.MCP_EXEC_SESSION_BUFFER_SIZE || '1000'),
     },
     lifecycle: {
         inactivityTimeout: parseInt(process.env.MCP_EXEC_INACTIVITY_TIMEOUT || '300000'), // 5 minutes default
@@ -100,33 +101,33 @@ const DEFAULT_CONFIG = {
         enableHeartbeat: process.env.MCP_EXEC_ENABLE_HEARTBEAT !== 'false', // enabled by default
     },
     output: {
-        formatStructured: true,
-        stripAnsi: true,
-        summarizeVerbose: true,
-        enableAiOptimizations: true,
-        maxOutputLength: 10000, // 10KB max output
+        formatStructured: process.env.MCP_EXEC_FORMAT_STRUCTURED !== 'false', // Enabled by default
+        stripAnsi: process.env.MCP_EXEC_STRIP_ANSI !== 'false', // Enabled by default
+        summarizeVerbose: process.env.MCP_EXEC_SUMMARIZE_VERBOSE !== 'false', // Enabled by default
+        enableAiOptimizations: process.env.MCP_EXEC_ENABLE_AI_OPTIMIZATIONS !== 'false', // Enabled by default
+        maxOutputLength: parseInt(process.env.MCP_EXEC_MAX_OUTPUT_LENGTH || '10000'), // 10KB max output
     },
     display: {
-        showCommandHeader: true,
-        showExecutionTime: true,
-        showExitCode: true,
-        formatCodeBlocks: true,
-        includeMetadata: true,
-        includeSuggestions: true,
-        useMarkdown: true,
-        colorizeOutput: false,
+        showCommandHeader: process.env.MCP_EXEC_SHOW_COMMAND_HEADER !== 'false', // Enabled by default
+        showExecutionTime: process.env.MCP_EXEC_SHOW_EXECUTION_TIME !== 'false', // Enabled by default
+        showExitCode: process.env.MCP_EXEC_SHOW_EXIT_CODE !== 'false', // Enabled by default
+        formatCodeBlocks: process.env.MCP_EXEC_FORMAT_CODE_BLOCKS !== 'false', // Enabled by default
+        includeMetadata: process.env.MCP_EXEC_INCLUDE_METADATA !== 'false', // Enabled by default
+        includeSuggestions: process.env.MCP_EXEC_INCLUDE_SUGGESTIONS !== 'false', // Enabled by default
+        useMarkdown: process.env.MCP_EXEC_USE_MARKDOWN !== 'false', // Enabled by default
+        colorizeOutput: process.env.MCP_EXEC_COLORIZE_OUTPUT === 'true', // Disabled by default
     },
     audit: {
-        enabled: true,
-        logLevel: 'debug',
-        retention: 30,
+        enabled: process.env.MCP_EXEC_AUDIT_ENABLED !== 'false', // Enabled by default
+        logLevel: process.env.MCP_EXEC_AUDIT_LOG_LEVEL || 'debug',
+        retention: parseInt(process.env.MCP_EXEC_AUDIT_RETENTION || '30'),
         logDirectory: process.env.MCP_EXEC_LOG_DIR ||
             (process.env.HOME && path.join(process.env.HOME, '.mcp-exec')) ||
             (process.env.USERPROFILE && path.join(process.env.USERPROFILE, '.mcp-exec')), // Safer default
         monitoring: {
-            enabled: true,
-            alertRetention: 7,
-            maxAlertsPerHour: 100,
+            enabled: process.env.MCP_EXEC_MONITORING_ENABLED !== 'false', // Enabled by default
+            alertRetention: parseInt(process.env.MCP_EXEC_ALERT_RETENTION || '7'),
+            maxAlertsPerHour: parseInt(process.env.MCP_EXEC_MAX_ALERTS_PER_HOUR || '100'),
         },
     },
     terminalViewer: {
