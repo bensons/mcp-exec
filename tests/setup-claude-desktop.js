@@ -24,7 +24,7 @@ function getClaudeConfigPath() {
 function createClaudeConfig() {
   const configPath = getClaudeConfigPath();
   const configDir = path.dirname(configPath);
-  const mcpExecPath = path.resolve(__dirname, '..', 'index.js');
+  const mcpExecPath = path.resolve(__dirname, '..', 'dist', 'index.js');
   
   // Create directory if it doesn't exist
   if (!fs.existsSync(configDir)) {
@@ -70,13 +70,13 @@ function createClaudeConfig() {
 }
 
 function verifySetup() {
-  const distPath = path.resolve(__dirname, '..', 'index.js');
-  
+  const distPath = path.resolve(__dirname, '..', 'dist', 'index.js');
+
   if (!fs.existsSync(distPath)) {
     console.error('❌ Error: dist/index.js not found. Please run "npm run build" first.');
     process.exit(1);
   }
-  
+
   console.log('✅ Built server found at:', distPath);
   return true;
 }
