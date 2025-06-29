@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 /**
- * Test that openWorldHint annotation is properly set for command execution tools
+ * Test that MCP tool annotations are properly set for command execution tools
+ * Tests: openWorldHint, readOnlyHint, destructiveHint, idempotentHint
  */
 
 const { spawn } = require('child_process');
@@ -10,8 +11,8 @@ const path = require('path');
 function testOpenWorldHint() {
   return new Promise((resolve, reject) => {
     const serverPath = path.resolve(__dirname, '..', 'dist', 'index.js');
-    
-    console.log('🧪 Testing openWorldHint annotation...');
+
+    console.log('🧪 Testing MCP tool annotations...');
     console.log(`Server path: ${serverPath}`);
     
     const server = spawn('node', [serverPath], {
@@ -89,57 +90,73 @@ function testOpenWorldHint() {
                   'send_to_session'
                 ];
                 
-                let allToolsHaveHint = true;
-                let toolsWithHint = [];
-                let toolsWithoutHint = [];
-                
+                let allToolsHaveCorrectAnnotations = true;
+                let toolsWithCorrectAnnotations = [];
+                let toolsWithIncorrectAnnotations = [];
+
                 for (const toolName of commandExecutionTools) {
                   const tool = tools.find(t => t.name === toolName);
                   if (tool) {
-                    if (tool.openWorldHint === true) {
-                      toolsWithHint.push(toolName);
-                      console.log(`✅ ${toolName} has openWorldHint: true`);
+                    const hasCorrectAnnotations =
+                      tool.openWorldHint === true &&
+                      tool.readOnlyHint === false &&
+                      tool.destructiveHint === true &&
+                      tool.idempotentHint === false;
+
+                    if (hasCorrectAnnotations) {
+                      toolsWithCorrectAnnotations.push(toolName);
+                      console.log(`✅ ${toolName} has all correct annotations`);
+                      console.log(`   openWorldHint: ${tool.openWorldHint}, readOnlyHint: ${tool.readOnlyHint}, destructiveHint: ${tool.destructiveHint}, idempotentHint: ${tool.idempotentHint}`);
                     } else {
-                      toolsWithoutHint.push(toolName);
-                      console.log(`❌ ${toolName} missing openWorldHint or not true`);
-                      allToolsHaveHint = false;
+                      toolsWithIncorrectAnnotations.push(toolName);
+                      console.log(`❌ ${toolName} has incorrect annotations`);
+                      console.log(`   openWorldHint: ${tool.openWorldHint}, readOnlyHint: ${tool.readOnlyHint}, destructiveHint: ${tool.destructiveHint}, idempotentHint: ${tool.idempotentHint}`);
+                      allToolsHaveCorrectAnnotations = false;
                     }
                   } else {
                     console.log(`❌ ${toolName} not found in tools list`);
-                    allToolsHaveHint = false;
+                    allToolsHaveCorrectAnnotations = false;
                   }
                 }
                 
-                // Check that non-command tools don't have the hint
+                // Check that non-command tools don't have the command execution annotations
                 const nonCommandTools = [
                   'get_context',
-                  'get_history', 
+                  'get_history',
                   'list_sessions',
                   'get_security_status'
                 ];
-                
+
                 let nonCommandToolsCorrect = true;
                 for (const toolName of nonCommandTools) {
                   const tool = tools.find(t => t.name === toolName);
-                  if (tool && tool.openWorldHint === true) {
-                    console.log(`⚠️  ${toolName} has openWorldHint but shouldn't (it doesn't execute commands)`);
-                    nonCommandToolsCorrect = false;
+                  if (tool) {
+                    const hasCommandAnnotations =
+                      tool.openWorldHint === true ||
+                      tool.destructiveHint === true ||
+                      tool.readOnlyHint === false;
+
+                    if (hasCommandAnnotations) {
+                      console.log(`⚠️  ${toolName} has command execution annotations but shouldn't`);
+                      console.log(`   openWorldHint: ${tool.openWorldHint}, readOnlyHint: ${tool.readOnlyHint}, destructiveHint: ${tool.destructiveHint}, idempotentHint: ${tool.idempotentHint}`);
+                      nonCommandToolsCorrect = false;
+                    }
                   }
                 }
-                
+
                 console.log('\n📊 Summary:');
-                console.log(`Tools with openWorldHint: ${toolsWithHint.length}/${commandExecutionTools.length}`);
-                console.log(`Tools with hint: ${toolsWithHint.join(', ')}`);
-                if (toolsWithoutHint.length > 0) {
-                  console.log(`Tools without hint: ${toolsWithoutHint.join(', ')}`);
+                console.log(`Tools with correct annotations: ${toolsWithCorrectAnnotations.length}/${commandExecutionTools.length}`);
+                console.log(`Tools with correct annotations: ${toolsWithCorrectAnnotations.join(', ')}`);
+                if (toolsWithIncorrectAnnotations.length > 0) {
+                  console.log(`Tools with incorrect annotations: ${toolsWithIncorrectAnnotations.join(', ')}`);
                 }
-                
-                if (allToolsHaveHint && nonCommandToolsCorrect) {
-                  console.log('✅ All command execution tools have openWorldHint: true');
-                  console.log('✅ Non-command tools correctly do not have openWorldHint');
+
+                if (allToolsHaveCorrectAnnotations && nonCommandToolsCorrect) {
+                  console.log('✅ All command execution tools have correct annotations');
+                  console.log('✅ Non-command tools correctly do not have command execution annotations');
                   testPassed = true;
                 } else {
-                  console.log('❌ Some tools are missing openWorldHint or have it incorrectly');
+                  console.log('❌ Some tools have incorrect annotations');
                 }
               }
             }
@@ -156,7 +173,7 @@ function testOpenWorldHint() {
     
     server.on('close', (code) => {
       if (!testPassed) {
-        console.log('❌ openWorldHint test failed');
+        console.log('❌ MCP tool annotations test failed');
         console.log('Exit code:', code);
         if (stderr) {
           console.log('Stderr:', stderr);
@@ -175,11 +192,11 @@ function testOpenWorldHint() {
 if (require.main === module) {
   testOpenWorldHint()
     .then(() => {
-      console.log('🎉 openWorldHint test completed successfully!');
+      console.log('🎉 MCP tool annotations test completed successfully!');
       process.exit(0);
     })
     .catch((error) => {
-      console.error('💥 openWorldHint test failed:', error.message);
+      console.error('💥 MCP tool annotations test failed:', error.message);
       process.exit(1);
     });
 }
