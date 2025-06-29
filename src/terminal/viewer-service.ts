@@ -138,13 +138,14 @@ export class TerminalViewerService {
   }
 
   async start(): Promise<void> {
-    console.log(`[DEBUG] TerminalViewerService.start called, current isRunning: ${this.isRunning}`);
+    // Debug logging to stderr to avoid JSON-RPC interference
+    console.error(`[DEBUG] TerminalViewerService.start called, current isRunning: ${this.isRunning}`);
 
     if (this.isRunning) {
       throw new Error('Terminal viewer service is already running');
     }
 
-    console.log(`[DEBUG] Starting terminal viewer service on ${this.config.host}:${this.config.port}`);
+    console.error(`[DEBUG] Starting terminal viewer service on ${this.config.host}:${this.config.port}`);
 
     return new Promise((resolve, reject) => {
       this.server = createServer(this.app);
@@ -152,13 +153,13 @@ export class TerminalViewerService {
       // Setup WebSocket server
       this.wss = new WebSocketServer({ server: this.server });
       this.setupWebSocketHandlers();
-      console.log(`[DEBUG] WebSocket server and handlers set up`);
+      console.error(`[DEBUG] WebSocket server and handlers set up`);
 
       this.server.listen(this.config.port, this.config.host, () => {
         this.isRunning = true;
         this.startTime = new Date();
-        console.log(`Terminal viewer service started on http://${this.config.host}:${this.config.port}`);
-        console.log(`[DEBUG] Terminal viewer service successfully started and running`);
+        console.error(`Terminal viewer service started on http://${this.config.host}:${this.config.port}`);
+        console.error(`[DEBUG] Terminal viewer service successfully started and running`);
         resolve();
       });
 
@@ -192,7 +193,7 @@ export class TerminalViewerService {
         this.server.close(() => {
           this.isRunning = false;
           this.startTime = undefined;
-          console.log('Terminal viewer service stopped');
+          console.error('Terminal viewer service stopped');
           resolve();
         });
       } else {
@@ -270,15 +271,15 @@ export class TerminalViewerService {
         }
         break;
       default:
-        console.warn('Unknown WebSocket message type:', message.type);
+        console.error('Unknown WebSocket message type:', message.type);
     }
   }
 
   // Public methods for session management
   addSession(session: TerminalSession): void {
-    console.log(`[DEBUG] TerminalViewerService.addSession called for session: ${session.sessionId}`);
+    console.error(`[DEBUG] TerminalViewerService.addSession called for session: ${session.sessionId}`);
     this.sessions.set(session.sessionId, session);
-    console.log(`[DEBUG] Session ${session.sessionId} added to terminal viewer, total sessions: ${this.sessions.size}`);
+    console.error(`[DEBUG] Session ${session.sessionId} added to terminal viewer, total sessions: ${this.sessions.size}`);
 
     // Set up PTY data handlers if available
     if (session.pty) {

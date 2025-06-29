@@ -54,12 +54,21 @@ export class ShellExecutor {
     const commandId = uuidv4();
     const startTime = Date.now();
 
-    console.log(`[DEBUG] ShellExecutor.executeCommand called with session: ${options.session}, command: ${options.command}`);
+    // Debug logging through audit logger to avoid JSON-RPC interference
+    await this.auditLogger.log({
+      level: 'debug',
+      message: 'ShellExecutor.executeCommand called',
+      context: { session: options.session, command: options.command }
+    });
 
     try {
       // Handle session-based execution
       if (options.session) {
-        console.log(`[DEBUG] Session-based execution requested for session: ${options.session}`);
+        await this.auditLogger.log({
+          level: 'debug',
+          message: 'Session-based execution requested',
+          context: { session: options.session }
+        });
         return await this.executeWithSession(options, commandId, startTime);
       }
 
@@ -355,14 +364,22 @@ export class ShellExecutor {
   async sendToSession(options: ExecuteCommandOptions, commandId: string, startTime: number): Promise<CommandOutput> {
     try {
       const sessionId = options.session!;
-      console.log(`[DEBUG] ShellExecutor.sendToSession called for session: ${sessionId}`);
+      await this.auditLogger.log({
+        level: 'debug',
+        message: 'ShellExecutor.sendToSession called',
+        context: { sessionId }
+      });
 
       // Send input to session
       await this.sessionManager.sendInput({
         sessionId,
         input: this.buildFullCommand(options),
       });
-      console.log(`[DEBUG] Input sent to session ${sessionId} via InteractiveSessionManager`);
+      await this.auditLogger.log({
+        level: 'debug',
+        message: 'Input sent to session via InteractiveSessionManager',
+        context: { sessionId }
+      });
 
       // Wait for output
       await new Promise(resolve => setTimeout(resolve, 1000));
