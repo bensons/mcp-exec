@@ -5,6 +5,7 @@ import { CommandOutput, ServerConfig, SessionOutput } from '../types/index';
 import { SecurityManager } from '../security/manager';
 import { ContextManager } from '../context/manager';
 import { AuditLogger } from '../audit/logger';
+import { StartSessionOptions, SendInputOptions } from './interactive-session-manager';
 export interface ExecuteCommandOptions {
     command: string;
     args?: string[];
@@ -42,6 +43,8 @@ export declare class ShellExecutor {
     sendToSession(options: ExecuteCommandOptions, commandId: string, startTime: number): Promise<CommandOutput>;
     listSessions(): Promise<import("../types/index").SessionInfo[]>;
     killSession(sessionId: string): Promise<void>;
+    startInteractiveSession(options: StartSessionOptions): Promise<string>;
+    sendInputToSession(options: SendInputOptions): Promise<void>;
     readSessionOutput(sessionId: string): Promise<SessionOutput>;
     shutdown(): Promise<void>;
 }

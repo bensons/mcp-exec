@@ -125,8 +125,34 @@ const ExecuteCommandSchema = z.object({
   timeout: z.number().optional().describe('Timeout in milliseconds'),
   shell: z.union([z.boolean(), z.string()]).optional().describe('Shell to use for execution'),
   aiContext: z.string().optional().describe('AI context/intent for this command'),
-  session: z.string().optional().describe('Session ID for interactive execution, or "new" to start new session'),
-  enableTerminalViewer: z.boolean().optional().describe('Enable terminal viewer for this command (creates viewable session in browser)'),
+  session: z.string().optional().describe('Existing session ID to send command to (use start_interactive_session or start_terminal_session to create new sessions)'),
+});
+
+const StartInteractiveSessionSchema = z.object({
+  command: z.string().optional().describe('Initial command to run in the session (defaults to system shell)'),
+  args: z.array(z.string()).optional().describe('Command arguments'),
+  cwd: z.string().optional().describe('Working directory for the session'),
+  env: z.record(z.string()).optional().describe('Environment variables'),
+  shell: z.union([z.boolean(), z.string()]).optional().describe('Shell to use for execution'),
+  aiContext: z.string().optional().describe('AI context/intent for this session'),
+});
+
+const StartTerminalSessionSchema = z.object({
+  command: z.string().optional().describe('Initial command to run in the terminal session (defaults to system shell)'),
+  args: z.array(z.string()).optional().describe('Command arguments'),
+  cwd: z.string().optional().describe('Working directory for the session'),
+  env: z.record(z.string()).optional().describe('Environment variables'),
+  terminalSize: z.object({
+    cols: z.number().default(80),
+    rows: z.number().default(24)
+  }).optional().describe('Terminal size'),
+  aiContext: z.string().optional().describe('AI context/intent for this session'),
+});
+
+const SendToSessionSchema = z.object({
+  sessionId: z.string().describe('Session ID to send input to'),
+  input: z.string().describe('Input to send to the session'),
+  addNewline: z.boolean().optional().default(true).describe('Whether to add a newline to the input'),
 });
 
 const GetContextSchema = z.object({
@@ -309,6 +335,14 @@ class MCPShellServer {
     this.setupHandlers();
   }
 
+  private getDefaultShell(): string {
+    if (process.platform === 'win32') {
+      return 'cmd.exe';
+    } else {
+      return process.env.SHELL || '/bin/bash';
+    }
+  }
+
   private setupHandlers(): void {
     // List available tools
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -316,7 +350,7 @@ class MCPShellServer {
         tools: [
           {
             name: 'execute_command',
-            description: 'Execute a shell command with security validation and context preservation. Supports interactive sessions.',
+            description: 'Execute a shell command with security validation and context preservation. For interactive sessions, use start_interactive_session or start_terminal_session first.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -326,11 +360,60 @@ class MCPShellServer {
                 env: { type: 'object', description: 'Environment variables' },
                 timeout: { type: 'number', description: 'Timeout in milliseconds' },
                 shell: { type: ['boolean', 'string'], description: 'Shell to use for execution' },
-                session: { type: 'string', description: 'Session ID for interactive execution, or "new" to start new session' },
+                session: { type: 'string', description: 'Existing session ID to send command to (use start_interactive_session or start_terminal_session to create new sessions)' },
                 aiContext: { type: 'string', description: 'AI context/intent for this command' },
-                enableTerminalViewer: { type: 'boolean', description: 'Enable terminal viewer for this command (creates viewable session in browser)' },
               },
               required: ['command'],
+            },
+          },
+          {
+            name: 'start_interactive_session',
+            description: 'Start a new interactive shell session for command execution. The session will run the specified command (or default shell) and terminate when the process exits.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                command: { type: 'string', description: 'Initial command to run in the session (defaults to system shell)' },
+                args: { type: 'array', items: { type: 'string' }, description: 'Command arguments' },
+                cwd: { type: 'string', description: 'Working directory for the session' },
+                env: { type: 'object', description: 'Environment variables' },
+                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution' },
+                aiContext: { type: 'string', description: 'AI context/intent for this session' },
+              },
+            },
+          },
+          {
+            name: 'start_terminal_session',
+            description: 'Start a new terminal session with full PTY support and browser-based viewing. The terminal will start with the system shell and persist even after commands exit, providing a continuous shell environment.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                command: { type: 'string', description: 'Initial command to run in terminal (optional, defaults to system shell)' },
+                args: { type: 'array', items: { type: 'string' }, description: 'Command arguments' },
+                cwd: { type: 'string', description: 'Working directory for the session' },
+                env: { type: 'object', description: 'Environment variables' },
+                terminalSize: {
+                  type: 'object',
+                  properties: {
+                    cols: { type: 'number', default: 80 },
+                    rows: { type: 'number', default: 24 }
+                  },
+                  description: 'Terminal size'
+                },
+                aiContext: { type: 'string', description: 'AI context/intent for this session' },
+              },
+            },
+          },
+          {
+            name: 'send_to_session',
+            description: 'Send input to an existing interactive or terminal session',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                sessionId: { type: 'string', description: 'Session ID to send input to' },
+                input: { type: 'string', description: 'Input to send to the session' },
+                addNewline: { type: 'boolean', default: true, description: 'Whether to add a newline to the input' },
+              },
+              required: ['sessionId', 'input'],
             },
           },
           {
@@ -597,7 +680,7 @@ class MCPShellServer {
                 command: parsed.command,
                 args: parsed.args,
                 session: parsed.session,
-                enableTerminalViewer: parsed.enableTerminalViewer,
+
                 cwd: parsed.cwd,
                 hasAiContext: !!parsed.aiContext,
               }
@@ -657,120 +740,222 @@ class MCPShellServer {
               }
             }
 
-            // Handle terminal viewer option
-            if (parsed.enableTerminalViewer) {
-              this.auditLogger.log({
-                level: 'debug',
-                message: 'Terminal viewer requested for command execution',
-                context: {
-                  command: parsed.command,
-                  hasExistingService: !!this.terminalViewerService,
-                  serviceEnabled: this.terminalViewerService?.isEnabled() || false
-                }
+            // Validate that session is not "new" - use dedicated session creation tools instead
+            if (parsed.session === 'new') {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: '❌ **Session Creation Not Allowed**\n\n`execute_command` no longer supports creating new sessions with `session: "new"`.\n\n**Please use:**\n• `start_interactive_session` - for regular interactive sessions\n• `start_terminal_session` - for PTY-based terminal sessions with browser viewing\n• `send_to_session` - to send commands to existing sessions\n\nThis change ensures consistent and predictable session behavior.',
+                  },
+                ],
+              };
+            }
+
+            // Execute the command
+            const result = await this.shellExecutor.executeCommand(parsed);
+
+            // Build the full command string for display
+            const fullCommand = parsed.args && parsed.args.length > 0
+              ? `${parsed.command} ${parsed.args.join(' ')}`
+              : parsed.command;
+
+            // Format the output for enhanced display
+            const formattedOutput = this.displayFormatter.formatCommandOutput(
+              fullCommand,
+              result,
+              {
+                showInput: true,
+                aiContext: parsed.aiContext
+              }
+            );
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: formattedOutput,
+                },
+              ],
+            };
+          }
+
+          case 'start_interactive_session': {
+            const parsed = StartInteractiveSessionSchema.parse(args);
+
+            this.auditLogger.log({
+              level: 'debug',
+              message: 'Start interactive session request received',
+              context: {
+                command: parsed.command,
+                cwd: parsed.cwd,
+                hasAiContext: !!parsed.aiContext,
+              }
+            });
+
+            try {
+              // Use the session manager directly to create an interactive session
+              const context = await this.contextManager.getCurrentContext();
+              const workingDirectory = parsed.cwd || context.currentDirectory || process.cwd();
+              const environment: Record<string, string> = {
+                ...Object.fromEntries(
+                  Object.entries(process.env).filter(([_, value]) => value !== undefined)
+                ) as Record<string, string>,
+                ...context.environmentVariables,
+                ...parsed.env,
+              };
+
+              const sessionId = await this.shellExecutor.startInteractiveSession({
+                command: parsed.command || this.getDefaultShell(),
+                args: parsed.args,
+                cwd: workingDirectory,
+                env: environment,
+                shell: parsed.shell,
+                aiContext: parsed.aiContext,
               });
 
-              try {
-                // Ensure terminal viewer service is running
-                if (!this.terminalViewerService) {
-                  this.auditLogger.log({
-                    level: 'debug',
-                    message: 'Creating new TerminalViewerService instance',
-                    context: { port: this.config.terminalViewer.port }
-                  });
-                  this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
-                }
-
-                if (!this.terminalViewerService.isEnabled()) {
-                  this.auditLogger.log({
-                    level: 'debug',
-                    message: 'Starting terminal viewer service',
-                    context: { port: this.config.terminalViewer.port }
-                  });
-                  await this.terminalViewerService.start();
-                }
-
-                // Create terminal session using enhanced session manager
-                const sessionId = await this.terminalSessionManager!.startSession({
-                  ...parsed,
-                  enableTerminalViewer: true,
-                  terminalSize: { cols: 80, rows: 24 } // Default size
-                });
-
-                // Add session to terminal viewer service
-                const terminalSession = this.terminalSessionManager!.getSession(sessionId);
-                if (terminalSession && this.terminalViewerService) {
-                  this.terminalViewerService.addSession(terminalSession);
-                }
-
-                // Get viewer URL
-                const viewerUrl = this.terminalViewerService?.getSessionUrl(sessionId) || 'Service not available';
-
-                // Build the full command string for display
-                const fullCommand = parsed.args && parsed.args.length > 0
-                  ? `${parsed.command} ${parsed.args.join(' ')}`
-                  : parsed.command;
-
-                return {
-                  content: [
-                    {
-                      type: 'text',
-                      text: `🖥️ **Terminal Session Created**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Terminal Viewer URL:** ${viewerUrl}\n\n✨ You can now view this terminal session live in your browser!\n\n*The session will continue running and you can interact with it through the web interface.*`,
-                    },
-                  ],
-                };
-              } catch (error) {
-                // Fall back to regular execution if terminal viewer fails
-                console.error('Terminal viewer error, falling back to regular execution:', error);
-                const result = await this.shellExecutor.executeCommand(parsed);
-
-                // Build the full command string for display
-                const fullCommand = parsed.args && parsed.args.length > 0
-                  ? `${parsed.command} ${parsed.args.join(' ')}`
-                  : parsed.command;
-
-                // Format the output for enhanced display
-                const formattedOutput = this.displayFormatter.formatCommandOutput(
-                  fullCommand,
-                  result,
-                  {
-                    showInput: true,
-                    aiContext: parsed.aiContext
-                  }
-                );
-
-                return {
-                  content: [
-                    {
-                      type: 'text',
-                      text: `⚠️ Terminal viewer failed, executed normally:\n\n${formattedOutput}`,
-                    },
-                  ],
-                };
-              }
-            } else {
-              // Use standard execution
-              const result = await this.shellExecutor.executeCommand(parsed);
-
-              // Build the full command string for display
-              const fullCommand = parsed.args && parsed.args.length > 0
-                ? `${parsed.command} ${parsed.args.join(' ')}`
-                : parsed.command;
-
-              // Format the output for enhanced display
-              const formattedOutput = this.displayFormatter.formatCommandOutput(
-                fullCommand,
-                result,
-                {
-                  showInput: true,
-                  aiContext: parsed.aiContext
-                }
-              );
+              const fullCommand = parsed.command || this.getDefaultShell();
 
               return {
                 content: [
                   {
                     type: 'text',
-                    text: formattedOutput,
+                    text: `🔧 **Interactive Session Started**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Interactive (process-based)\n\n**Usage:**\n• Use \`send_to_session\` to send commands\n• Session will terminate when the process exits\n• Use \`list_sessions\` to view session status`,
+                  },
+                ],
+              };
+            } catch (error) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: `❌ **Failed to start interactive session:** ${error instanceof Error ? error.message : 'Unknown error'}`,
+                  },
+                ],
+              };
+            }
+          }
+
+          case 'start_terminal_session': {
+            const parsed = StartTerminalSessionSchema.parse(args);
+
+            this.auditLogger.log({
+              level: 'debug',
+              message: 'Start terminal session request received',
+              context: {
+                command: parsed.command,
+                cwd: parsed.cwd,
+                terminalSize: parsed.terminalSize,
+                hasAiContext: !!parsed.aiContext,
+              }
+            });
+
+            try {
+              // Ensure terminal viewer service is available
+              if (!this.terminalViewerService) {
+                this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
+              }
+
+              if (!this.terminalViewerService.isEnabled()) {
+                await this.terminalViewerService.start();
+              }
+
+              // Create terminal session using enhanced session manager
+              const sessionId = await this.terminalSessionManager!.startSession({
+                command: parsed.command || this.getDefaultShell(),
+                args: parsed.args,
+                cwd: parsed.cwd,
+                env: parsed.env,
+                enableTerminalViewer: true,
+                terminalSize: parsed.terminalSize || { cols: 80, rows: 24 },
+                aiContext: parsed.aiContext,
+              });
+
+              // Add session to terminal viewer service
+              const terminalSession = this.terminalSessionManager!.getSession(sessionId);
+              if (terminalSession && this.terminalViewerService) {
+                this.terminalViewerService.addSession(terminalSession);
+              }
+
+              // Get viewer URL
+              const viewerUrl = this.terminalViewerService?.getSessionUrl(sessionId) || 'Service not available';
+
+              const fullCommand = parsed.command || 'system shell';
+
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: `🖥️ **Terminal Session Started**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Terminal (PTY-based)\n**Viewer URL:** ${viewerUrl}\n\n**Features:**\n• Full terminal emulation with colors and cursor control\n• Persistent shell environment (survives command exits)\n• Live browser-based viewing\n• Use \`send_to_session\` to send commands`,
+                  },
+                ],
+              };
+            } catch (error) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: `❌ **Failed to start terminal session:** ${error instanceof Error ? error.message : 'Unknown error'}`,
+                  },
+                ],
+              };
+            }
+          }
+
+          case 'send_to_session': {
+            const parsed = SendToSessionSchema.parse(args);
+
+            this.auditLogger.log({
+              level: 'debug',
+              message: 'Send to session request received',
+              context: {
+                sessionId: parsed.sessionId,
+                inputLength: parsed.input.length,
+                addNewline: parsed.addNewline,
+              }
+            });
+
+            try {
+              // Try terminal session manager first
+              const terminalSession = this.terminalSessionManager?.getSession(parsed.sessionId);
+              if (terminalSession) {
+                await this.terminalSessionManager!.sendInput({
+                  sessionId: parsed.sessionId,
+                  input: parsed.input,
+                  addNewline: parsed.addNewline,
+                });
+
+                return {
+                  content: [
+                    {
+                      type: 'text',
+                      text: `✅ **Input sent to terminal session**\n\n**Session ID:** \`${parsed.sessionId}\`\n**Input:** \`${parsed.input}\`\n\nCheck the terminal viewer or use \`read_session_output\` to see the response.`,
+                    },
+                  ],
+                };
+              }
+
+              // Fall back to regular session manager
+              await this.shellExecutor.sendInputToSession({
+                sessionId: parsed.sessionId,
+                input: parsed.input,
+                addNewline: parsed.addNewline,
+              });
+
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: `✅ **Input sent to interactive session**\n\n**Session ID:** \`${parsed.sessionId}\`\n**Input:** \`${parsed.input}\`\n\nUse \`read_session_output\` to see the response.`,
+                  },
+                ],
+              };
+            } catch (error) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: `❌ **Failed to send input to session:** ${error instanceof Error ? error.message : 'Unknown error'}`,
                   },
                 ],
               };
@@ -949,7 +1134,6 @@ class MCPShellServer {
             const confirmed = this.confirmationManager.confirmCommand(parsed.confirmationId);
 
             if (confirmed) {
-              const confirmation = this.confirmationManager.getPendingConfirmation(parsed.confirmationId);
               return {
                 content: [
                   {

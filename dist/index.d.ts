@@ -21,6 +21,7 @@ declare class MCPShellServer {
     private heartbeatInterval?;
     private lastActivity;
     constructor(config?: Partial<ServerConfig>);
+    private getDefaultShell;
     private setupHandlers;
     start(): Promise<void>;
     private setupConnectionMonitoring;

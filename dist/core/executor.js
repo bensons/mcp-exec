@@ -350,6 +350,14 @@ class ShellExecutor {
     async killSession(sessionId) {
         await this.sessionManager.killSession(sessionId);
     }
+    // Public method to start a new interactive session
+    async startInteractiveSession(options) {
+        return await this.sessionManager.startSession(options);
+    }
+    // Public method to send input to a session
+    async sendInputToSession(options) {
+        return await this.sessionManager.sendInput(options);
+    }
     async readSessionOutput(sessionId) {
         return await this.sessionManager.readOutput(sessionId);
     }

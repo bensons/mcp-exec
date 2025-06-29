@@ -434,6 +434,16 @@ export class ShellExecutor {
     await this.sessionManager.killSession(sessionId);
   }
 
+  // Public method to start a new interactive session
+  async startInteractiveSession(options: StartSessionOptions): Promise<string> {
+    return await this.sessionManager.startSession(options);
+  }
+
+  // Public method to send input to a session
+  async sendInputToSession(options: SendInputOptions): Promise<void> {
+    return await this.sessionManager.sendInput(options);
+  }
+
   async readSessionOutput(sessionId: string): Promise<SessionOutput> {
     return await this.sessionManager.readOutput(sessionId);
   }
