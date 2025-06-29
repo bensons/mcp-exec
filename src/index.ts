@@ -1321,11 +1321,27 @@ class MCPShellServer {
           case 'read_session_output': {
             const parsed = ReadSessionOutputSchema.parse(args);
 
+            await this.auditLogger.log({
+              level: 'debug',
+              message: 'read_session_output called',
+              context: { sessionId: parsed.sessionId }
+            });
+
             try {
               // Check if it's a terminal session first
               if (this.terminalSessionManager) {
                 const terminalSession = this.terminalSessionManager.getSession(parsed.sessionId);
                 if (terminalSession) {
+                  await this.auditLogger.log({
+                    level: 'debug',
+                    message: 'Found terminal session for read_session_output',
+                    context: {
+                      sessionId: parsed.sessionId,
+                      status: terminalSession.status,
+                      bufferLines: terminalSession.buffer.lines.length
+                    }
+                  });
+
                   const buffer = this.terminalSessionManager.getTerminalBuffer(parsed.sessionId);
                   const viewerUrl = this.terminalViewerService?.getSessionUrl(parsed.sessionId);
 

@@ -150,10 +150,17 @@ export class TerminalSessionManager {
       session.lastActivity = new Date();
     });
 
-    // Handle process exit
-    session.pty.onExit((exitCode: { exitCode: number; signal?: number }) => {
-      session.status = exitCode.exitCode === 0 ? 'finished' : 'error';
+    // Handle process exit - PTY onExit receives (exitCode, signal) as separate parameters
+    session.pty.onExit((exitCode: number, signal?: number) => {
+      console.error(`[DEBUG] PTY process exited for session ${session.sessionId}: exitCode=${exitCode}, signal=${signal}`);
+      const newStatus = exitCode === 0 ? 'finished' : 'error';
+      session.status = newStatus;
       session.lastActivity = new Date();
+
+      console.error(`[DEBUG] Session ${session.sessionId} status updated to: ${newStatus}`);
+
+      // Add a final message to the buffer indicating the session has ended
+      this.addToBuffer(session, `\n[Session ended with exit code ${exitCode}]`, 'output');
     });
   }
 
@@ -238,6 +245,23 @@ export class TerminalSessionManager {
 
   getSession(sessionId: string): TerminalSession | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  getSessionInfo(sessionId: string): any {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return null;
+    }
+
+    return {
+      sessionId: session.sessionId,
+      command: session.command,
+      status: session.status,
+      startTime: session.startTime,
+      lastActivity: session.lastActivity,
+      bufferLines: session.buffer.lines.length,
+      recentOutput: session.buffer.lines.slice(-5).map(line => line.text).join('\n')
+    };
   }
 
   listSessions(): Array<{

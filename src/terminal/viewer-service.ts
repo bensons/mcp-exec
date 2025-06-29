@@ -288,9 +288,11 @@ export class TerminalViewerService {
         this.addToBuffer(session, data, 'output');
       });
 
-      session.pty.onExit(() => {
-        session.status = 'finished';
-        this.broadcastStatusToSession(session.sessionId, 'finished');
+      // Handle process exit - PTY onExit receives (exitCode, signal) as separate parameters
+      session.pty.onExit((exitCode: number, signal?: number) => {
+        console.error(`[DEBUG] PTY process exited in viewer service for session ${session.sessionId}: exitCode=${exitCode}, signal=${signal}`);
+        session.status = exitCode === 0 ? 'finished' : 'error';
+        this.broadcastStatusToSession(session.sessionId, session.status);
       });
     }
   }
