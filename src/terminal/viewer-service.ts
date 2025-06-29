@@ -336,10 +336,7 @@ export class TerminalViewerService {
     const inputToSend = addNewline ? input + '\r' : input;
     session.pty.write(inputToSend);
 
-    // Add input to buffer and broadcast to viewers
-    this.addToBuffer(session, input + (addNewline ? '\n' : ''), 'input');
-    this.broadcastToSession(sessionId, input + (addNewline ? '\r\n' : ''));
-
+    // Don't manually add to buffer or broadcast - let PTY echo handle display to avoid duplication
     session.lastActivity = new Date();
   }
 

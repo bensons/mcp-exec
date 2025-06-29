@@ -221,10 +221,8 @@ export class TerminalSessionManager {
     // Send input to PTY
     const input = options.addNewline !== false ? options.input + '\r' : options.input;
     session.pty.write(input);
-    
-    // Add to buffer for display
-    this.addToBuffer(session, options.input + (options.addNewline !== false ? '\n' : ''), 'input');
-    
+
+    // Don't manually add to buffer - let PTY echo handle display to avoid duplication
     session.lastActivity = new Date();
   }
 
