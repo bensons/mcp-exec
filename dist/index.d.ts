@@ -26,6 +26,8 @@ declare class MCPShellServer {
     start(): Promise<void>;
     private setupConnectionMonitoring;
     private updateActivity;
+    private hasActiveSessions;
+    private hasActiveConnections;
     private startHeartbeat;
     private stopHeartbeat;
     private cleanupResources;

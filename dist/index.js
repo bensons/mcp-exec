@@ -1748,18 +1748,70 @@ class MCPShellServer {
     updateActivity() {
         this.lastActivity = Date.now();
     }
+    async hasActiveSessions() {
+        try {
+            // Check interactive sessions
+            const interactiveSessions = await this.shellExecutor.listSessions();
+            const activeInteractiveSessions = interactiveSessions.filter((session) => session.status === 'running');
+            // Check terminal sessions
+            let activeTerminalSessions = 0;
+            if (this.terminalSessionManager) {
+                const terminalSessions = this.terminalSessionManager.listSessions();
+                activeTerminalSessions = terminalSessions.filter((session) => session.status === 'running').length;
+            }
+            const totalActiveSessions = activeInteractiveSessions.length + activeTerminalSessions;
+            if (totalActiveSessions > 0) {
+                console.error(`🔄 Keeping server alive: ${activeInteractiveSessions.length} interactive + ${activeTerminalSessions} terminal sessions active`);
+                return true;
+            }
+            return false;
+        }
+        catch (error) {
+            console.error('Error checking active sessions:', error);
+            return false;
+        }
+    }
+    hasActiveConnections() {
+        try {
+            // Check terminal viewer connections
+            if (this.terminalViewerService && this.terminalViewerService.isEnabled()) {
+                const status = this.terminalViewerService.getStatus();
+                const activeConnections = status.activeSessions.reduce((total, session) => total + session.viewerCount, 0);
+                if (activeConnections > 0) {
+                    console.error(`🌐 Keeping server alive: ${activeConnections} active WebSocket connections`);
+                    return true;
+                }
+            }
+            return false;
+        }
+        catch (error) {
+            console.error('Error checking active connections:', error);
+            return false;
+        }
+    }
     startHeartbeat() {
         if (!this.config.lifecycle.enableHeartbeat) {
             return;
         }
-        // Check for activity every 30 seconds
-        this.heartbeatInterval = setInterval(() => {
+        // Calculate heartbeat interval - check every 10 seconds or half the timeout, whichever is smaller
+        const heartbeatInterval = Math.min(10000, Math.floor(this.config.lifecycle.inactivityTimeout / 2));
+        this.heartbeatInterval = setInterval(async () => {
             const timeSinceLastActivity = Date.now() - this.lastActivity;
             if (timeSinceLastActivity > this.config.lifecycle.inactivityTimeout) {
-                console.error(`⏰ No activity for ${Math.round(timeSinceLastActivity / 1000)}s, shutting down`);
-                this.gracefulShutdown('Inactivity timeout');
+                // Check if there are active sessions or connections that should keep server alive
+                const hasActiveSessions = await this.hasActiveSessions();
+                const hasActiveConnections = this.hasActiveConnections();
+                if (hasActiveSessions || hasActiveConnections) {
+                    console.error(`⏰ No client activity for ${Math.round(timeSinceLastActivity / 1000)}s, but keeping server alive due to active sessions/connections`);
+                    // Update activity to prevent shutdown while sessions are active
+                    this.updateActivity();
+                }
+                else {
+                    console.error(`⏰ No activity for ${Math.round(timeSinceLastActivity / 1000)}s, shutting down`);
+                    this.gracefulShutdown('Inactivity timeout');
+                }
             }
-        }, 30000);
+        }, heartbeatInterval);
     }
     stopHeartbeat() {
         if (this.heartbeatInterval) {
