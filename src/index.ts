@@ -126,6 +126,11 @@ const ExecuteCommandSchema = z.object({
   shell: z.union([z.boolean(), z.string()]).optional().describe('Shell to use for execution'),
   aiContext: z.string().optional().describe('AI context/intent for this command'),
   session: z.string().optional().describe('Existing session ID to send command to (use start_interactive_session or start_terminal_session to create new sessions)'),
+  enableTerminalViewer: z.boolean().optional().describe('Create a terminal session with browser viewer instead of regular execution'),
+  terminalSize: z.object({
+    cols: z.number().default(80),
+    rows: z.number().default(24)
+  }).optional().describe('Terminal size when enableTerminalViewer is true'),
 });
 
 const StartInteractiveSessionSchema = z.object({
@@ -355,7 +360,7 @@ class MCPShellServer {
         tools: [
           {
             name: 'execute_command',
-            description: 'Execute a shell command with security validation and context preservation. For interactive sessions, use start_interactive_session or start_terminal_session first.',
+            description: 'Execute a shell command with security validation and context preservation. Use enableTerminalViewer for browser-viewable terminal sessions.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -367,6 +372,15 @@ class MCPShellServer {
                 shell: { type: ['boolean', 'string'], description: 'Shell to use for execution' },
                 session: { type: 'string', description: 'Existing session ID to send command to (use start_interactive_session or start_terminal_session to create new sessions)' },
                 aiContext: { type: 'string', description: 'AI context/intent for this command' },
+                enableTerminalViewer: { type: 'boolean', description: 'Create a terminal session with browser viewer instead of regular execution' },
+                terminalSize: {
+                  type: 'object',
+                  properties: {
+                    cols: { type: 'number', default: 80 },
+                    rows: { type: 'number', default: 24 }
+                  },
+                  description: 'Terminal size when enableTerminalViewer is true'
+                },
               },
               required: ['command'],
             },
@@ -767,6 +781,73 @@ class MCPShellServer {
                   },
                 ],
               };
+            }
+
+            // Check if terminal viewer is requested
+            if (parsed.enableTerminalViewer) {
+              this.auditLogger.log({
+                level: 'debug',
+                message: 'Terminal viewer execution requested',
+                context: {
+                  command: parsed.command,
+                  args: parsed.args,
+                  cwd: parsed.cwd,
+                  hasAiContext: !!parsed.aiContext,
+                }
+              });
+
+              try {
+                // Ensure terminal viewer service is available
+                if (!this.terminalViewerService) {
+                  this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
+                }
+
+                if (!this.terminalViewerService.isEnabled()) {
+                  await this.terminalViewerService.start();
+                }
+
+                // Create terminal session using enhanced session manager
+                const sessionId = await this.terminalSessionManager!.startSession({
+                  command: parsed.command,
+                  args: parsed.args,
+                  cwd: parsed.cwd,
+                  env: parsed.env,
+                  enableTerminalViewer: true,
+                  terminalSize: parsed.terminalSize || { cols: 80, rows: 24 },
+                  aiContext: parsed.aiContext,
+                });
+
+                // Add session to terminal viewer service
+                const terminalSession = this.terminalSessionManager!.getSession(sessionId);
+                if (terminalSession && this.terminalViewerService) {
+                  this.terminalViewerService.addSession(terminalSession);
+                }
+
+                // Get viewer URL
+                const viewerUrl = this.terminalViewerService?.getSessionUrl(sessionId) || 'Service not available';
+
+                const fullCommand = parsed.args && parsed.args.length > 0
+                  ? `${parsed.command} ${parsed.args.join(' ')}`
+                  : parsed.command;
+
+                return {
+                  content: [
+                    {
+                      type: 'text',
+                      text: `🖥️ **Terminal Session Started**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Terminal (PTY-based)\n**Viewer URL:** ${viewerUrl}\n\n**Important - Terminal Session Behavior:**\n• **Persistent Environment**: This terminal session will continue running even after individual commands exit\n• **Shell Persistence**: When you send \`exit\` to a command like \`bash\`, it exits that command but returns to the parent shell\n• **Session Termination**: Use \`kill_session\` to terminate the entire terminal session\n• **Live Viewing**: Monitor the session in real-time via the browser viewer\n\n**Usage:**\n• Use \`send_to_session\` to send commands\n• Use \`read_session_output\` to read terminal output\n• Use \`kill_session\` to terminate when done`,
+                    },
+                  ],
+                };
+              } catch (error) {
+                return {
+                  content: [
+                    {
+                      type: 'text',
+                      text: `❌ **Failed to start terminal session:** ${error instanceof Error ? error.message : 'Unknown error'}`,
+                    },
+                  ],
+                };
+              }
             }
 
             // Execute the command

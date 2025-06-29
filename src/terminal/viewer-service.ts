@@ -299,8 +299,26 @@ export class TerminalViewerService {
 
       // Handle process exit - PTY onExit receives (exitCode, signal) as separate parameters
       session.pty.onExit((exitCode: number, signal?: number) => {
-        console.error(`[DEBUG] PTY process exited in viewer service for session ${session.sessionId}: exitCode=${exitCode}, signal=${signal}`);
-        session.status = exitCode === 0 ? 'finished' : 'error';
+        console.error(`[DEBUG] PTY process exited in viewer service for session ${session.sessionId}:`);
+        console.error(`[DEBUG]   exitCode: ${exitCode} (type: ${typeof exitCode})`);
+        console.error(`[DEBUG]   signal: ${signal} (type: ${typeof signal})`);
+
+        // Determine status based on exit conditions
+        // Normal exit (code 0) or exit via common signals should be considered finished
+        let newStatus: 'finished' | 'error';
+        if (exitCode === 0) {
+          newStatus = 'finished';
+          console.error(`[DEBUG] Setting status to 'finished' - normal exit with code 0`);
+        } else if (signal === 1 || signal === 2 || signal === 15) {
+          // SIGHUP, SIGINT, SIGTERM - common termination signals that should be considered normal
+          newStatus = 'finished';
+          console.error(`[DEBUG] Setting status to 'finished' - terminated by signal ${signal}`);
+        } else {
+          newStatus = 'error';
+          console.error(`[DEBUG] Setting status to 'error' - abnormal exit: code=${exitCode}, signal=${signal}`);
+        }
+
+        session.status = newStatus;
         this.broadcastStatusToSession(session.sessionId, session.status);
       });
     }
