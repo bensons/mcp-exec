@@ -554,6 +554,43 @@ class MCPShellServer {
                 switch (name) {
                     case 'execute_command': {
                         const parsed = ExecuteCommandSchema.parse(args);
+                        // Check if this is for an existing terminal session
+                        if (parsed.session && parsed.session !== 'new') {
+                            const terminalSession = this.terminalSessionManager?.getSession(parsed.session);
+                            if (terminalSession) {
+                                // This is a terminal session - handle it via terminal session manager
+                                try {
+                                    await this.terminalSessionManager.sendInput({
+                                        sessionId: parsed.session,
+                                        input: parsed.args && parsed.args.length > 0
+                                            ? `${parsed.command} ${parsed.args.join(' ')}`
+                                            : parsed.command,
+                                    });
+                                    // Get recent output from terminal buffer
+                                    const buffer = this.terminalSessionManager.getTerminalBuffer(parsed.session);
+                                    const recentOutput = buffer?.lines.slice(-5).map(line => line.text).join('\n') || '';
+                                    const viewerUrl = this.terminalViewerService?.getSessionUrl(parsed.session);
+                                    return {
+                                        content: [
+                                            {
+                                                type: 'text',
+                                                text: `✅ **Command sent to terminal session**\n\n**Session ID:** \`${parsed.session}\`\n**Command:** \`${parsed.args && parsed.args.length > 0 ? `${parsed.command} ${parsed.args.join(' ')}` : parsed.command}\`\n\n**Recent Output:**\n\`\`\`\n${recentOutput}\n\`\`\`\n\n**Terminal Viewer:** ${viewerUrl || 'Not available'}\n\n*View the full terminal output in your browser for real-time updates.*`,
+                                            },
+                                        ],
+                                    };
+                                }
+                                catch (error) {
+                                    return {
+                                        content: [
+                                            {
+                                                type: 'text',
+                                                text: `❌ **Failed to send command to terminal session**\n\n**Error:** ${error instanceof Error ? error.message : 'Unknown error'}\n**Session ID:** \`${parsed.session}\``,
+                                            },
+                                        ],
+                                    };
+                                }
+                            }
+                        }
                         // Handle terminal viewer option
                         if (parsed.enableTerminalViewer) {
                             try {
