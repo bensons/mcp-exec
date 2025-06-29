@@ -52,12 +52,7 @@ function createClaudeConfig() {
   // Add mcp-exec configuration
   config.mcpServers['mcp-exec'] = {
     command: 'node',
-    args: [mcpExecPath],
-    env: {
-      MCP_EXEC_SECURITY_LEVEL: 'moderate',
-      MCP_EXEC_CONFIRM_DANGEROUS: 'true',
-      MCP_EXEC_AI_OPTIMIZATIONS: 'true'
-    }
+    args: [mcpExecPath]
   };
   
   // Write updated config
@@ -98,12 +93,16 @@ function main() {
   console.log('\n🔧 Configuration file location:');
   console.log(`   ${configPath}`);
   
-  console.log('\n🛡️  Security settings:');
-  console.log('   - Security level: moderate');
-  console.log('   - Dangerous command confirmation: enabled');
-  console.log('   - AI optimizations: enabled');
+  console.log('\n🛡️  Configuration:');
+  console.log('   - Using default configuration settings');
+  console.log('   - Security level: permissive (default)');
+  console.log('   - Dangerous command confirmation: disabled (default)');
+  console.log('   - AI optimizations: enabled (default)');
   
-  console.log('\n📖 For more configuration options, see README.md');
+  console.log('\n📖 For custom configuration options:');
+  console.log('   - See ENVIRONMENT_VARIABLES.md for all available settings');
+  console.log('   - Add environment variables to the "env" section if needed');
+  console.log('   - See README.md for usage examples');
 }
 
 if (require.main === module) {
