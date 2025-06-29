@@ -440,6 +440,7 @@ node tests/test-ssh-comprehensive.js    # SSH command testing
 node tests/test-enhanced-logging.js     # RFC 5424 logging and MCP notifications
 node tests/test-execute-command-no-session.js # One-shot command execution
 node tests/test-session-separation.js   # Session functionality separation
+node tests/test-mcp-annotations.js      # MCP tool annotations structure compliance
 ```
 
 ## 🏛️ Architecture
