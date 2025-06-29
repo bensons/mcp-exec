@@ -49,6 +49,8 @@ export interface CommandHistoryEntry {
   output: CommandOutput;
   relatedCommands: string[]; // IDs of related commands
   aiContext?: string; // The AI's intent/reason for the command
+  sessionId?: string; // ID of interactive session if applicable
+  sessionType?: 'start' | 'input' | 'kill'; // Type of session operation
 }
 
 export interface ContextManager {
@@ -238,6 +240,11 @@ export interface ServerConfig {
     sessionPersistence: boolean;
     maxHistorySize: number;
   };
+  sessions: {
+    maxInteractiveSessions: number; // Maximum number of concurrent interactive sessions
+    sessionTimeout: number; // Session timeout in milliseconds
+    outputBufferSize: number; // Maximum lines to buffer per session
+  };
   lifecycle: {
     inactivityTimeout: number; // milliseconds before shutdown due to inactivity
     gracefulShutdownTimeout: number; // milliseconds to wait for graceful shutdown
@@ -278,4 +285,38 @@ export interface ServerConfig {
       };
     };
   };
+}
+
+// Interactive Session Types
+export interface InteractiveSession {
+  sessionId: string;
+  command: string;
+  args: string[];
+  process: any; // ChildProcess from child_process
+  startTime: Date;
+  lastActivity: Date;
+  cwd: string;
+  env: Record<string, string>;
+  status: 'running' | 'finished' | 'error';
+  outputBuffer: string[];
+  errorBuffer: string[];
+  aiContext?: string;
+}
+
+export interface SessionOutput {
+  sessionId: string;
+  stdout: string;
+  stderr: string;
+  hasMore: boolean; // Whether there's more output available
+  status: 'running' | 'finished' | 'error';
+}
+
+export interface SessionInfo {
+  sessionId: string;
+  command: string;
+  startTime: Date;
+  lastActivity: Date;
+  status: 'running' | 'finished' | 'error';
+  cwd: string;
+  aiContext?: string;
 }

@@ -77,7 +77,7 @@ class ContextManager {
         };
     }
     async updateAfterCommand(options) {
-        const { id, command, workingDirectory, environment, output, aiContext } = options;
+        const { id, command, workingDirectory, environment, output, aiContext, sessionId, sessionType } = options;
         // Update working directory if command changed it
         if (this.config.preserveWorkingDirectory) {
             await this.updateWorkingDirectory(command, workingDirectory, output);
@@ -96,6 +96,8 @@ class ContextManager {
             output,
             relatedCommands: this.findRelatedCommands(command),
             aiContext,
+            sessionId,
+            sessionType,
         };
         this.commandHistory.push(historyEntry);
         // Maintain history size limit

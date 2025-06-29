@@ -40,6 +40,8 @@ export interface CommandHistoryEntry {
     output: CommandOutput;
     relatedCommands: string[];
     aiContext?: string;
+    sessionId?: string;
+    sessionType?: 'start' | 'input' | 'kill';
 }
 export interface ContextManager {
     currentDirectory: string;
@@ -189,6 +191,11 @@ export interface ServerConfig {
         sessionPersistence: boolean;
         maxHistorySize: number;
     };
+    sessions: {
+        maxInteractiveSessions: number;
+        sessionTimeout: number;
+        outputBufferSize: number;
+    };
     lifecycle: {
         inactivityTimeout: number;
         gracefulShutdownTimeout: number;
@@ -229,5 +236,35 @@ export interface ServerConfig {
             };
         };
     };
+}
+export interface InteractiveSession {
+    sessionId: string;
+    command: string;
+    args: string[];
+    process: any;
+    startTime: Date;
+    lastActivity: Date;
+    cwd: string;
+    env: Record<string, string>;
+    status: 'running' | 'finished' | 'error';
+    outputBuffer: string[];
+    errorBuffer: string[];
+    aiContext?: string;
+}
+export interface SessionOutput {
+    sessionId: string;
+    stdout: string;
+    stderr: string;
+    hasMore: boolean;
+    status: 'running' | 'finished' | 'error';
+}
+export interface SessionInfo {
+    sessionId: string;
+    command: string;
+    startTime: Date;
+    lastActivity: Date;
+    status: 'running' | 'finished' | 'error';
+    cwd: string;
+    aiContext?: string;
 }
 //# sourceMappingURL=index.d.ts.map

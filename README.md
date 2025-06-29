@@ -6,9 +6,16 @@ A secure, context-aware Model Context Protocol (MCP) server for shell command ex
 
 **MCP-Exec** is a TypeScript-based MCP server that provides intelligent shell command execution capabilities for AI assistants like Claude Desktop, Claude Code, and Augment Code. It combines multi-layered security, context preservation, and enhanced output formatting to create a powerful tool for AI-assisted development and system administration.
 
-The server implements the Model Context Protocol specification with STDIO transport, providing 16 comprehensive tools for secure shell interaction while maintaining session state and providing AI-optimized output formatting.
+The server implements the Model Context Protocol specification with STDIO transport, providing 19 comprehensive tools for secure shell interaction while maintaining session state and providing AI-optimized output formatting.
 
 ## ✨ Key Features
+
+### 🔄 Interactive Sessions
+- **Long-running processes** - Start and maintain interactive shells, REPLs, and other persistent processes
+- **Session management** - Support for up to 10 concurrent interactive sessions (configurable)
+- **Bidirectional communication** - Send commands and receive output from active sessions
+- **Session persistence** - Sessions remain active until explicitly terminated or timeout
+- **Command history tracking** - All session interactions are logged and tracked
 
 ### 🔒 Multi-layered Security
 
@@ -108,12 +115,18 @@ If you prefer manual setup, add this to your Claude Desktop configuration:
 
 ## 🛠️ Available Tools
 
-The server provides 16 comprehensive MCP tools organized into categories:
+The server provides 19 comprehensive MCP tools organized into categories:
 
 ### Core Execution Tools
 
-- **`execute_command`** - Execute shell commands with full security validation
+- **`execute_command`** - Execute shell commands with full security validation and interactive session support
 - **`confirm_command`** - Interactive confirmation system for dangerous operations
+
+### Interactive Session Tools
+
+- **`list_sessions`** - List all active interactive sessions with status information
+- **`kill_session`** - Terminate a specific interactive session
+- **`read_session_output`** - Read buffered output from an interactive session
 
 ### Context Management Tools
 
@@ -212,6 +225,62 @@ You can also modify settings at runtime using the `update_security_config` tool:
 }
 ```
 
+## 🔄 Interactive Sessions Usage
+
+### Starting an Interactive Session
+
+Use the `execute_command` tool with `session: "new"` to start an interactive process:
+
+```javascript
+{
+  "command": "python3",
+  "args": ["-i"],
+  "session": "new",
+  "aiContext": "Starting Python REPL for data analysis"
+}
+```
+
+This returns a session ID that you can use for subsequent interactions.
+
+### Sending Commands to a Session
+
+Use the session ID to send commands to the interactive process:
+
+```javascript
+{
+  "command": "print('Hello from Python!')",
+  "session": "your-session-id-here"
+}
+```
+
+### Managing Sessions
+
+```javascript
+// List all active sessions
+{ "tool": "list_sessions" }
+
+// Read buffered output from a session
+{ "tool": "read_session_output", "sessionId": "your-session-id" }
+
+// Terminate a session
+{ "tool": "kill_session", "sessionId": "your-session-id" }
+```
+
+### Session Configuration
+
+Configure session limits and timeouts in your environment:
+
+```bash
+# Maximum concurrent sessions (default: 10)
+MCP_EXEC_MAX_SESSIONS=10
+
+# Session timeout in milliseconds (default: 30 minutes)
+MCP_EXEC_SESSION_TIMEOUT=1800000
+
+# Output buffer size per session (default: 1000 lines)
+MCP_EXEC_SESSION_BUFFER_SIZE=1000
+```
+
 ## 🏗️ Development
 
 ### Build Commands
@@ -254,7 +323,8 @@ The codebase follows a modular architecture with clear separation of concerns:
 src/
 ├── index.ts           # MCP server entry point - handles all tool registrations and request routing
 ├── core/
-│   └── executor.ts    # Command execution engine with cross-platform support
+│   ├── executor.ts    # Command execution engine with cross-platform support
+│   └── interactive-session-manager.ts # Interactive session management for long-running processes
 ├── security/
 │   ├── manager.ts     # Security validation, sandboxing, and policy enforcement
 │   └── confirmation.ts # Interactive confirmation system for dangerous commands
@@ -279,27 +349,34 @@ src/
    - Configurable security levels (strict/moderate/permissive)
    - Optional confirmation system for high-risk operations
 
-3. **Context Preservation**: The `context/manager.ts` maintains:
+3. **Interactive Sessions**: The `core/interactive-session-manager.ts` provides:
+   - Long-running process management with configurable limits
+   - Bidirectional communication with active sessions
+   - Output buffering and session lifecycle management
+   - Automatic cleanup of expired sessions
+
+4. **Context Preservation**: The `context/manager.ts` maintains:
    - Working directory state across commands
    - Environment variables
-   - Command history with relationships
+   - Command history with relationships (including session interactions)
    - File system change tracking
 
-4. **AI Optimizations**: The output processor in `utils/output-processor.ts` intelligently:
+5. **AI Optimizations**: The output processor in `utils/output-processor.ts` intelligently:
    - Detects and parses structured data (JSON, YAML, CSV)
    - Removes noise from outputs (progress bars, ANSI codes)
    - Provides command-specific formatting
 
-5. **Audit System**: Comprehensive logging in `audit/` with:
+6. **Audit System**: Comprehensive logging in `audit/` with:
    - Immutable append-only logs
    - Real-time monitoring with configurable alert rules
    - Multiple export formats (JSON, CSV, XML)
 
 ### MCP Protocol Implementation
 
-The server uses STDIO transport and implements 16 MCP tools:
+The server uses STDIO transport and implements 19 MCP tools:
 
 - Command execution tools: `execute_command`, `confirm_command`
+- Interactive session tools: `list_sessions`, `kill_session`, `read_session_output`
 - Context tools: `get_context`, `get_history`, `set_working_directory`
 - Security tools: `update_security_config`, `get_security_status`
 - AI tools: `get_intent_summary`, `suggest_next_commands`

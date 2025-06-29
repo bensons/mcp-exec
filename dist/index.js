@@ -86,6 +86,11 @@ const DEFAULT_CONFIG = {
         sessionPersistence: true,
         maxHistorySize: 1000,
     },
+    sessions: {
+        maxInteractiveSessions: 10,
+        sessionTimeout: 30 * 60 * 1000, // 30 minutes
+        outputBufferSize: 1000,
+    },
     lifecycle: {
         inactivityTimeout: parseInt(process.env.MCP_EXEC_INACTIVITY_TIMEOUT || '300000'), // 5 minutes default
         gracefulShutdownTimeout: parseInt(process.env.MCP_EXEC_SHUTDOWN_TIMEOUT || '5000'), // 5 seconds default
@@ -131,9 +136,17 @@ const ExecuteCommandSchema = zod_1.z.object({
     timeout: zod_1.z.number().optional().describe('Timeout in milliseconds'),
     shell: zod_1.z.union([zod_1.z.boolean(), zod_1.z.string()]).optional().describe('Shell to use for execution'),
     aiContext: zod_1.z.string().optional().describe('AI context/intent for this command'),
+    session: zod_1.z.string().optional().describe('Session ID for interactive execution, or "new" to start new session'),
 });
 const GetContextSchema = zod_1.z.object({
     sessionId: zod_1.z.string().optional().describe('Session ID to get context for'),
+});
+const ListSessionsSchema = zod_1.z.object({});
+const KillSessionSchema = zod_1.z.object({
+    sessionId: zod_1.z.string().describe('Session ID to terminate'),
+});
+const ReadSessionOutputSchema = zod_1.z.object({
+    sessionId: zod_1.z.string().describe('Session ID to read output from'),
 });
 const GetHistorySchema = zod_1.z.object({
     limit: zod_1.z.number().optional().describe('Number of history entries to return'),
@@ -233,7 +246,7 @@ class MCPShellServer {
                 tools: [
                     {
                         name: 'execute_command',
-                        description: 'Execute a shell command with security validation and context preservation',
+                        description: 'Execute a shell command with security validation and context preservation. Supports interactive sessions.',
                         inputSchema: {
                             type: 'object',
                             properties: {
@@ -243,6 +256,7 @@ class MCPShellServer {
                                 env: { type: 'object', description: 'Environment variables' },
                                 timeout: { type: 'number', description: 'Timeout in milliseconds' },
                                 shell: { type: ['boolean', 'string'], description: 'Shell to use for execution' },
+                                session: { type: 'string', description: 'Session ID for interactive execution, or "new" to start new session' },
                                 aiContext: { type: 'string', description: 'AI context/intent for this command' },
                             },
                             required: ['command'],
@@ -436,6 +450,36 @@ class MCPShellServer {
                                 logFile: { type: 'string', description: 'Full path to audit log file' },
                                 logDirectory: { type: 'string', description: 'Directory for audit log files' },
                             },
+                        },
+                    },
+                    {
+                        name: 'list_sessions',
+                        description: 'List all active interactive sessions',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {},
+                        },
+                    },
+                    {
+                        name: 'kill_session',
+                        description: 'Terminate an interactive session',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                sessionId: { type: 'string', description: 'Session ID to terminate' },
+                            },
+                            required: ['sessionId'],
+                        },
+                    },
+                    {
+                        name: 'read_session_output',
+                        description: 'Read buffered output from an interactive session',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                sessionId: { type: 'string', description: 'Session ID to read output from' },
+                            },
+                            required: ['sessionId'],
                         },
                     },
                 ],
@@ -829,6 +873,95 @@ class MCPShellServer {
                             ],
                         };
                     }
+                    case 'list_sessions': {
+                        const sessions = await this.shellExecutor.listSessions();
+                        return {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: JSON.stringify({
+                                        sessions: sessions.map(session => ({
+                                            sessionId: session.sessionId,
+                                            command: session.command,
+                                            startTime: session.startTime,
+                                            lastActivity: session.lastActivity,
+                                            status: session.status,
+                                            cwd: session.cwd,
+                                            aiContext: session.aiContext,
+                                        })),
+                                        totalSessions: sessions.length,
+                                        maxSessions: this.config.sessions.maxInteractiveSessions,
+                                    }, null, 2),
+                                },
+                            ],
+                        };
+                    }
+                    case 'kill_session': {
+                        const parsed = KillSessionSchema.parse(args);
+                        try {
+                            await this.shellExecutor.killSession(parsed.sessionId);
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: JSON.stringify({
+                                            success: true,
+                                            message: `Session ${parsed.sessionId} terminated`,
+                                            sessionId: parsed.sessionId,
+                                        }, null, 2),
+                                    },
+                                ],
+                            };
+                        }
+                        catch (error) {
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: JSON.stringify({
+                                            success: false,
+                                            error: error instanceof Error ? error.message : 'Unknown error',
+                                            sessionId: parsed.sessionId,
+                                        }, null, 2),
+                                    },
+                                ],
+                            };
+                        }
+                    }
+                    case 'read_session_output': {
+                        const parsed = ReadSessionOutputSchema.parse(args);
+                        try {
+                            const output = await this.shellExecutor.readSessionOutput(parsed.sessionId);
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: JSON.stringify({
+                                            sessionId: output.sessionId,
+                                            stdout: output.stdout,
+                                            stderr: output.stderr,
+                                            hasMore: output.hasMore,
+                                            status: output.status,
+                                        }, null, 2),
+                                    },
+                                ],
+                            };
+                        }
+                        catch (error) {
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: JSON.stringify({
+                                            success: false,
+                                            error: error instanceof Error ? error.message : 'Unknown error',
+                                            sessionId: parsed.sessionId,
+                                        }, null, 2),
+                                    },
+                                ],
+                            };
+                        }
+                    }
                     default:
                         throw new Error(`Unknown tool: ${name}`);
                 }
@@ -969,6 +1102,9 @@ class MCPShellServer {
                 await this.contextManager.persistSession();
                 console.error('💾 Session state saved');
             }
+            // Shutdown interactive sessions
+            await this.shellExecutor.shutdown();
+            console.error('🔄 Interactive sessions terminated');
             // Cleanup resources
             await this.cleanupResources();
             // Close transport connection

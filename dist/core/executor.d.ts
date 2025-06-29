@@ -1,7 +1,7 @@
 /**
  * Core shell command executor with cross-platform support
  */
-import { CommandOutput, ServerConfig } from '../types/index';
+import { CommandOutput, ServerConfig, SessionOutput } from '../types/index';
 import { SecurityManager } from '../security/manager';
 import { ContextManager } from '../context/manager';
 import { AuditLogger } from '../audit/logger';
@@ -13,6 +13,7 @@ export interface ExecuteCommandOptions {
     timeout?: number;
     shell?: boolean | string;
     aiContext?: string;
+    session?: string;
 }
 export declare class ShellExecutor {
     private securityManager;
@@ -20,6 +21,7 @@ export declare class ShellExecutor {
     private auditLogger;
     private outputProcessor;
     private intentTracker;
+    private sessionManager;
     private config;
     constructor(securityManager: SecurityManager, contextManager: ContextManager, auditLogger: AuditLogger, config: ServerConfig);
     executeCommand(options: ExecuteCommandOptions): Promise<CommandOutput>;
@@ -35,5 +37,12 @@ export declare class ShellExecutor {
     }[];
     private buildFullCommand;
     private executeWithTimeout;
+    executeWithSession(options: ExecuteCommandOptions, commandId: string, startTime: number): Promise<CommandOutput>;
+    startNewSession(options: ExecuteCommandOptions, commandId: string, startTime: number): Promise<CommandOutput>;
+    sendToSession(options: ExecuteCommandOptions, commandId: string, startTime: number): Promise<CommandOutput>;
+    listSessions(): Promise<import("../types/index").SessionInfo[]>;
+    killSession(sessionId: string): Promise<void>;
+    readSessionOutput(sessionId: string): Promise<SessionOutput>;
+    shutdown(): Promise<void>;
 }
 //# sourceMappingURL=executor.d.ts.map

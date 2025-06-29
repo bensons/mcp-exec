@@ -26,6 +26,8 @@ export interface UpdateCommandOptions {
   environment: Record<string, string>;
   output: CommandOutput;
   aiContext?: string;
+  sessionId?: string;
+  sessionType?: 'start' | 'input' | 'kill';
 }
 
 export class ContextManager {
@@ -69,7 +71,7 @@ export class ContextManager {
   }
 
   async updateAfterCommand(options: UpdateCommandOptions): Promise<void> {
-    const { id, command, workingDirectory, environment, output, aiContext } = options;
+    const { id, command, workingDirectory, environment, output, aiContext, sessionId, sessionType } = options;
 
     // Update working directory if command changed it
     if (this.config.preserveWorkingDirectory) {
@@ -92,6 +94,8 @@ export class ContextManager {
       output,
       relatedCommands: this.findRelatedCommands(command),
       aiContext,
+      sessionId,
+      sessionType,
     };
 
     this.commandHistory.push(historyEntry);

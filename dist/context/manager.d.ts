@@ -14,6 +14,8 @@ export interface UpdateCommandOptions {
     environment: Record<string, string>;
     output: CommandOutput;
     aiContext?: string;
+    sessionId?: string;
+    sessionType?: 'start' | 'input' | 'kill';
 }
 export declare class ContextManager {
     private config;
