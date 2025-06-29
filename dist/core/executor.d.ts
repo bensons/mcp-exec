@@ -14,7 +14,6 @@ export interface ExecuteCommandOptions {
     timeout?: number;
     shell?: boolean | string;
     aiContext?: string;
-    session?: string;
 }
 export declare class ShellExecutor {
     private securityManager;
@@ -38,9 +37,6 @@ export declare class ShellExecutor {
     }[];
     private buildFullCommand;
     private executeWithTimeout;
-    executeWithSession(options: ExecuteCommandOptions, commandId: string, startTime: number): Promise<CommandOutput>;
-    startNewSession(options: ExecuteCommandOptions, commandId: string, startTime: number): Promise<CommandOutput>;
-    sendToSession(options: ExecuteCommandOptions, commandId: string, startTime: number): Promise<CommandOutput>;
     listSessions(): Promise<import("../types/index").SessionInfo[]>;
     killSession(sessionId: string): Promise<void>;
     startInteractiveSession(options: StartSessionOptions): Promise<string>;

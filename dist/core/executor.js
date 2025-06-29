@@ -33,18 +33,9 @@ class ShellExecutor {
         await this.auditLogger.log({
             level: 'debug',
             message: 'ShellExecutor.executeCommand called',
-            context: { session: options.session, command: options.command }
+            context: { command: options.command }
         });
         try {
-            // Handle session-based execution
-            if (options.session) {
-                await this.auditLogger.log({
-                    level: 'debug',
-                    message: 'Session-based execution requested',
-                    context: { session: options.session }
-                });
-                return await this.executeWithSession(options, commandId, startTime);
-            }
             // Security validation
             const fullCommand = this.buildFullCommand(options);
             const securityCheck = await this.securityManager.validateCommand(fullCommand);
@@ -211,137 +202,6 @@ class ShellExecutor {
                 reject(error);
             });
         });
-    }
-    // Session management methods
-    async executeWithSession(options, commandId, startTime) {
-        const fullCommand = this.buildFullCommand(options);
-        // Security validation
-        const securityCheck = await this.securityManager.validateCommand(fullCommand);
-        if (!securityCheck.allowed) {
-            throw new Error(`Command blocked by security policy: ${securityCheck.reason}`);
-        }
-        if (options.session === 'new') {
-            // Start new interactive session
-            return await this.startNewSession(options, commandId, startTime);
-        }
-        else {
-            // Send command to existing session
-            return await this.sendToSession(options, commandId, startTime);
-        }
-    }
-    async startNewSession(options, commandId, startTime) {
-        try {
-            const context = await this.contextManager.getCurrentContext();
-            const workingDirectory = options.cwd || context.currentDirectory || process.cwd();
-            const environment = {
-                ...Object.fromEntries(Object.entries(process.env).filter(([_, value]) => value !== undefined)),
-                ...context.environmentVariables,
-                ...options.env,
-            };
-            const sessionId = await this.sessionManager.startSession({
-                command: options.command,
-                args: options.args,
-                cwd: workingDirectory,
-                env: environment,
-                shell: options.shell,
-                aiContext: options.aiContext,
-            });
-            // Wait a moment for initial output
-            await new Promise(resolve => setTimeout(resolve, 500));
-            // Read initial output
-            const sessionOutput = await this.sessionManager.readOutput(sessionId);
-            const result = {
-                stdout: `Interactive session started (ID: ${sessionId})\n${sessionOutput.stdout}`,
-                stderr: sessionOutput.stderr,
-                exitCode: 0,
-                metadata: {
-                    executionTime: Date.now() - startTime,
-                    commandType: 'interactive-session-start',
-                    affectedResources: [workingDirectory],
-                    warnings: [],
-                    suggestions: [`Use session ID "${sessionId}" to send commands to this interactive process`],
-                },
-                summary: {
-                    success: true,
-                    mainResult: `Started interactive session with command: ${this.buildFullCommand(options)}`,
-                    sideEffects: [`Created interactive session ${sessionId}`],
-                    nextSteps: [`Send commands using session parameter: "${sessionId}"`],
-                },
-            };
-            // Update context with session information
-            await this.contextManager.updateAfterCommand({
-                id: commandId,
-                command: this.buildFullCommand(options),
-                workingDirectory,
-                environment: environment,
-                output: result,
-                aiContext: options.aiContext,
-                sessionId,
-                sessionType: 'start',
-            });
-            return result;
-        }
-        catch (error) {
-            throw new Error(`Failed to start interactive session: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
-    async sendToSession(options, commandId, startTime) {
-        try {
-            const sessionId = options.session;
-            await this.auditLogger.log({
-                level: 'debug',
-                message: 'ShellExecutor.sendToSession called',
-                context: { sessionId }
-            });
-            // Send input to session
-            await this.sessionManager.sendInput({
-                sessionId,
-                input: this.buildFullCommand(options),
-            });
-            await this.auditLogger.log({
-                level: 'debug',
-                message: 'Input sent to session via InteractiveSessionManager',
-                context: { sessionId }
-            });
-            // Wait for output
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            // Read output
-            const sessionOutput = await this.sessionManager.readOutput(sessionId);
-            const result = {
-                stdout: sessionOutput.stdout,
-                stderr: sessionOutput.stderr,
-                exitCode: sessionOutput.status === 'error' ? 1 : 0,
-                metadata: {
-                    executionTime: Date.now() - startTime,
-                    commandType: 'interactive-session-input',
-                    affectedResources: [],
-                    warnings: sessionOutput.status === 'error' ? ['Session encountered an error'] : [],
-                    suggestions: sessionOutput.hasMore ? ['More output may be available'] : [],
-                },
-                summary: {
-                    success: sessionOutput.status !== 'error',
-                    mainResult: `Sent command to session ${sessionId}`,
-                    sideEffects: [],
-                    nextSteps: sessionOutput.hasMore ? ['Check for additional output'] : [],
-                },
-            };
-            // Update context
-            const context = await this.contextManager.getCurrentContext();
-            await this.contextManager.updateAfterCommand({
-                id: commandId,
-                command: this.buildFullCommand(options),
-                workingDirectory: context.currentDirectory,
-                environment: context.environmentVariables,
-                output: result,
-                aiContext: options.aiContext,
-                sessionId,
-                sessionType: 'input',
-            });
-            return result;
-        }
-        catch (error) {
-            throw new Error(`Failed to send command to session: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
     }
     // Session management API
     async listSessions() {

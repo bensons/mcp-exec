@@ -127,7 +127,6 @@ const ExecuteCommandSchema = z.object({
   timeout: z.number().optional().describe('Timeout in milliseconds'),
   shell: z.union([z.boolean(), z.string()]).optional().describe('Shell to use for execution'),
   aiContext: z.string().optional().describe('AI context/intent for this command'),
-  session: z.string().optional().describe('Existing session ID to send command to (use start_interactive_session or start_terminal_session to create new sessions)'),
   enableTerminalViewer: z.boolean().optional().describe('Create a terminal session with browser viewer instead of regular execution'),
   terminalSize: z.object({
     cols: z.number().default(80),
@@ -364,7 +363,7 @@ class MCPShellServer {
           {
             name: 'execute_command',
             title: 'Execute Shell Command',
-            description: 'Execute a shell command with security validation and context preservation. Use enableTerminalViewer for browser-viewable terminal sessions.',
+            description: 'Execute a one-shot shell command with security validation and context preservation. For interactive sessions, use start_terminal_session or start_interactive_session instead.',
             openWorldHint: true,
             readOnlyHint: false,
             destructiveHint: true,
@@ -378,7 +377,6 @@ class MCPShellServer {
                 env: { type: 'object', description: 'Environment variables' },
                 timeout: { type: 'number', description: 'Timeout in milliseconds' },
                 shell: { type: ['boolean', 'string'], description: 'Shell to use for execution' },
-                session: { type: 'string', description: 'Existing session ID to send command to (use start_interactive_session or start_terminal_session to create new sessions)' },
                 aiContext: { type: 'string', description: 'AI context/intent for this command' },
                 enableTerminalViewer: { type: 'boolean', description: 'Create a terminal session with browser viewer instead of regular execution' },
                 terminalSize: {
@@ -756,78 +754,11 @@ class MCPShellServer {
               context: {
                 command: parsed.command,
                 args: parsed.args,
-                session: parsed.session,
-
                 cwd: parsed.cwd,
                 hasAiContext: !!parsed.aiContext,
+                enableTerminalViewer: !!parsed.enableTerminalViewer,
               }
             });
-
-            // Check if this is for an existing terminal session
-            if (parsed.session && parsed.session !== 'new') {
-              this.auditLogger.log({
-                level: 'debug',
-                message: 'Checking for existing session',
-                context: { sessionId: parsed.session, sessionType: 'lookup' }
-              });
-
-              const terminalSession = this.terminalSessionManager?.getSession(parsed.session);
-              if (terminalSession) {
-                this.auditLogger.log({
-                  level: 'debug',
-                  message: 'Found terminal session, routing to TerminalSessionManager',
-                  context: {
-                    sessionId: parsed.session,
-                    sessionStatus: terminalSession.status,
-                    sessionCommand: terminalSession.command
-                  }
-                });
-                // This is a terminal session - handle it via terminal session manager
-                try {
-                  await this.terminalSessionManager!.sendInput({
-                    sessionId: parsed.session,
-                    input: parsed.args && parsed.args.length > 0
-                      ? `${parsed.command} ${parsed.args.join(' ')}`
-                      : parsed.command,
-                  });
-
-                  // Get recent output from terminal buffer
-                  const buffer = this.terminalSessionManager!.getTerminalBuffer(parsed.session);
-                  const recentOutput = buffer?.lines.slice(-5).map(line => line.text).join('\n') || '';
-                  const viewerUrl = this.terminalViewerService?.getSessionUrl(parsed.session);
-
-                  return {
-                    content: [
-                      {
-                        type: 'text',
-                        text: `✅ **Command sent to terminal session**\n\n**Session ID:** \`${parsed.session}\`\n**Command:** \`${parsed.args && parsed.args.length > 0 ? `${parsed.command} ${parsed.args.join(' ')}` : parsed.command}\`\n\n**Recent Output:**\n\`\`\`\n${recentOutput}\n\`\`\`\n\n**Terminal Viewer:** ${viewerUrl || 'Not available'}\n\n*View the full terminal output in your browser for real-time updates.*`,
-                      },
-                    ],
-                  };
-                } catch (error) {
-                  return {
-                    content: [
-                      {
-                        type: 'text',
-                        text: `❌ **Failed to send command to terminal session**\n\n**Error:** ${error instanceof Error ? error.message : 'Unknown error'}\n**Session ID:** \`${parsed.session}\``,
-                      },
-                    ],
-                  };
-                }
-              }
-            }
-
-            // Validate that session is not "new" - use dedicated session creation tools instead
-            if (parsed.session === 'new') {
-              return {
-                content: [
-                  {
-                    type: 'text',
-                    text: '❌ **Session Creation Not Allowed**\n\n`execute_command` no longer supports creating new sessions with `session: "new"`.\n\n**Please use:**\n• `start_interactive_session` - for regular interactive sessions\n• `start_terminal_session` - for PTY-based terminal sessions with browser viewing\n• `send_to_session` - to send commands to existing sessions\n\nThis change ensures consistent and predictable session behavior.',
-                  },
-                ],
-              };
-            }
 
             // Check if terminal viewer is requested
             if (parsed.enableTerminalViewer) {
