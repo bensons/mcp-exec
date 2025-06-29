@@ -259,8 +259,7 @@ class MCPShellServer {
         this.auditLogger = new logger_1.AuditLogger(this.config.audit);
         this.confirmationManager = new confirmation_1.ConfirmationManager();
         this.displayFormatter = new display_formatter_1.DisplayFormatter(this.config.display);
-        // Debug logging for initialization
-        console.log(`[DEBUG] MCP Server components initialized - security: ${this.config.security.level}, audit: ${this.config.audit.enabled}, terminalViewer: ${this.config.terminalViewer.enabled}`);
+        // Debug logging for initialization (using audit logger instead of console.log to avoid JSON-RPC interference)
         this.auditLogger.log({
             level: 'debug',
             message: 'MCP Server components initialized',
@@ -568,8 +567,7 @@ class MCPShellServer {
                 switch (name) {
                     case 'execute_command': {
                         const parsed = ExecuteCommandSchema.parse(args);
-                        // Debug logging for command execution
-                        console.log(`[DEBUG] Execute command request: ${parsed.command} ${(parsed.args || []).join(' ')} (session: ${parsed.session}, terminalViewer: ${parsed.enableTerminalViewer})`);
+                        // Debug logging for command execution (using audit logger to avoid JSON-RPC interference)
                         this.auditLogger.log({
                             level: 'debug',
                             message: 'Execute command request received',
@@ -584,7 +582,6 @@ class MCPShellServer {
                         });
                         // Check if this is for an existing terminal session
                         if (parsed.session && parsed.session !== 'new') {
-                            console.log(`[DEBUG] Checking for existing session: ${parsed.session}`);
                             this.auditLogger.log({
                                 level: 'debug',
                                 message: 'Checking for existing session',
@@ -592,7 +589,6 @@ class MCPShellServer {
                             });
                             const terminalSession = this.terminalSessionManager?.getSession(parsed.session);
                             if (terminalSession) {
-                                console.log(`[DEBUG] Found terminal session ${parsed.session}, routing to TerminalSessionManager`);
                                 this.auditLogger.log({
                                     level: 'debug',
                                     message: 'Found terminal session, routing to TerminalSessionManager',
