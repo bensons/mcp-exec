@@ -129,7 +129,7 @@ const DEFAULT_CONFIG = {
         },
     },
     terminalViewer: {
-        enabled: true, // Disabled by default
+        enabled: process.env.MCP_EXEC_TERMINAL_VIEWER_ENABLED === 'true', // Disabled by default
         port: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_PORT || '3000'),
         host: process.env.MCP_EXEC_TERMINAL_VIEWER_HOST || '127.0.0.1',
         maxSessions: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_MAX_SESSIONS || '10'),
@@ -260,6 +260,21 @@ class MCPShellServer {
         this.displayFormatter = new display_formatter_1.DisplayFormatter(this.config.display);
         // Initialize terminal components
         this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer);
+        // Auto-start terminal viewer service if enabled in config
+        if (this.config.terminalViewer.enabled) {
+            try {
+                this.terminalViewerService = new viewer_service_1.TerminalViewerService(this.config.terminalViewer);
+                this.terminalViewerService.start().catch((error) => {
+                    console.error('Failed to auto-start terminal viewer service:', error);
+                    // Don't throw - let the server continue without terminal viewer
+                    this.terminalViewerService = undefined;
+                });
+            }
+            catch (error) {
+                console.error('Failed to create terminal viewer service:', error);
+                // Don't throw - let the server continue without terminal viewer
+            }
+        }
         this.shellExecutor = new executor_1.ShellExecutor(this.securityManager, this.contextManager, this.auditLogger, this.config);
         this.setupHandlers();
     }
