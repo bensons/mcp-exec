@@ -55,8 +55,8 @@ const terminal_session_manager_1 = require("./terminal/terminal-session-manager"
 // Default configuration
 const DEFAULT_CONFIG = {
     security: {
-        level: 'moderate',
-        confirmDangerous: true,
+        level: 'permissive',
+        confirmDangerous: false,
         allowedDirectories: [
             process.cwd(),
             '/tmp',
@@ -117,7 +117,7 @@ const DEFAULT_CONFIG = {
     },
     audit: {
         enabled: true,
-        logLevel: 'info',
+        logLevel: 'debug',
         retention: 30,
         logDirectory: process.env.MCP_EXEC_LOG_DIR ||
             (process.env.HOME && path.join(process.env.HOME, '.mcp-exec')) ||
@@ -129,7 +129,7 @@ const DEFAULT_CONFIG = {
         },
     },
     terminalViewer: {
-        enabled: false, // Disabled by default
+        enabled: true, // Disabled by default
         port: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_PORT || '3000'),
         host: process.env.MCP_EXEC_TERMINAL_VIEWER_HOST || '127.0.0.1',
         maxSessions: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_MAX_SESSIONS || '10'),
@@ -981,22 +981,41 @@ class MCPShellServer {
                         };
                     }
                     case 'list_sessions': {
-                        const sessions = await this.shellExecutor.listSessions();
+                        // Get sessions from both managers
+                        const regularSessions = await this.shellExecutor.listSessions();
+                        const terminalSessions = this.terminalSessionManager?.listSessions() || [];
+                        // Combine all sessions
+                        const allSessions = [
+                            ...regularSessions.map(session => ({
+                                sessionId: session.sessionId,
+                                command: session.command,
+                                startTime: session.startTime,
+                                lastActivity: session.lastActivity,
+                                status: session.status,
+                                cwd: session.cwd,
+                                aiContext: session.aiContext,
+                                hasTerminalViewer: false,
+                            })),
+                            ...terminalSessions.map(session => ({
+                                sessionId: session.sessionId,
+                                command: session.command,
+                                startTime: session.startTime,
+                                lastActivity: session.lastActivity,
+                                status: session.status,
+                                cwd: session.cwd,
+                                aiContext: session.aiContext,
+                                hasTerminalViewer: session.hasTerminalViewer,
+                            }))
+                        ];
                         return {
                             content: [
                                 {
                                     type: 'text',
                                     text: JSON.stringify({
-                                        sessions: sessions.map(session => ({
-                                            sessionId: session.sessionId,
-                                            command: session.command,
-                                            startTime: session.startTime,
-                                            lastActivity: session.lastActivity,
-                                            status: session.status,
-                                            cwd: session.cwd,
-                                            aiContext: session.aiContext,
-                                        })),
-                                        totalSessions: sessions.length,
+                                        sessions: allSessions,
+                                        totalSessions: allSessions.length,
+                                        regularSessions: regularSessions.length,
+                                        terminalSessions: terminalSessions.length,
                                         maxSessions: this.config.sessions.maxInteractiveSessions,
                                     }, null, 2),
                                 },
@@ -1006,6 +1025,31 @@ class MCPShellServer {
                     case 'kill_session': {
                         const parsed = KillSessionSchema.parse(args);
                         try {
+                            // Try terminal session manager first
+                            if (this.terminalSessionManager) {
+                                const terminalSession = this.terminalSessionManager.getSession(parsed.sessionId);
+                                if (terminalSession) {
+                                    await this.terminalSessionManager.killSession(parsed.sessionId);
+                                    // Also remove from terminal viewer service if it exists
+                                    if (this.terminalViewerService) {
+                                        this.terminalViewerService.removeSession(parsed.sessionId);
+                                    }
+                                    return {
+                                        content: [
+                                            {
+                                                type: 'text',
+                                                text: JSON.stringify({
+                                                    success: true,
+                                                    message: `Terminal session ${parsed.sessionId} terminated`,
+                                                    sessionId: parsed.sessionId,
+                                                    sessionType: 'terminal',
+                                                }, null, 2),
+                                            },
+                                        ],
+                                    };
+                                }
+                            }
+                            // Fall back to regular session manager
                             await this.shellExecutor.killSession(parsed.sessionId);
                             return {
                                 content: [
@@ -1015,6 +1059,7 @@ class MCPShellServer {
                                             success: true,
                                             message: `Session ${parsed.sessionId} terminated`,
                                             sessionId: parsed.sessionId,
+                                            sessionType: 'regular',
                                         }, null, 2),
                                     },
                                 ],
@@ -1038,6 +1083,34 @@ class MCPShellServer {
                     case 'read_session_output': {
                         const parsed = ReadSessionOutputSchema.parse(args);
                         try {
+                            // Check if it's a terminal session first
+                            if (this.terminalSessionManager) {
+                                const terminalSession = this.terminalSessionManager.getSession(parsed.sessionId);
+                                if (terminalSession) {
+                                    const buffer = this.terminalSessionManager.getTerminalBuffer(parsed.sessionId);
+                                    const viewerUrl = this.terminalViewerService?.getSessionUrl(parsed.sessionId);
+                                    return {
+                                        content: [
+                                            {
+                                                type: 'text',
+                                                text: JSON.stringify({
+                                                    sessionId: parsed.sessionId,
+                                                    sessionType: 'terminal',
+                                                    status: terminalSession.status,
+                                                    command: terminalSession.command,
+                                                    startTime: terminalSession.startTime,
+                                                    lastActivity: terminalSession.lastActivity,
+                                                    terminalViewerUrl: viewerUrl,
+                                                    bufferLines: buffer?.lines.length || 0,
+                                                    recentOutput: buffer?.lines.slice(-10).map(line => line.text).join('\n') || '',
+                                                    message: 'Terminal session output is streamed live to the browser. Use the terminal viewer URL for real-time output.',
+                                                }, null, 2),
+                                            },
+                                        ],
+                                    };
+                                }
+                            }
+                            // Fall back to regular session output
                             const output = await this.shellExecutor.readSessionOutput(parsed.sessionId);
                             return {
                                 content: [
@@ -1045,6 +1118,7 @@ class MCPShellServer {
                                         type: 'text',
                                         text: JSON.stringify({
                                             sessionId: output.sessionId,
+                                            sessionType: 'regular',
                                             stdout: output.stdout,
                                             stderr: output.stderr,
                                             hasMore: output.hasMore,
