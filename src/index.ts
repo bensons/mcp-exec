@@ -12,7 +12,8 @@ import {
   ListToolsRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
-  Tool,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import * as path from 'path';
@@ -290,6 +291,7 @@ class MCPShellServer {
         capabilities: {
           tools: {},
           resources: {},
+          prompts: {},
         },
       }
     );
@@ -1886,6 +1888,93 @@ class MCPShellServer {
       }
 
       return { resources };
+    });
+
+    // Handle prompt suggestions
+    this.server.setRequestHandler(ListPromptsRequestSchema, async () => {
+      return {
+        prompts: [
+          {
+            name: 'terminal',
+            description: 'Launch an interactive terminal session with browser viewer',
+            arguments: [
+              {
+                name: 'command',
+                description: 'Optional initial command to run (defaults to system shell)',
+                required: false,
+              },
+              {
+                name: 'cwd',
+                description: 'Working directory for the terminal session',
+                required: false,
+              },
+            ],
+          },
+        ],
+      };
+    });
+
+    this.server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+      const { name, arguments: args } = request.params;
+
+      if (name === 'terminal') {
+        const command = args?.command || undefined;
+        const cwd = args?.cwd || undefined;
+
+        return {
+          description: 'Interactive Terminal Session Workflow',
+          messages: [
+            {
+              role: 'user',
+              content: {
+                type: 'text',
+                text: `Launch a new interactive terminal session using the mcp-exec tools. This workflow allows you to interact with a live shell by sending commands and receiving output iteratively.
+
+**Workflow Instructions:**
+
+1. **Enable the Terminal Viewer**: Use the \`toggle_terminal_viewer\` tool with "enabled": true to ensure the terminal viewer service is active.
+
+2. **Start a Terminal Session**: Use the \`start_terminal_session\` tool${command ? ` with command "${command}"` : ' without specifying a command'}${cwd ? ` in directory "${cwd}"` : ''}. This will launch ${command ? 'the specified command' : 'the default interactive shell'} and return a session ID and viewer URL.
+
+3. **Open the Terminal Viewer**: Use your client's browser tools to open the viewer URL in a new window or tab. This allows live visibility into the session.
+
+4. **Send Commands Iteratively**: Use the \`send_to_session\` tool to issue shell commands to the session. Each command's output will be streamed back and visible in the browser viewer.
+
+5. **Monitor Output**: Use \`read_session_output\` to read buffered output from the session if needed.
+
+6. **Terminate the Session**: When you're done, send the "exit" command using \`send_to_session\` to gracefully close the shell, or use \`kill_session\` to force termination.
+
+7. **Confirm Completion**: Use \`get_terminal_viewer_status\` to check the session status and ensure proper cleanup.
+
+**Example Usage:**
+
+\`\`\`json
+[
+  { "tool": "toggle_terminal_viewer", "input": { "enabled": true } },
+  { "tool": "start_terminal_session", "input": {${command ? `"command": "${command}"` : ''}${cwd ? `${command ? ', ' : ''}"cwd": "${cwd}"` : ''}} },
+  // Then open the viewer URL in a browser
+  { "tool": "send_to_session", "input": { "sessionId": "<session-id>", "input": "uname -a" } },
+  { "tool": "send_to_session", "input": { "sessionId": "<session-id>", "input": "whoami" } },
+  { "tool": "read_session_output", "input": { "sessionId": "<session-id>" } },
+  { "tool": "send_to_session", "input": { "sessionId": "<session-id>", "input": "exit" } },
+  { "tool": "get_terminal_viewer_status", "input": {} }
+]
+\`\`\`
+
+**Key Benefits:**
+- **Live Browser Viewing**: Real-time terminal output in your browser
+- **Persistent Sessions**: Terminal continues running between commands
+- **Full Shell Features**: Complete shell environment with history, environment variables, etc.
+- **Graceful Exit Handling**: Sessions properly transition to "finished" state when exited
+
+Please start by enabling the terminal viewer service.`,
+              },
+            },
+          ],
+        };
+      }
+
+      throw new Error(`Unknown prompt: ${name}`);
     });
 
     // Read resource content
