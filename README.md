@@ -1,16 +1,17 @@
 # MCP-Exec
 
-A secure, context-aware Model Context Protocol (MCP) server for shell command execution with AI optimizations.
+A secure, context-aware Model Context Protocol (MCP) server for shell command execution with comprehensive logging and AI optimizations.
 
 ## Overview
 
-**MCP-Exec** is a TypeScript-based MCP server that provides intelligent shell command execution capabilities for AI assistants like Claude Desktop, Claude Code, and Augment Code. It combines multi-layered security, context preservation, and enhanced output formatting to create a powerful tool for AI-assisted development and system administration.
+**MCP-Exec** is a TypeScript-based MCP server that provides intelligent shell command execution capabilities for AI assistants like Claude Desktop, Claude Code, and Augment Code. It combines multi-layered security, context preservation, RFC 5424 compliant logging, and enhanced output formatting to create a powerful tool for AI-assisted development and system administration.
 
-The server implements the Model Context Protocol specification with STDIO transport, providing 19 comprehensive tools for secure shell interaction while maintaining session state and providing AI-optimized output formatting.
+The server implements the Model Context Protocol specification with STDIO transport, providing comprehensive tools for secure shell interaction while maintaining session state and providing AI-optimized output formatting with real-time logging capabilities.
 
 ## ✨ Key Features
 
 ### 🔄 Interactive Sessions
+
 - **Long-running processes** - Start and maintain interactive shells, REPLs, and other persistent processes
 - **Session management** - Support for up to 10 concurrent interactive sessions (configurable)
 - **Bidirectional communication** - Send commands and receive output from active sessions
@@ -25,6 +26,15 @@ The server implements the Model Context Protocol specification with STDIO transp
 - **Resource Limits**: Memory, file size, and process restrictions
 - **Directory Controls**: Configurable allowed/blocked directory access
 - **Sandboxing**: Isolated execution environments with restricted permissions
+
+### 📊 RFC 5424 Compliant Logging
+
+- **Industry Standard**: Full RFC 5424 (Syslog Protocol) compliance with 8 severity levels
+- **MCP Logging Capability**: Real-time log streaming to MCP clients via `notifications/message`
+- **Dynamic Log Control**: Clients can set minimum log level using `logging/setLevel`
+- **Comprehensive Coverage**: Detailed logging throughout all system components
+- **Rate Limiting**: Configurable rate limiting to prevent message flooding
+- **Context-Rich**: Detailed context information for enhanced debugging
 
 ### 🧠 Context Preservation
 
@@ -96,11 +106,24 @@ If you prefer manual setup, add this to your Claude Desktop configuration:
   "mcpServers": {
     "mcp-exec": {
       "command": "node",
+      "args": ["/path/to/mcp-exec/dist/index.js"]
+    }
+  }
+}
+```
+
+The server uses sensible defaults and can be customized with environment variables if needed. For custom configuration, add an `env` section:
+
+```json
+{
+  "mcpServers": {
+    "mcp-exec": {
+      "command": "node",
       "args": ["/path/to/mcp-exec/dist/index.js"],
       "env": {
-        "MCP_EXEC_SECURITY_LEVEL": "moderate",
+        "MCP_EXEC_SECURITY_LEVEL": "strict",
         "MCP_EXEC_CONFIRM_DANGEROUS": "true",
-        "MCP_EXEC_AUDIT_ENABLED": "true"
+        "MCP_EXEC_MCP_LOG_LEVEL": "warning"
       }
     }
   }
@@ -115,18 +138,27 @@ If you prefer manual setup, add this to your Claude Desktop configuration:
 
 ## 🛠️ Available Tools
 
-The server provides 19 comprehensive MCP tools organized into categories:
+The server provides comprehensive MCP tools organized into categories:
 
 ### Core Execution Tools
 
-- **`execute_command`** - Execute shell commands with full security validation and interactive session support
+- **`execute_command`** - Execute one-shot shell commands with full security validation and enhanced output formatting
 - **`confirm_command`** - Interactive confirmation system for dangerous operations
 
 ### Interactive Session Tools
 
-- **`list_sessions`** - List all active interactive sessions with status information
-- **`kill_session`** - Terminate a specific interactive session
-- **`read_session_output`** - Read buffered output from an interactive session
+- **`start_interactive_session`** - Start new interactive shell sessions for persistent processes
+- **`start_terminal_session`** - Start PTY-based terminal sessions with browser viewing capability
+- **`send_to_session`** - Send commands to existing interactive sessions
+- **`read_session_output`** - Read buffered output from interactive sessions
+- **`list_sessions`** - List all active sessions with status information
+- **`kill_session`** - Terminate specific sessions
+- **`get_session_status`** - Get detailed status of a specific session
+
+### Terminal Viewer Tools
+
+- **`toggle_terminal_viewer`** - Enable/disable browser-based terminal viewing
+- **`get_terminal_viewer_status`** - Check terminal viewer configuration and status
 
 ### Context Management Tools
 
@@ -138,6 +170,7 @@ The server provides 19 comprehensive MCP tools organized into categories:
 
 - **`update_security_config`** - Modify security settings and policies
 - **`get_security_status`** - View current security configuration and restrictions
+- **`get_pending_confirmations`** - View pending dangerous command confirmations
 
 ### AI Assistance Tools
 
@@ -149,13 +182,9 @@ The server provides 19 comprehensive MCP tools organized into categories:
 - **`generate_audit_report`** - Create detailed audit reports with filtering
 - **`export_logs`** - Export audit logs in multiple formats (JSON, CSV, XML)
 - **`get_alerts`** - View security alerts and operational warnings
-
-### Additional Tools
-
-- **`get_environment`** - View environment variables and system information
-- **`monitor_resources`** - Real-time resource usage monitoring
-- **`validate_command`** - Pre-validate commands without execution
-- **`get_suggestions`** - Context-aware command suggestions
+- **`acknowledge_alert`** - Acknowledge and dismiss security alerts
+- **`get_audit_config`** - View current audit configuration
+- **`update_audit_config`** - Modify audit settings and log levels
 
 ## ⚙️ Configuration
 
@@ -186,29 +215,55 @@ Choose the appropriate security level for your use case:
 
 ### Environment Variables
 
-Configure the server behavior using environment variables:
+The server supports comprehensive configuration through environment variables with the `MCP_EXEC_` prefix:
+
+#### 🔒 Security Configuration
 
 ```bash
-# Security Configuration
-MCP_EXEC_SECURITY_LEVEL=moderate          # strict|moderate|permissive
-MCP_EXEC_CONFIRM_DANGEROUS=true           # Enable confirmation prompts
-MCP_EXEC_BLOCKED_COMMANDS="rm -rf /,format" # Custom blocked commands
-MCP_EXEC_ALLOWED_DIRECTORIES="~/projects,/tmp" # Allowed directories
+MCP_EXEC_SECURITY_LEVEL=permissive        # strict|moderate|permissive
+MCP_EXEC_CONFIRM_DANGEROUS=false          # Require confirmation for dangerous commands
+MCP_EXEC_ALLOWED_DIRECTORIES="cwd,/tmp"   # Comma-separated allowed directories
+MCP_EXEC_BLOCKED_COMMANDS="rm -rf /,format" # Comma-separated blocked commands
+MCP_EXEC_TIMEOUT=300000                    # Command timeout in milliseconds
+MCP_EXEC_MAX_MEMORY=1024                   # Maximum memory usage in MB
+MCP_EXEC_MAX_FILE_SIZE=100                 # Maximum file size in MB
+MCP_EXEC_MAX_PROCESSES=10                  # Maximum number of processes
+MCP_EXEC_SANDBOXING_ENABLED=false         # Enable sandboxing
+MCP_EXEC_NETWORK_ACCESS=true              # Allow network access
+MCP_EXEC_FILESYSTEM_ACCESS=full           # read-only|restricted|full
+```
 
-# Output Configuration
-MCP_EXEC_MAX_OUTPUT_LENGTH=10000          # Maximum output length
-MCP_EXEC_FORMAT_OUTPUT=true               # Enable enhanced formatting
-MCP_EXEC_STRIP_ANSI=true                  # Remove ANSI color codes
+#### 📊 Logging Configuration
 
-# Audit Configuration
+```bash
+# Audit Logging (RFC 5424 compliant)
 MCP_EXEC_AUDIT_ENABLED=true               # Enable audit logging
-MCP_EXEC_AUDIT_LEVEL=info                 # debug|info|warn|error
+MCP_EXEC_AUDIT_LOG_LEVEL=debug            # emergency|alert|critical|error|warning|notice|info|debug
 MCP_EXEC_AUDIT_RETENTION=30               # Days to retain logs
 
-# Performance Configuration
-MCP_EXEC_COMMAND_TIMEOUT=300000           # Command timeout (ms)
-MCP_EXEC_MAX_MEMORY=1024                  # Memory limit (MB)
-MCP_EXEC_MAX_PROCESSES=10                 # Process limit
+# MCP Client Logging
+MCP_EXEC_MCP_LOGGING_ENABLED=true         # Enable MCP client notifications
+MCP_EXEC_MCP_LOG_LEVEL=info               # Minimum level for notifications
+MCP_EXEC_MCP_RATE_LIMIT=60                # Max messages per minute
+MCP_EXEC_MCP_QUEUE_SIZE=100               # Max queued messages
+MCP_EXEC_MCP_INCLUDE_CONTEXT=true         # Include context data
+```
+
+#### 🖥️ Session & Output Configuration
+
+```bash
+# Interactive Sessions
+MCP_EXEC_MAX_SESSIONS=10                  # Maximum concurrent sessions
+MCP_EXEC_SESSION_TIMEOUT=1800000          # Session timeout (30 minutes)
+MCP_EXEC_SESSION_BUFFER_SIZE=1000         # Session output buffer size
+
+# Output Formatting
+MCP_EXEC_FORMAT_STRUCTURED=true           # Format output in structured format
+MCP_EXEC_STRIP_ANSI=true                  # Strip ANSI escape codes
+MCP_EXEC_SUMMARIZE_VERBOSE=true           # Summarize verbose output
+MCP_EXEC_ENABLE_AI_OPTIMIZATIONS=true     # Enable AI-powered optimizations
+MCP_EXEC_MAX_OUTPUT_LENGTH=10000          # Maximum output length in bytes
+MCP_EXEC_USE_MARKDOWN=true                # Use Markdown formatting
 ```
 
 ### Runtime Configuration
@@ -225,31 +280,99 @@ You can also modify settings at runtime using the `update_security_config` tool:
 }
 ```
 
+## 📊 Enhanced Logging System
+
+The server implements a comprehensive logging system that complies with RFC 5424 (Syslog Protocol) and supports the MCP logging specification for real-time client notifications.
+
+### RFC 5424 Severity Levels
+
+The logging system supports all 8 RFC 5424 severity levels:
+
+| Level | Numeric | Name | Description | Use Cases |
+|-------|---------|------|-------------|-----------|
+| 0 | `emergency` | System is unusable | Complete system failures | Critical security breaches, system corruption |
+| 1 | `alert` | Action must be taken immediately | Data corruption, security violations | Resource exhaustion, immediate intervention needed |
+| 2 | `critical` | Critical conditions | Component failures affecting functionality | Database failures, critical security validations |
+| 3 | `error` | Error conditions | Command execution failures, network errors | Configuration errors, execution failures |
+| 4 | `warning` | Warning conditions | Deprecated features, resource limits approaching | Recoverable errors, potential issues |
+| 5 | `notice` | Normal but significant condition | Configuration changes, session events | Security policy changes, important state changes |
+| 6 | `info` | Informational messages | Operation progress, status updates | Command execution success, general information |
+| 7 | `debug` | Debug-level messages | Function entry/exit, detailed execution flow | Variable values, detailed debugging information |
+
+### MCP Logging Capability
+
+The server implements the MCP logging specification, enabling real-time log streaming to MCP clients:
+
+#### Features
+
+- **Client Notifications**: Sends log messages to MCP clients via `notifications/message`
+- **Dynamic Log Levels**: Clients can set minimum log level using `logging/setLevel`
+- **Rate Limiting**: Configurable rate limiting to prevent message flooding (60 messages/minute default)
+- **Message Queuing**: Queues messages when client is not connected (100 message buffer)
+- **Context Inclusion**: Optional context data for enhanced debugging
+
+#### MCP Logging Handler
+
+Set the minimum log level for client notifications:
+
+```json
+{
+  "method": "logging/setLevel",
+  "params": {
+    "level": "warning"
+  }
+}
+```
+
+Valid levels: `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
+
+### Log Categories
+
+- **`mcp-server`**: Server lifecycle and configuration events
+- **`security-validator`**: Security policy enforcement and violations
+- **`command-executor`**: Command execution, success, and failures
+- **`context-manager`**: State management and session changes
+- **`connection-monitor`**: Client connection and transport events
+
 ## 🔄 Interactive Sessions Usage
 
-### Starting an Interactive Session
+### Starting Interactive Sessions
 
-Use the `execute_command` tool with `session: "new"` to start an interactive process:
+Use dedicated session tools to start interactive processes:
+
+#### Regular Interactive Session
 
 ```javascript
 {
+  "tool": "start_interactive_session",
   "command": "python3",
   "args": ["-i"],
-  "session": "new",
   "aiContext": "Starting Python REPL for data analysis"
 }
 ```
 
-This returns a session ID that you can use for subsequent interactions.
+#### Terminal Session with Browser Viewing
 
-### Sending Commands to a Session
+```javascript
+{
+  "tool": "start_terminal_session",
+  "command": "bash",
+  "enableViewer": true,
+  "terminalSize": {"cols": 120, "rows": 30}
+}
+```
+
+Both return a session ID for subsequent interactions.
+
+### Sending Commands to Sessions
 
 Use the session ID to send commands to the interactive process:
 
 ```javascript
 {
-  "command": "print('Hello from Python!')",
-  "session": "your-session-id-here"
+  "tool": "send_to_session",
+  "sessionId": "your-session-id-here",
+  "input": "print('Hello from Python!')"
 }
 ```
 
@@ -261,6 +384,9 @@ Use the session ID to send commands to the interactive process:
 
 // Read buffered output from a session
 { "tool": "read_session_output", "sessionId": "your-session-id" }
+
+// Get detailed session status
+{ "tool": "get_session_status", "sessionId": "your-session-id" }
 
 // Terminate a session
 { "tool": "kill_session", "sessionId": "your-session-id" }
@@ -311,6 +437,9 @@ npm run test:all     # Run all test suites
 node tests/test-mcp-server.js           # Basic server functionality
 node tests/test-enhanced-output.js      # Output formatting
 node tests/test-ssh-comprehensive.js    # SSH command testing
+node tests/test-enhanced-logging.js     # RFC 5424 logging and MCP notifications
+node tests/test-execute-command-no-session.js # One-shot command execution
+node tests/test-session-separation.js   # Session functionality separation
 ```
 
 ## 🏛️ Architecture
@@ -331,13 +460,18 @@ src/
 ├── context/
 │   └── manager.ts     # Session persistence and state management
 ├── audit/
-│   ├── logger.ts      # Immutable audit logging system
+│   ├── logger.ts      # RFC 5424 compliant audit logging system
+│   ├── mcp-logger.ts  # MCP client notification logging
 │   └── monitoring.ts  # Real-time monitoring and alert management
+├── terminal/
+│   ├── session-manager.ts # PTY-based terminal session management
+│   ├── viewer-service.ts  # Browser-based terminal viewing
+│   └── static/        # Static assets for terminal viewer
 ├── utils/
 │   ├── output-processor.ts # AI-optimized output parsing and formatting
 │   └── intent-tracker.ts   # Command intent analysis and suggestions
 └── types/
-    └── index.ts       # Shared TypeScript type definitions
+    └── index.ts       # Shared TypeScript type definitions with RFC 5424 log levels
 ```
 
 ### Key Design Patterns
@@ -373,57 +507,16 @@ src/
 
 ### MCP Protocol Implementation
 
-The server uses STDIO transport and implements 19 MCP tools:
+The server uses STDIO transport and implements comprehensive MCP tools with logging capability:
 
-- Command execution tools: `execute_command`, `confirm_command`
-- Interactive session tools: `list_sessions`, `kill_session`, `read_session_output`
-- Context tools: `get_context`, `get_history`, `set_working_directory`
-- Security tools: `update_security_config`, `get_security_status`
-- AI tools: `get_intent_summary`, `suggest_next_commands`
-- Audit tools: `generate_audit_report`, `export_logs`, `get_alerts`
-
-## 🎨 Enhanced Output Formatting
-
-The MCP server includes sophisticated output formatting that transforms raw command execution results into beautifully formatted, easy-to-read displays optimized for Claude Desktop's interface.
-
-### Key Features
-
-#### 🎨 Rich Markdown Formatting
-
-- **Headers and Sections**: Clear organization with markdown headers
-- **Code Blocks**: Syntax-highlighted command input and output
-- **Visual Icons**: Emojis and symbols for quick visual recognition
-- **Structured Layout**: Logical flow from command to results
-
-#### 📋 Enhanced Command Output
-
-Every command execution now includes:
-
-```markdown
-## Command Execution
-**Command:** `your-command-here`
-**Context:** AI context description
-**Details:** ⏱️ 123ms | ✅ Exit code: 0 | 📂 Type: file-operation
-
-### Input
-```bash
-your-command-here
-```
-
-### 📄 Output
-```text
-Command output here
-```
-
-### 📋 Summary
-✅ **Result:** Command completed successfully
-🔄 **Side Effects:** Modified 3 file(s)
-
-### 💡 Suggestions
-**Next Steps:**
-• Suggested follow-up command
-• Another helpful suggestion
-```
+- **Core execution**: `execute_command`, `confirm_command`
+- **Interactive sessions**: `start_interactive_session`, `start_terminal_session`, `send_to_session`, `read_session_output`, `list_sessions`, `kill_session`, `get_session_status`
+- **Terminal viewer**: `toggle_terminal_viewer`, `get_terminal_viewer_status`
+- **Context management**: `get_context`, `get_history`, `set_working_directory`
+- **Security management**: `update_security_config`, `get_security_status`, `get_pending_confirmations`
+- **AI assistance**: `get_intent_summary`, `suggest_next_commands`
+- **Audit and monitoring**: `generate_audit_report`, `export_logs`, `get_alerts`, `acknowledge_alert`, `get_audit_config`, `update_audit_config`
+- **MCP logging**: `logging/setLevel` handler for dynamic log level control
 
 ## 🔧 Troubleshooting
 
