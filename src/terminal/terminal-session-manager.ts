@@ -9,7 +9,8 @@ import { TerminalSession, TerminalBuffer } from './types';
 import { InteractiveSessionManager, StartSessionOptions, SendInputOptions } from '../core/interactive-session-manager';
 import { ServerConfig } from '../types/index';
 
-export interface TerminalStartSessionOptions extends StartSessionOptions {
+export interface TerminalStartSessionOptions extends Omit<StartSessionOptions, 'command'> {
+  command?: string; // Optional for terminal sessions - defaults to system shell
   enableTerminalViewer?: boolean;
   terminalSize?: { cols: number; rows: number };
 }
@@ -42,7 +43,12 @@ export class TerminalSessionManager {
     // If terminal viewer is not requested, use fallback
     if (!options.enableTerminalViewer) {
       console.error(`[DEBUG] Terminal viewer not requested, using fallback session manager`);
-      return this.fallbackSessionManager.startSession(options);
+      // Ensure command is provided for fallback session manager
+      const fallbackOptions: StartSessionOptions = {
+        ...options,
+        command: options.command || this.getShell()
+      };
+      return this.fallbackSessionManager.startSession(fallbackOptions);
     }
 
     console.error(`[DEBUG] Creating terminal session, current sessions: ${this.sessions.size}/${this.terminalViewerConfig.maxSessions}`);
@@ -61,7 +67,7 @@ export class TerminalSessionManager {
     // Create terminal session
     const session: TerminalSession = {
       sessionId,
-      command: options.command,
+      command: options.command || 'system shell',
       args: options.args || [],
       cwd: options.cwd || process.cwd(),
       env: {
@@ -103,6 +109,8 @@ export class TerminalSessionManager {
   private createPtyProcess(options: TerminalStartSessionOptions): any {
     const shell = this.getShell();
     const size = options.terminalSize || { cols: 80, rows: 24 };
+
+    console.error(`[DEBUG] Creating PTY with shell: ${shell}`);
     
     // Prepare environment
     const environment = {
@@ -123,12 +131,17 @@ export class TerminalSessionManager {
         encoding: 'utf8',
       });
 
+      console.error(`[DEBUG] PTY process created successfully with PID: ${ptyProcess.pid}`);
+
       // Send initial command if provided
       if (options.command) {
         const fullCommand = options.args && options.args.length > 0
           ? `${options.command} ${options.args.join(' ')}`
           : options.command;
+        console.error(`[DEBUG] Sending initial command to PTY: "${fullCommand}"`);
         ptyProcess.write(fullCommand + '\r');
+      } else {
+        console.error(`[DEBUG] No initial command provided, PTY will start with default shell`);
       }
 
       return ptyProcess;
@@ -156,15 +169,26 @@ export class TerminalSessionManager {
     });
 
     // Handle process exit - PTY onExit receives (exitCode, signal) as separate parameters
-    session.pty.onExit((exitCode: number, signal?: number) => {
+    session.pty.onExit((exitCode: any, signal?: any) => {
       console.error(`[DEBUG] PTY process exited for session ${session.sessionId}:`);
-      console.error(`[DEBUG]   exitCode: ${exitCode} (type: ${typeof exitCode})`);
-      console.error(`[DEBUG]   signal: ${signal} (type: ${typeof signal})`);
+      console.error(`[DEBUG]   exitCode: ${JSON.stringify(exitCode)} (type: ${typeof exitCode})`);
+      console.error(`[DEBUG]   signal: ${JSON.stringify(signal)} (type: ${typeof signal})`);
+
+      // Extract numeric exit code if exitCode is an object
+      let numericExitCode: number;
+      if (typeof exitCode === 'object' && exitCode !== null) {
+        // Handle case where exitCode might be an object with a code property
+        numericExitCode = exitCode.code || exitCode.exitCode || 0;
+      } else {
+        numericExitCode = Number(exitCode) || 0;
+      }
+
+      console.error(`[DEBUG]   numeric exit code: ${numericExitCode}`);
 
       // Determine status based on exit conditions
       // Normal exit (code 0) or exit via common signals should be considered finished
       let newStatus: 'finished' | 'error';
-      if (exitCode === 0) {
+      if (numericExitCode === 0) {
         newStatus = 'finished';
         console.error(`[DEBUG] Setting status to 'finished' - normal exit with code 0`);
       } else if (signal === 1 || signal === 2 || signal === 15) {
@@ -173,7 +197,7 @@ export class TerminalSessionManager {
         console.error(`[DEBUG] Setting status to 'finished' - terminated by signal ${signal}`);
       } else {
         newStatus = 'error';
-        console.error(`[DEBUG] Setting status to 'error' - abnormal exit: code=${exitCode}, signal=${signal}`);
+        console.error(`[DEBUG] Setting status to 'error' - abnormal exit: code=${numericExitCode}, signal=${signal}`);
       }
 
       session.status = newStatus;
@@ -182,7 +206,7 @@ export class TerminalSessionManager {
       console.error(`[DEBUG] Session ${session.sessionId} status updated to: ${newStatus}`);
 
       // Add a final message to the buffer indicating the session has ended
-      this.addToBuffer(session, `\n[Session ended with exit code ${exitCode}${signal ? `, signal ${signal}` : ''}]`, 'output');
+      this.addToBuffer(session, `\n[Session ended with exit code ${numericExitCode}${signal ? `, signal ${JSON.stringify(signal)}` : ''}]`, 'output');
     });
   }
 

@@ -960,7 +960,7 @@ class MCPShellServer {
 
               // Create terminal session using enhanced session manager
               const sessionId = await this.terminalSessionManager!.startSession({
-                command: parsed.command || this.getDefaultShell(),
+                command: parsed.command, // Don't default to shell - let PTY spawn the shell directly
                 args: parsed.args,
                 cwd: parsed.cwd,
                 env: parsed.env,

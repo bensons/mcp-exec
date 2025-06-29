@@ -298,15 +298,26 @@ export class TerminalViewerService {
       });
 
       // Handle process exit - PTY onExit receives (exitCode, signal) as separate parameters
-      session.pty.onExit((exitCode: number, signal?: number) => {
+      session.pty.onExit((exitCode: any, signal?: any) => {
         console.error(`[DEBUG] PTY process exited in viewer service for session ${session.sessionId}:`);
-        console.error(`[DEBUG]   exitCode: ${exitCode} (type: ${typeof exitCode})`);
-        console.error(`[DEBUG]   signal: ${signal} (type: ${typeof signal})`);
+        console.error(`[DEBUG]   exitCode: ${JSON.stringify(exitCode)} (type: ${typeof exitCode})`);
+        console.error(`[DEBUG]   signal: ${JSON.stringify(signal)} (type: ${typeof signal})`);
+
+        // Extract numeric exit code if exitCode is an object
+        let numericExitCode: number;
+        if (typeof exitCode === 'object' && exitCode !== null) {
+          // Handle case where exitCode might be an object with a code property
+          numericExitCode = exitCode.code || exitCode.exitCode || 0;
+        } else {
+          numericExitCode = Number(exitCode) || 0;
+        }
+
+        console.error(`[DEBUG]   numeric exit code: ${numericExitCode}`);
 
         // Determine status based on exit conditions
         // Normal exit (code 0) or exit via common signals should be considered finished
         let newStatus: 'finished' | 'error';
-        if (exitCode === 0) {
+        if (numericExitCode === 0) {
           newStatus = 'finished';
           console.error(`[DEBUG] Setting status to 'finished' - normal exit with code 0`);
         } else if (signal === 1 || signal === 2 || signal === 15) {
@@ -315,7 +326,7 @@ export class TerminalViewerService {
           console.error(`[DEBUG] Setting status to 'finished' - terminated by signal ${signal}`);
         } else {
           newStatus = 'error';
-          console.error(`[DEBUG] Setting status to 'error' - abnormal exit: code=${exitCode}, signal=${signal}`);
+          console.error(`[DEBUG] Setting status to 'error' - abnormal exit: code=${numericExitCode}, signal=${signal}`);
         }
 
         session.status = newStatus;
@@ -345,14 +356,21 @@ export class TerminalViewerService {
 
   // Method to send input to a terminal session
   sendInput(sessionId: string, input: string, addNewline: boolean = true): void {
+    console.error(`[DEBUG] TerminalViewerService.sendInput called: sessionId=${sessionId}, input="${input}", addNewline=${addNewline}`);
+
     const session = this.sessions.get(sessionId);
     if (!session || !session.pty) {
+      console.error(`[DEBUG] Session ${sessionId} not found or has no PTY. Available sessions: ${Array.from(this.sessions.keys()).join(', ')}`);
       throw new Error(`Session ${sessionId} not found or has no PTY`);
     }
+
+    console.error(`[DEBUG] Session found, sending input to PTY: "${input}"`);
 
     // Send input to PTY
     const inputToSend = addNewline ? input + '\r' : input;
     session.pty.write(inputToSend);
+
+    console.error(`[DEBUG] Input sent to PTY: "${inputToSend}"`);
 
     // Don't manually add to buffer or broadcast - let PTY echo handle display to avoid duplication
     session.lastActivity = new Date();
