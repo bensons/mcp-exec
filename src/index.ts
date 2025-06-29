@@ -406,12 +406,7 @@ class MCPShellServer {
         tools: [
           {
             name: 'execute_command',
-            title: 'Execute Shell Command',
             description: 'Execute a one-shot shell command with security validation and context preservation. For interactive sessions, use start_terminal_session or start_interactive_session instead.',
-            openWorldHint: true,
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: false,
             inputSchema: {
               type: 'object',
               properties: {
@@ -434,15 +429,17 @@ class MCPShellServer {
               },
               required: ['command'],
             },
+            annotations: {
+              title: 'Execute Shell Command',
+              openWorldHint: true,
+              readOnlyHint: false,
+              destructiveHint: true,
+              idempotentHint: false,
+            },
           },
           {
             name: 'start_interactive_session',
-            title: 'Start Interactive Session',
             description: 'Start a new interactive shell session for command execution. The session will run the specified command (or default shell) and terminate when the process exits.',
-            openWorldHint: true,
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: false,
             inputSchema: {
               type: 'object',
               properties: {
@@ -454,15 +451,17 @@ class MCPShellServer {
                 aiContext: { type: 'string', description: 'AI context/intent for this session' },
               },
             },
+            annotations: {
+              title: 'Start Interactive Session',
+              openWorldHint: true,
+              readOnlyHint: false,
+              destructiveHint: true,
+              idempotentHint: false,
+            },
           },
           {
             name: 'start_terminal_session',
-            title: 'Start Terminal Session',
             description: 'Start a new terminal session with full PTY support and browser-based viewing. The terminal provides a persistent shell environment that continues running even after individual commands exit. Use kill_session to terminate the entire terminal session.',
-            openWorldHint: true,
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: false,
             inputSchema: {
               type: 'object',
               properties: {
@@ -481,15 +480,17 @@ class MCPShellServer {
                 aiContext: { type: 'string', description: 'AI context/intent for this session' },
               },
             },
+            annotations: {
+              title: 'Start Terminal Session',
+              openWorldHint: true,
+              readOnlyHint: false,
+              destructiveHint: true,
+              idempotentHint: false,
+            },
           },
           {
             name: 'send_to_session',
-            title: 'Send Input to Session',
             description: 'Send input to an existing interactive or terminal session',
-            openWorldHint: true,
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: false,
             inputSchema: {
               type: 'object',
               properties: {
@@ -499,10 +500,16 @@ class MCPShellServer {
               },
               required: ['sessionId', 'input'],
             },
+            annotations: {
+              title: 'Send Input to Session',
+              openWorldHint: true,
+              readOnlyHint: false,
+              destructiveHint: true,
+              idempotentHint: false,
+            },
           },
           {
             name: 'terminate_terminal_session',
-            title: 'Terminate Terminal Session',
             description: 'Explicitly terminate a terminal session and its PTY process. This is different from sending "exit" commands, which only exit individual programs within the terminal.',
             inputSchema: {
               type: 'object',
@@ -512,10 +519,16 @@ class MCPShellServer {
               },
               required: ['sessionId'],
             },
+            annotations: {
+              title: 'Terminate Terminal Session',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: true,
+              idempotentHint: true,
+            },
           },
           {
             name: 'get_context',
-            title: 'Get Execution Context',
             description: 'Get current execution context including working directory and environment',
             inputSchema: {
               type: 'object',
@@ -523,10 +536,16 @@ class MCPShellServer {
                 sessionId: { type: 'string', description: 'Session ID to get context for' },
               },
             },
+            annotations: {
+              title: 'Get Execution Context',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'get_history',
-            title: 'Get Command History',
             description: 'Get command execution history with optional filtering',
             inputSchema: {
               type: 'object',
@@ -535,10 +554,16 @@ class MCPShellServer {
                 filter: { type: 'string', description: 'Filter commands by pattern' },
               },
             },
+            annotations: {
+              title: 'Get Command History',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'set_working_directory',
-            title: 'Set Working Directory',
             description: 'Set the current working directory for subsequent commands',
             inputSchema: {
               type: 'object',
@@ -547,10 +572,16 @@ class MCPShellServer {
               },
               required: ['directory'],
             },
+            annotations: {
+              title: 'Set Working Directory',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'clear_history',
-            title: 'Clear Command History',
             description: 'Clear command history and session data',
             inputSchema: {
               type: 'object',
@@ -558,10 +589,16 @@ class MCPShellServer {
                 confirm: { type: 'boolean', description: 'Confirm clearing history' },
               },
             },
+            annotations: {
+              title: 'Clear Command History',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: true,
+              idempotentHint: true,
+            },
           },
           {
             name: 'get_filesystem_changes',
-            title: 'Get File System Changes',
             description: 'Get tracked file system changes from command executions',
             inputSchema: {
               type: 'object',
@@ -569,10 +606,16 @@ class MCPShellServer {
                 since: { type: 'string', description: 'ISO date string to filter changes since' },
               },
             },
+            annotations: {
+              title: 'Get File System Changes',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'update_security_config',
-            title: 'Update Security Settings',
             description: 'Update security configuration settings',
             inputSchema: {
               type: 'object',
@@ -590,19 +633,31 @@ class MCPShellServer {
                 },
               },
             },
+            annotations: {
+              title: 'Update Security Settings',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
           },
           {
             name: 'get_security_status',
-            title: 'Get Security Status',
             description: 'Get current security configuration and status',
             inputSchema: {
               type: 'object',
               properties: {},
             },
+            annotations: {
+              title: 'Get Security Status',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'confirm_command',
-            title: 'Confirm Dangerous Command',
             description: 'Confirm execution of a dangerous command',
             inputSchema: {
               type: 'object',
@@ -611,28 +666,46 @@ class MCPShellServer {
               },
               required: ['confirmationId'],
             },
+            annotations: {
+              title: 'Confirm Dangerous Command',
+              openWorldHint: true,
+              readOnlyHint: false,
+              destructiveHint: true,
+              idempotentHint: false,
+            },
           },
           {
             name: 'get_pending_confirmations',
-            title: 'Get Pending Confirmations',
             description: 'Get list of commands pending confirmation',
             inputSchema: {
               type: 'object',
               properties: {},
             },
+            annotations: {
+              title: 'Get Pending Confirmations',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'get_intent_summary',
-            title: 'Get AI Intent Summary',
             description: 'Get summary of command intents and AI optimization insights',
             inputSchema: {
               type: 'object',
               properties: {},
             },
+            annotations: {
+              title: 'Get AI Intent Summary',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'suggest_next_commands',
-            title: 'Suggest Next Commands',
             description: 'Get AI-suggested next commands based on current command',
             inputSchema: {
               type: 'object',
@@ -641,10 +714,16 @@ class MCPShellServer {
               },
               required: ['command'],
             },
+            annotations: {
+              title: 'Suggest Next Commands',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'generate_audit_report',
-            title: 'Generate Audit Report',
             description: 'Generate comprehensive audit or compliance report',
             inputSchema: {
               type: 'object',
@@ -655,10 +734,16 @@ class MCPShellServer {
               },
               required: ['startDate', 'endDate'],
             },
+            annotations: {
+              title: 'Generate Audit Report',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'export_logs',
-            title: 'Export Audit Logs',
             description: 'Export audit logs in various formats',
             inputSchema: {
               type: 'object',
@@ -670,10 +755,16 @@ class MCPShellServer {
               },
               required: ['format'],
             },
+            annotations: {
+              title: 'Export Audit Logs',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'get_alerts',
-            title: 'Get Security Alerts',
             description: 'Get security and monitoring alerts',
             inputSchema: {
               type: 'object',
@@ -683,10 +774,16 @@ class MCPShellServer {
                 limit: { type: 'number', description: 'Maximum number of alerts to return' },
               },
             },
+            annotations: {
+              title: 'Get Security Alerts',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'acknowledge_alert',
-            title: 'Acknowledge Alert',
             description: 'Acknowledge a security alert',
             inputSchema: {
               type: 'object',
@@ -696,19 +793,31 @@ class MCPShellServer {
               },
               required: ['alertId', 'acknowledgedBy'],
             },
+            annotations: {
+              title: 'Acknowledge Alert',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'get_audit_config',
-            title: 'Get Audit Configuration',
             description: 'Get current audit configuration including log file location',
             inputSchema: {
               type: 'object',
               properties: {},
             },
+            annotations: {
+              title: 'Get Audit Configuration',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'update_audit_config',
-            title: 'Update Audit Settings',
             description: 'Update audit configuration settings',
             inputSchema: {
               type: 'object',
@@ -719,19 +828,31 @@ class MCPShellServer {
                 logDirectory: { type: 'string', description: 'Directory for audit log files' },
               },
             },
+            annotations: {
+              title: 'Update Audit Settings',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
           },
           {
             name: 'list_sessions',
-            title: 'List Active Sessions',
             description: 'List all active interactive sessions',
             inputSchema: {
               type: 'object',
               properties: {},
             },
+            annotations: {
+              title: 'List Active Sessions',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
           },
           {
             name: 'kill_session',
-            title: 'Kill Session',
             description: 'Terminate an interactive session',
             inputSchema: {
               type: 'object',
@@ -740,10 +861,16 @@ class MCPShellServer {
               },
               required: ['sessionId'],
             },
+            annotations: {
+              title: 'Kill Session',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: true,
+              idempotentHint: true,
+            },
           },
           {
             name: 'read_session_output',
-            title: 'Read Session Output',
             description: 'Read buffered output from an interactive session',
             inputSchema: {
               type: 'object',
@@ -752,10 +879,16 @@ class MCPShellServer {
               },
               required: ['sessionId'],
             },
+            annotations: {
+              title: 'Read Session Output',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
           },
           {
             name: 'toggle_terminal_viewer',
-            title: 'Toggle Terminal Viewer',
             description: 'Enable or disable the terminal viewer HTTP service for live terminal viewing in browser',
             inputSchema: {
               type: 'object',
@@ -765,14 +898,27 @@ class MCPShellServer {
               },
               required: ['enabled'],
             },
+            annotations: {
+              title: 'Toggle Terminal Viewer',
+              openWorldHint: true,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
           },
           {
             name: 'get_terminal_viewer_status',
-            title: 'Get Terminal Viewer Status',
             description: 'Get the current status of the terminal viewer service and active sessions',
             inputSchema: {
               type: 'object',
               properties: {},
+            },
+            annotations: {
+              title: 'Get Terminal Viewer Status',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
             },
           },
         ],
