@@ -11,6 +11,7 @@ export interface TerminalViewerConfig {
   bufferSize: number; // lines
   enableAuth: boolean;
   authToken?: string;
+  disableWebSocketBuffering?: boolean; // Disable websocket buffering for immediate transmission
 }
 
 export interface TerminalSession {

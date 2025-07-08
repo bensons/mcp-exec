@@ -257,16 +257,30 @@ export class TerminalViewerService {
   private sendBufferToConnection(ws: WebSocket, session: TerminalSession): void {
     if (ws.readyState !== WebSocket.OPEN) return;
 
-    // Send existing buffer content
-    session.buffer.lines.forEach(line => {
-      const message: WebSocketMessage = {
-        type: 'data',
-        sessionId: session.sessionId,
-        data: line.text + '\r\n',
-        timestamp: line.timestamp
-      };
-      ws.send(JSON.stringify(message));
-    });
+    const sendBuffer = () => {
+      // Send existing buffer content
+      session.buffer.lines.forEach(line => {
+        const message: WebSocketMessage = {
+          type: 'data',
+          sessionId: session.sessionId,
+          data: line.text + '\r\n',
+          timestamp: line.timestamp
+        };
+        try {
+          ws.send(JSON.stringify(message));
+        } catch (error) {
+          console.error('Error sending buffer websocket message:', error);
+        }
+      });
+    };
+
+    // Use process.nextTick to ensure immediate transmission and prevent buffering
+    // unless explicitly disabled in config
+    if (this.config.disableWebSocketBuffering !== false) {
+      process.nextTick(sendBuffer);
+    } else {
+      sendBuffer();
+    }
   }
 
   private handleWebSocketMessage(connectionId: string, sessionId: string, message: WebSocketMessage): void {
@@ -293,7 +307,9 @@ export class TerminalViewerService {
     // Set up PTY data handlers if available
     if (session.pty) {
       session.pty.onData((data: string) => {
+        // Immediately broadcast data to prevent buffering delays
         this.broadcastToSession(session.sessionId, data);
+        // Add to buffer for new connections
         this.addToBuffer(session, data, 'output');
       });
 
@@ -387,12 +403,29 @@ export class TerminalViewerService {
       timestamp: new Date()
     };
 
-    session.viewers.forEach(connectionId => {
-      const ws = this.connections.get(connectionId);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(message));
-      }
-    });
+    const sendMessage = () => {
+      session.viewers.forEach(connectionId => {
+        const ws = this.connections.get(connectionId);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.send(JSON.stringify(message));
+          } catch (error) {
+            console.error('Error sending websocket message:', error);
+            // Remove broken connection
+            this.connections.delete(connectionId);
+            session.viewers.delete(connectionId);
+          }
+        }
+      });
+    };
+
+    // Use process.nextTick to ensure immediate transmission and prevent buffering
+    // unless explicitly disabled in config
+    if (this.config.disableWebSocketBuffering !== false) {
+      process.nextTick(sendMessage);
+    } else {
+      sendMessage();
+    }
   }
 
   private broadcastStatusToSession(sessionId: string, status: string): void {
@@ -406,12 +439,29 @@ export class TerminalViewerService {
       timestamp: new Date()
     };
 
-    session.viewers.forEach(connectionId => {
-      const ws = this.connections.get(connectionId);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(message));
-      }
-    });
+    const sendMessage = () => {
+      session.viewers.forEach(connectionId => {
+        const ws = this.connections.get(connectionId);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.send(JSON.stringify(message));
+          } catch (error) {
+            console.error('Error sending status websocket message:', error);
+            // Remove broken connection
+            this.connections.delete(connectionId);
+            session.viewers.delete(connectionId);
+          }
+        }
+      });
+    };
+
+    // Use process.nextTick to ensure immediate transmission and prevent buffering
+    // unless explicitly disabled in config
+    if (this.config.disableWebSocketBuffering !== false) {
+      process.nextTick(sendMessage);
+    } else {
+      sendMessage();
+    }
   }
 
   private addToBuffer(session: TerminalSession, data: string, type: 'input' | 'output' | 'error'): void {
