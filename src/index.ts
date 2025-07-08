@@ -128,7 +128,7 @@ const DEFAULT_CONFIG: ServerConfig = {
     host: process.env.MCP_EXEC_TERMINAL_VIEWER_HOST || '127.0.0.1',
     maxSessions: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_MAX_SESSIONS || '10'),
     sessionTimeout: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_SESSION_TIMEOUT || '1800000'), // 30 minutes
-    bufferSize: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_BUFFER_SIZE || '1000'),
+    bufferSize: parseInt(process.env.MCP_EXEC_TERMINAL_VIEWER_BUFFER_SIZE || '10000'),
     enableAuth: process.env.MCP_EXEC_TERMINAL_VIEWER_ENABLE_AUTH === 'true',
     authToken: process.env.MCP_EXEC_TERMINAL_VIEWER_AUTH_TOKEN,
   },
