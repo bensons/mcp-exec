@@ -311,10 +311,8 @@ export interface ServerConfig {
       alertRetention: number;
       maxAlertsPerHour: number;
       webhookUrl?: string;
-      emailNotifications?: {
+      desktopNotifications?: {
         enabled: boolean;
-        recipients: string[];
-        smtpConfig?: any;
       };
     };
   };

@@ -46,6 +46,7 @@
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
     "express": "^5.1.0",
+    "node-notifier": "^10.0.1",
     "node-pty": "^1.0.0",
     "uuid": "^11.1.0",
     "ws": "^8.18.3",
@@ -54,6 +55,7 @@
   "devDependencies": {
     "@types/express": "^5.0.3",
     "@types/node": "^24.0.3",
+    "@types/node-notifier": "^8.0.5",
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.18.1",
     "nodemon": "^3.1.10",

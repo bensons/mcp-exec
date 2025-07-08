@@ -257,8 +257,6 @@ export class ShellExecutor {
         }
       }
 
-
-
       const child = spawn(execCommand, execArgs, {
         ...spawnOptions,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -291,8 +289,6 @@ export class ShellExecutor {
           clearTimeout(timeoutId);
         }
 
-
-
         resolve({
           stdout,
           stderr,
@@ -309,8 +305,6 @@ export class ShellExecutor {
       });
     });
   }
-
-
 
   // Session management API
   async listSessions() {

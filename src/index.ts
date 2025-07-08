@@ -106,6 +106,9 @@ const DEFAULT_CONFIG: ServerConfig = {
                   (process.env.USERPROFILE && path.join(process.env.USERPROFILE, '.mcp-exec')), // Safer default
     monitoring: {
       enabled: process.env.MCP_EXEC_MONITORING_ENABLED !== 'false', // Enabled by default
+      desktopNotifications: {
+        enabled: process.env.MCP_EXEC_DESKTOP_NOTIFICATIONS_ENABLED !== 'false', // Enabled by default
+      },
       alertRetention: parseInt(process.env.MCP_EXEC_ALERT_RETENTION || '7'),
       maxAlertsPerHour: parseInt(process.env.MCP_EXEC_MAX_ALERTS_PER_HOUR || '100'),
     },

@@ -33,6 +33,9 @@ export interface MonitoringConfig {
         recipients: string[];
         smtpConfig?: any;
     };
+    desktopNotifications?: {
+        enabled: boolean;
+    };
 }
 export declare class MonitoringSystem {
     private config;
@@ -48,7 +51,7 @@ export declare class MonitoringSystem {
     private generateAlertMessage;
     private sendNotification;
     private sendWebhookNotification;
-    private sendEmailNotification;
+    sendDesktopNotification(title: string, message: string): Promise<void>;
     acknowledgeAlert(alertId: string, acknowledgedBy: string): boolean;
     getAlerts(filters?: {
         severity?: string;

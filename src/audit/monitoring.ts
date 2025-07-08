@@ -3,6 +3,7 @@
  */
 
 import { LogEntry } from '../types/index';
+import notifier from 'node-notifier';
 
 export interface AlertRule {
   id: string;
@@ -36,6 +37,9 @@ export interface MonitoringConfig {
     enabled: boolean;
     recipients: string[];
     smtpConfig?: any;
+  };
+  desktopNotifications?: {
+    enabled: boolean;
   };
 }
 
@@ -132,9 +136,9 @@ export class MonitoringSystem {
         await this.sendWebhookNotification(alert);
       }
 
-      // Email notification
-      if (this.config.emailNotifications?.enabled) {
-        await this.sendEmailNotification(alert);
+      // Desktop notification
+      if (this.config.desktopNotifications?.enabled) {
+        await this.sendDesktopNotification(alert.ruleName, alert.message);  
       }
     } catch (error) {
       console.error('Failed to send notification:', error);
@@ -157,18 +161,37 @@ export class MonitoringSystem {
       session: alert.logEntry.sessionId,
     };
 
-    // In a real implementation, use fetch or axios
-    console.error('Webhook notification:', JSON.stringify(payload, null, 2));
+    try {
+      const response = await fetch(this.config.webhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        console.error(`Failed to send webhook notification: ${response.status} ${response.statusText}`);
+      }
+    } catch (error) {
+      console.error('Error sending webhook notification:', error);
+    }
   }
 
-  private async sendEmailNotification(alert: Alert): Promise<void> {
-    if (!this.config.emailNotifications?.enabled) return;
-
-    const subject = `Security Alert: ${alert.ruleName} (${alert.severity.toUpperCase()})`;
-    const body = alert.message;
-
-    // In a real implementation, use nodemailer or similar
-    console.error('Email notification:', { subject, body });
+  async sendDesktopNotification(title: string, message: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      notifier.notify({
+        title,
+        message,
+        wait: false,
+      }, (err, response, metadata) => {
+        if (err) {
+          console.error('Error sending desktop notification:', err);
+          reject(err);
+        } else {
+          resolve();
+        }
+      });
+    });
   }
 
   acknowledgeAlert(alertId: string, acknowledgedBy: string): boolean {

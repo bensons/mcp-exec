@@ -2,8 +2,12 @@
 /**
  * Monitoring and alerting system for audit events
  */
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MonitoringSystem = void 0;
+const node_notifier_1 = __importDefault(require("node-notifier"));
 class MonitoringSystem {
     config;
     alertRules = new Map();
@@ -82,9 +86,9 @@ class MonitoringSystem {
             if (this.config.webhookUrl) {
                 await this.sendWebhookNotification(alert);
             }
-            // Email notification
-            if (this.config.emailNotifications?.enabled) {
-                await this.sendEmailNotification(alert);
+            // Desktop notification
+            if (this.config.desktopNotifications?.enabled) {
+                await this.sendDesktopNotification(alert.ruleName, alert.message);
             }
         }
         catch (error) {
@@ -106,16 +110,38 @@ class MonitoringSystem {
             user: alert.logEntry.userId,
             session: alert.logEntry.sessionId,
         };
-        // In a real implementation, use fetch or axios
-        console.error('Webhook notification:', JSON.stringify(payload, null, 2));
+        try {
+            const response = await fetch(this.config.webhookUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            });
+            if (!response.ok) {
+                console.error(`Failed to send webhook notification: ${response.status} ${response.statusText}`);
+            }
+        }
+        catch (error) {
+            console.error('Error sending webhook notification:', error);
+        }
     }
-    async sendEmailNotification(alert) {
-        if (!this.config.emailNotifications?.enabled)
-            return;
-        const subject = `Security Alert: ${alert.ruleName} (${alert.severity.toUpperCase()})`;
-        const body = alert.message;
-        // In a real implementation, use nodemailer or similar
-        console.error('Email notification:', { subject, body });
+    async sendDesktopNotification(title, message) {
+        return new Promise((resolve, reject) => {
+            node_notifier_1.default.notify({
+                title,
+                message,
+                wait: false,
+            }, (err, response, metadata) => {
+                if (err) {
+                    console.error('Error sending desktop notification:', err);
+                    reject(err);
+                }
+                else {
+                    resolve();
+                }
+            });
+        });
     }
     acknowledgeAlert(alertId, acknowledgedBy) {
         const alert = this.alerts.find(a => a.id === alertId);
