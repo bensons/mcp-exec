@@ -36,9 +36,16 @@ export class TerminalViewerService {
   }
 
   private setupRoutes(): void {
-    // Serve static files
+    // Serve static files from our terminal directory
     const staticPath = path.join(__dirname, 'static');
     this.app.use('/static', express.static(staticPath));
+    
+    // Serve xterm.js files from node_modules
+    const nodeModulesPath = path.join(__dirname, '../../node_modules');
+    this.app.use('/static/xterm.js', express.static(path.join(nodeModulesPath, '@xterm/xterm/lib/xterm.js')));
+    this.app.use('/static/xterm.css', express.static(path.join(nodeModulesPath, '@xterm/xterm/css/xterm.css')));
+    this.app.use('/static/addon-fit.js', express.static(path.join(nodeModulesPath, '@xterm/addon-fit/lib/addon-fit.js')));
+    this.app.use('/static/addon-web-links.js', express.static(path.join(nodeModulesPath, '@xterm/addon-web-links/lib/addon-web-links.js')));
 
     // API routes
     this.app.get('/api/sessions', (req: any, res: any) => {
@@ -127,8 +134,8 @@ export class TerminalViewerService {
     </div>
     
     <script src="/static/xterm.js"></script>
-    <script src="/static/xterm-addon-fit.js"></script>
-    <script src="/static/xterm-addon-web-links.js"></script>
+    <script src="/static/addon-fit.js"></script>
+    <script src="/static/addon-web-links.js"></script>
     <script src="/static/terminal.js"></script>
     <script>
         window.addEventListener('load', function() {
