@@ -21,6 +21,8 @@ declare class MCPShellServer {
     private shutdownTimeout?;
     private heartbeatInterval?;
     private lastActivity;
+    private configurationHistory;
+    private originalConfig;
     constructor(config?: Partial<ServerConfig>);
     private getDefaultShell;
     private setupHandlers;
@@ -35,6 +37,8 @@ declare class MCPShellServer {
     gracefulShutdown(reason: string): Promise<void>;
     private formatContextDisplay;
     private formatHistoryDisplay;
+    private recordConfigurationChange;
+    private reinitializeComponents;
     private formatSecurityStatusDisplay;
 }
 export { MCPShellServer };

@@ -278,6 +278,106 @@ const ToggleTerminalViewerSchema = z.object({
 
 const GetTerminalViewerStatusSchema = z.object({});
 
+// New Dynamic Configuration Schemas
+const GetConfigurationSchema = z.object({
+  section: z.enum(['security', 'logging', 'sessions', 'output', 'display', 'context', 'lifecycle', 'terminalViewer', 'all']).optional().describe('Configuration section to retrieve'),
+});
+
+const UpdateConfigurationSchema = z.object({
+  section: z.enum(['security', 'logging', 'sessions', 'output', 'display', 'context', 'lifecycle', 'terminalViewer']).describe('Configuration section to update'),
+  settings: z.record(z.any()).describe('Section-specific settings to update'),
+});
+
+const ResetConfigurationSchema = z.object({
+  section: z.enum(['security', 'logging', 'sessions', 'output', 'display', 'context', 'lifecycle', 'terminalViewer', 'all']).optional().describe('Configuration section to reset'),
+});
+
+const ManageBlockedCommandsSchema = z.object({
+  action: z.enum(['add', 'remove', 'list']).describe('Action to perform'),
+  commands: z.array(z.string()).optional().describe('Commands to add or remove'),
+});
+
+const ManageAllowedDirectoriesSchema = z.object({
+  action: z.enum(['add', 'remove', 'list']).describe('Action to perform'),
+  directories: z.array(z.string()).optional().describe('Directories to add or remove'),
+});
+
+const UpdateResourceLimitsSchema = z.object({
+  maxMemoryUsage: z.number().optional().describe('Maximum memory usage in MB'),
+  maxFileSize: z.number().optional().describe('Maximum file size in MB'),
+  maxProcesses: z.number().optional().describe('Maximum number of processes'),
+});
+
+const UpdateMcpLoggingSchema = z.object({
+  minLevel: z.enum(['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug']).optional().describe('Minimum log level for MCP notifications'),
+  rateLimitPerMinute: z.number().optional().describe('Maximum messages per minute'),
+  maxQueueSize: z.number().optional().describe('Maximum queued messages'),
+  includeContext: z.boolean().optional().describe('Include context data in messages'),
+});
+
+const UpdateAuditLoggingSchema = z.object({
+  retention: z.number().optional().describe('Log retention in days'),
+  monitoringEnabled: z.boolean().optional().describe('Enable monitoring alerts'),
+  desktopNotifications: z.boolean().optional().describe('Enable desktop notifications'),
+  alertRetention: z.number().optional().describe('Alert retention in days'),
+  maxAlertsPerHour: z.number().optional().describe('Maximum alerts per hour'),
+});
+
+const UpdateSessionLimitsSchema = z.object({
+  maxInteractiveSessions: z.number().optional().describe('Maximum concurrent interactive sessions'),
+  sessionTimeout: z.number().optional().describe('Session timeout in milliseconds'),
+  outputBufferSize: z.number().optional().describe('Output buffer size per session'),
+});
+
+const UpdateTerminalViewerSchema = z.object({
+  port: z.number().optional().describe('Port for terminal viewer service'),
+  host: z.string().optional().describe('Host for terminal viewer service'),
+  enableAuth: z.boolean().optional().describe('Enable authentication'),
+  authToken: z.string().optional().describe('Authentication token'),
+  maxSessions: z.number().optional().describe('Maximum terminal viewer sessions'),
+  sessionTimeout: z.number().optional().describe('Terminal session timeout in milliseconds'),
+  bufferSize: z.number().optional().describe('Terminal buffer size'),
+});
+
+const UpdateOutputFormattingSchema = z.object({
+  formatStructured: z.boolean().optional().describe('Format output in structured format'),
+  stripAnsi: z.boolean().optional().describe('Strip ANSI escape codes'),
+  enableAiOptimizations: z.boolean().optional().describe('Enable AI-powered optimizations'),
+  maxOutputLength: z.number().optional().describe('Maximum output length in bytes'),
+  summarizeVerbose: z.boolean().optional().describe('Summarize verbose output'),
+});
+
+const UpdateDisplayOptionsSchema = z.object({
+  showCommandHeader: z.boolean().optional().describe('Show command header information'),
+  showExecutionTime: z.boolean().optional().describe('Show execution time'),
+  showExitCode: z.boolean().optional().describe('Show exit code'),
+  formatCodeBlocks: z.boolean().optional().describe('Format code blocks'),
+  includeMetadata: z.boolean().optional().describe('Include metadata'),
+  includeSuggestions: z.boolean().optional().describe('Include suggestions'),
+  useMarkdown: z.boolean().optional().describe('Use Markdown formatting'),
+  colorizeOutput: z.boolean().optional().describe('Colorize output'),
+});
+
+const UpdateContextConfigSchema = z.object({
+  preserveWorkingDirectory: z.boolean().optional().describe('Preserve working directory between commands'),
+  sessionPersistence: z.boolean().optional().describe('Enable session persistence'),
+  maxHistorySize: z.number().optional().describe('Maximum command history size'),
+});
+
+const UpdateLifecycleConfigSchema = z.object({
+  inactivityTimeout: z.number().optional().describe('Inactivity timeout in milliseconds'),
+  gracefulShutdownTimeout: z.number().optional().describe('Graceful shutdown timeout in milliseconds'),
+  enableHeartbeat: z.boolean().optional().describe('Enable heartbeat monitoring'),
+});
+
+const GetConfigurationHistorySchema = z.object({
+  limit: z.number().optional().describe('Number of configuration changes to retrieve'),
+});
+
+const RollbackConfigurationSchema = z.object({
+  changeId: z.string().describe('Configuration change ID to rollback to'),
+});
+
 class MCPShellServer {
   private server: Server;
   private shellExecutor: ShellExecutor;
@@ -295,9 +395,21 @@ class MCPShellServer {
   private shutdownTimeout?: NodeJS.Timeout;
   private heartbeatInterval?: NodeJS.Timeout;
   private lastActivity: number = Date.now();
+  
+  // Configuration history tracking
+  private configurationHistory: Array<{
+    id: string;
+    timestamp: Date;
+    section: string;
+    changes: Record<string, any>;
+    previousValues: Record<string, any>;
+    user?: string;
+  }> = [];
+  private originalConfig: ServerConfig;
 
   constructor(config: Partial<ServerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.originalConfig = JSON.parse(JSON.stringify(this.config)); // Deep copy for history tracking
     
     this.server = new Server(
       {
@@ -924,6 +1036,318 @@ class MCPShellServer {
               readOnlyHint: true,
               destructiveHint: false,
               idempotentHint: true,
+            },
+          },
+          // Dynamic Configuration Tools
+          {
+            name: 'get_configuration',
+            description: 'Get current configuration settings for specified section or all sections',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                section: { type: 'string', enum: ['security', 'logging', 'sessions', 'output', 'display', 'context', 'lifecycle', 'terminalViewer', 'all'], description: 'Configuration section to retrieve' },
+              },
+            },
+            annotations: {
+              title: 'Get Configuration',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
+          },
+          {
+            name: 'update_configuration',
+            description: 'Update configuration settings for a specific section',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                section: { type: 'string', enum: ['security', 'logging', 'sessions', 'output', 'display', 'context', 'lifecycle', 'terminalViewer'], description: 'Configuration section to update' },
+                settings: { type: 'object', description: 'Section-specific settings to update' },
+              },
+              required: ['section', 'settings'],
+            },
+            annotations: {
+              title: 'Update Configuration',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'reset_configuration',
+            description: 'Reset configuration to default values for specified section or all sections',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                section: { type: 'string', enum: ['security', 'logging', 'sessions', 'output', 'display', 'context', 'lifecycle', 'terminalViewer', 'all'], description: 'Configuration section to reset' },
+              },
+            },
+            annotations: {
+              title: 'Reset Configuration',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'manage_blocked_commands',
+            description: 'Add, remove, or list blocked commands for security',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                action: { type: 'string', enum: ['add', 'remove', 'list'], description: 'Action to perform' },
+                commands: { type: 'array', items: { type: 'string' }, description: 'Commands to add or remove' },
+              },
+              required: ['action'],
+            },
+            annotations: {
+              title: 'Manage Blocked Commands',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'manage_allowed_directories',
+            description: 'Add, remove, or list allowed directories for security',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                action: { type: 'string', enum: ['add', 'remove', 'list'], description: 'Action to perform' },
+                directories: { type: 'array', items: { type: 'string' }, description: 'Directories to add or remove' },
+              },
+              required: ['action'],
+            },
+            annotations: {
+              title: 'Manage Allowed Directories',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'update_resource_limits',
+            description: 'Update resource limits for command execution',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                maxMemoryUsage: { type: 'number', description: 'Maximum memory usage in MB' },
+                maxFileSize: { type: 'number', description: 'Maximum file size in MB' },
+                maxProcesses: { type: 'number', description: 'Maximum number of processes' },
+              },
+            },
+            annotations: {
+              title: 'Update Resource Limits',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'update_mcp_logging',
+            description: 'Update MCP client notification logging settings',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                minLevel: { type: 'string', enum: ['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug'], description: 'Minimum log level for MCP notifications' },
+                rateLimitPerMinute: { type: 'number', description: 'Maximum messages per minute' },
+                maxQueueSize: { type: 'number', description: 'Maximum queued messages' },
+                includeContext: { type: 'boolean', description: 'Include context data in messages' },
+              },
+            },
+            annotations: {
+              title: 'Update MCP Logging',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'update_audit_logging',
+            description: 'Update audit logging and monitoring settings',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                retention: { type: 'number', description: 'Log retention in days' },
+                monitoringEnabled: { type: 'boolean', description: 'Enable monitoring alerts' },
+                desktopNotifications: { type: 'boolean', description: 'Enable desktop notifications' },
+                alertRetention: { type: 'number', description: 'Alert retention in days' },
+                maxAlertsPerHour: { type: 'number', description: 'Maximum alerts per hour' },
+              },
+            },
+            annotations: {
+              title: 'Update Audit Logging',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'update_session_limits',
+            description: 'Update session management limits and timeouts',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                maxInteractiveSessions: { type: 'number', description: 'Maximum concurrent interactive sessions' },
+                sessionTimeout: { type: 'number', description: 'Session timeout in milliseconds' },
+                outputBufferSize: { type: 'number', description: 'Output buffer size per session' },
+              },
+            },
+            annotations: {
+              title: 'Update Session Limits',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'update_terminal_viewer',
+            description: 'Update terminal viewer service configuration',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                port: { type: 'number', description: 'Port for terminal viewer service' },
+                host: { type: 'string', description: 'Host for terminal viewer service' },
+                enableAuth: { type: 'boolean', description: 'Enable authentication' },
+                authToken: { type: 'string', description: 'Authentication token' },
+                maxSessions: { type: 'number', description: 'Maximum terminal viewer sessions' },
+                sessionTimeout: { type: 'number', description: 'Terminal session timeout in milliseconds' },
+                bufferSize: { type: 'number', description: 'Terminal buffer size' },
+              },
+            },
+            annotations: {
+              title: 'Update Terminal Viewer',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'update_output_formatting',
+            description: 'Update output formatting and processing settings',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                formatStructured: { type: 'boolean', description: 'Format output in structured format' },
+                stripAnsi: { type: 'boolean', description: 'Strip ANSI escape codes' },
+                enableAiOptimizations: { type: 'boolean', description: 'Enable AI-powered optimizations' },
+                maxOutputLength: { type: 'number', description: 'Maximum output length in bytes' },
+                summarizeVerbose: { type: 'boolean', description: 'Summarize verbose output' },
+              },
+            },
+            annotations: {
+              title: 'Update Output Formatting',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'update_display_options',
+            description: 'Update display and presentation options',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                showCommandHeader: { type: 'boolean', description: 'Show command header information' },
+                showExecutionTime: { type: 'boolean', description: 'Show execution time' },
+                showExitCode: { type: 'boolean', description: 'Show exit code' },
+                formatCodeBlocks: { type: 'boolean', description: 'Format code blocks' },
+                includeMetadata: { type: 'boolean', description: 'Include metadata' },
+                includeSuggestions: { type: 'boolean', description: 'Include suggestions' },
+                useMarkdown: { type: 'boolean', description: 'Use Markdown formatting' },
+                colorizeOutput: { type: 'boolean', description: 'Colorize output' },
+              },
+            },
+            annotations: {
+              title: 'Update Display Options',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'update_context_config',
+            description: 'Update context management and persistence settings',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                preserveWorkingDirectory: { type: 'boolean', description: 'Preserve working directory between commands' },
+                sessionPersistence: { type: 'boolean', description: 'Enable session persistence' },
+                maxHistorySize: { type: 'number', description: 'Maximum command history size' },
+              },
+            },
+            annotations: {
+              title: 'Update Context Config',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'update_lifecycle_config',
+            description: 'Update server lifecycle and shutdown settings',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                inactivityTimeout: { type: 'number', description: 'Inactivity timeout in milliseconds' },
+                gracefulShutdownTimeout: { type: 'number', description: 'Graceful shutdown timeout in milliseconds' },
+                enableHeartbeat: { type: 'boolean', description: 'Enable heartbeat monitoring' },
+              },
+            },
+            annotations: {
+              title: 'Update Lifecycle Config',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
+            },
+          },
+          {
+            name: 'get_configuration_history',
+            description: 'Get history of configuration changes',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                limit: { type: 'number', description: 'Number of configuration changes to retrieve' },
+              },
+            },
+            annotations: {
+              title: 'Get Configuration History',
+              openWorldHint: false,
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+            },
+          },
+          {
+            name: 'rollback_configuration',
+            description: 'Rollback configuration to a previous state',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                changeId: { type: 'string', description: 'Configuration change ID to rollback to' },
+              },
+              required: ['changeId'],
+            },
+            annotations: {
+              title: 'Rollback Configuration',
+              openWorldHint: false,
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: false,
             },
           },
         ],
@@ -2025,6 +2449,773 @@ class MCPShellServer {
             }
           }
 
+          // Dynamic Configuration Tools
+          case 'get_configuration': {
+            const parsed = GetConfigurationSchema.parse(args);
+            const section = parsed.section || 'all';
+
+            let configData: any = {};
+            
+            if (section === 'all' || section === 'security') {
+              configData.security = this.config.security;
+            }
+            if (section === 'all' || section === 'logging') {
+              configData.logging = {
+                audit: this.config.audit,
+                mcpLogging: this.config.mcpLogging
+              };
+            }
+            if (section === 'all' || section === 'sessions') {
+              configData.sessions = this.config.sessions;
+            }
+            if (section === 'all' || section === 'output') {
+              configData.output = this.config.output;
+            }
+            if (section === 'all' || section === 'display') {
+              configData.display = this.config.display;
+            }
+            if (section === 'all' || section === 'context') {
+              configData.context = this.config.context;
+            }
+            if (section === 'all' || section === 'lifecycle') {
+              configData.lifecycle = this.config.lifecycle;
+            }
+            if (section === 'all' || section === 'terminalViewer') {
+              configData.terminalViewer = this.config.terminalViewer;
+            }
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    section,
+                    configuration: configData,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'update_configuration': {
+            const parsed = UpdateConfigurationSchema.parse(args);
+            const { section, settings } = parsed;
+
+            // Record previous values for history
+            const currentSection = this.config[section as keyof ServerConfig];
+            const previousValues = currentSection ? JSON.parse(JSON.stringify(currentSection)) : {};
+
+            // Update configuration
+            if (currentSection && typeof currentSection === 'object') {
+              Object.assign(currentSection, settings);
+            }
+
+            // Record configuration change
+            this.recordConfigurationChange(section, settings, previousValues as Record<string, any>);
+
+            // Reinitialize components if needed
+            await this.reinitializeComponents(section);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: `Configuration section '${section}' updated successfully`,
+                    section,
+                    changes: settings,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'reset_configuration': {
+            const parsed = ResetConfigurationSchema.parse(args);
+            const section = parsed.section || 'all';
+
+            let resetSections: string[] = [];
+            
+            if (section === 'all') {
+              resetSections = ['security', 'logging', 'sessions', 'output', 'display', 'context', 'lifecycle', 'terminalViewer'];
+            } else {
+              resetSections = [section];
+            }
+
+            const resetResults: Record<string, any> = {};
+
+            for (const resetSection of resetSections) {
+              // Record previous values
+              const previousValues = JSON.parse(JSON.stringify(this.config[resetSection as keyof ServerConfig]));
+              
+              // Reset to original values
+              this.config[resetSection as keyof ServerConfig] = JSON.parse(JSON.stringify(this.originalConfig[resetSection as keyof ServerConfig]));
+              
+              // Record the reset as a configuration change
+              const resetSectionConfig = this.config[resetSection as keyof ServerConfig];
+              if (resetSectionConfig) {
+                this.recordConfigurationChange(resetSection, resetSectionConfig as Record<string, any>, previousValues);
+              }
+              
+              resetResults[resetSection] = 'reset';
+            }
+
+            // Reinitialize components
+            await this.reinitializeComponents(section === 'all' ? undefined : section);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: `Configuration reset completed`,
+                    resetSections,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'manage_blocked_commands': {
+            const parsed = ManageBlockedCommandsSchema.parse(args);
+            const { action, commands } = parsed;
+
+            let result: any = {};
+
+            switch (action) {
+              case 'add':
+                if (!commands || commands.length === 0) {
+                  throw new Error('Commands array is required for add action');
+                }
+                this.config.security.blockedCommands.push(...commands);
+                result = {
+                  action: 'add',
+                  added: commands,
+                  totalBlocked: this.config.security.blockedCommands.length
+                };
+                break;
+
+              case 'remove':
+                if (!commands || commands.length === 0) {
+                  throw new Error('Commands array is required for remove action');
+                }
+                const removed = commands.filter(cmd => this.config.security.blockedCommands.includes(cmd));
+                this.config.security.blockedCommands = this.config.security.blockedCommands.filter(
+                  cmd => !commands.includes(cmd)
+                );
+                result = {
+                  action: 'remove',
+                  removed,
+                  totalBlocked: this.config.security.blockedCommands.length
+                };
+                break;
+
+              case 'list':
+                result = {
+                  action: 'list',
+                  blockedCommands: this.config.security.blockedCommands,
+                  count: this.config.security.blockedCommands.length
+                };
+                break;
+            }
+
+            // Recreate security manager with updated blocked commands
+            this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(result, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'manage_allowed_directories': {
+            const parsed = ManageAllowedDirectoriesSchema.parse(args);
+            const { action, directories } = parsed;
+
+            let result: any = {};
+
+            switch (action) {
+              case 'add':
+                if (!directories || directories.length === 0) {
+                  throw new Error('Directories array is required for add action');
+                }
+                this.config.security.allowedDirectories.push(...directories);
+                result = {
+                  action: 'add',
+                  added: directories,
+                  totalAllowed: this.config.security.allowedDirectories.length
+                };
+                break;
+
+              case 'remove':
+                if (!directories || directories.length === 0) {
+                  throw new Error('Directories array is required for remove action');
+                }
+                const removed = directories.filter(dir => this.config.security.allowedDirectories.includes(dir));
+                this.config.security.allowedDirectories = this.config.security.allowedDirectories.filter(
+                  dir => !directories.includes(dir)
+                );
+                result = {
+                  action: 'remove',
+                  removed,
+                  totalAllowed: this.config.security.allowedDirectories.length
+                };
+                break;
+
+              case 'list':
+                result = {
+                  action: 'list',
+                  allowedDirectories: this.config.security.allowedDirectories,
+                  count: this.config.security.allowedDirectories.length
+                };
+                break;
+            }
+
+            // Recreate security manager with updated allowed directories
+            this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(result, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'update_resource_limits': {
+            const parsed = UpdateResourceLimitsSchema.parse(args);
+            
+            // Record previous values
+            const previousValues = JSON.parse(JSON.stringify(this.config.security.resourceLimits || {}));
+
+            // Update resource limits
+            if (!this.config.security.resourceLimits) {
+              this.config.security.resourceLimits = {};
+            }
+            
+            if (parsed.maxMemoryUsage !== undefined) {
+              this.config.security.resourceLimits.maxMemoryUsage = parsed.maxMemoryUsage;
+            }
+            if (parsed.maxFileSize !== undefined) {
+              this.config.security.resourceLimits.maxFileSize = parsed.maxFileSize;
+            }
+            if (parsed.maxProcesses !== undefined) {
+              this.config.security.resourceLimits.maxProcesses = parsed.maxProcesses;
+            }
+
+            // Record configuration change
+            this.recordConfigurationChange('security', { resourceLimits: this.config.security.resourceLimits }, { resourceLimits: previousValues });
+
+            // Recreate security manager
+            this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'Resource limits updated',
+                    resourceLimits: this.config.security.resourceLimits,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'update_mcp_logging': {
+            const parsed = UpdateMcpLoggingSchema.parse(args);
+            
+            // Record previous values
+            const previousValues = JSON.parse(JSON.stringify(this.config.mcpLogging || {}));
+
+            // Update MCP logging settings
+            if (!this.config.mcpLogging) {
+              this.config.mcpLogging = {
+                enabled: true,
+                minLevel: 'info',
+                rateLimitPerMinute: 60,
+                maxQueueSize: 100,
+                includeContext: true
+              };
+            }
+
+            if (parsed.minLevel !== undefined) {
+              this.config.mcpLogging.minLevel = parsed.minLevel;
+            }
+            if (parsed.rateLimitPerMinute !== undefined) {
+              this.config.mcpLogging.rateLimitPerMinute = parsed.rateLimitPerMinute;
+            }
+            if (parsed.maxQueueSize !== undefined) {
+              this.config.mcpLogging.maxQueueSize = parsed.maxQueueSize;
+            }
+            if (parsed.includeContext !== undefined) {
+              this.config.mcpLogging.includeContext = parsed.includeContext;
+            }
+
+            // Record configuration change
+            this.recordConfigurationChange('mcpLogging', this.config.mcpLogging, previousValues);
+
+            // Recreate MCP logger
+            this.mcpLogger = new MCPLogger(this.config.mcpLogging);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'MCP logging settings updated',
+                    mcpLogging: this.config.mcpLogging,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'update_audit_logging': {
+            const parsed = UpdateAuditLoggingSchema.parse(args);
+            
+            // Record previous values
+            const previousValues = JSON.parse(JSON.stringify(this.config.audit));
+
+            // Update audit logging settings
+            if (parsed.retention !== undefined) {
+              this.config.audit.retention = parsed.retention;
+            }
+            if (parsed.monitoringEnabled !== undefined) {
+              if (!this.config.audit.monitoring) {
+                this.config.audit.monitoring = {
+                  enabled: true,
+                  alertRetention: 7,
+                  maxAlertsPerHour: 100,
+                  desktopNotifications: { enabled: true }
+                };
+              }
+              this.config.audit.monitoring.enabled = parsed.monitoringEnabled;
+            }
+            if (parsed.desktopNotifications !== undefined) {
+              if (!this.config.audit.monitoring) {
+                this.config.audit.monitoring = {
+                  enabled: true,
+                  alertRetention: 7,
+                  maxAlertsPerHour: 100,
+                  desktopNotifications: { enabled: true }
+                };
+              }
+              if (this.config.audit.monitoring?.desktopNotifications) {
+                this.config.audit.monitoring.desktopNotifications.enabled = parsed.desktopNotifications;
+              }
+            }
+            if (parsed.alertRetention !== undefined) {
+              if (!this.config.audit.monitoring) {
+                this.config.audit.monitoring = {
+                  enabled: true,
+                  alertRetention: 7,
+                  maxAlertsPerHour: 100,
+                  desktopNotifications: { enabled: true }
+                };
+              }
+              this.config.audit.monitoring.alertRetention = parsed.alertRetention;
+            }
+            if (parsed.maxAlertsPerHour !== undefined) {
+              if (!this.config.audit.monitoring) {
+                this.config.audit.monitoring = {
+                  enabled: true,
+                  alertRetention: 7,
+                  maxAlertsPerHour: 100,
+                  desktopNotifications: { enabled: true }
+                };
+              }
+              this.config.audit.monitoring.maxAlertsPerHour = parsed.maxAlertsPerHour;
+            }
+
+            // Record configuration change
+            this.recordConfigurationChange('audit', this.config.audit, previousValues);
+
+            // Recreate audit logger
+            this.auditLogger = new AuditLogger(this.config.audit);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'Audit logging settings updated',
+                    audit: this.config.audit,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'update_session_limits': {
+            const parsed = UpdateSessionLimitsSchema.parse(args);
+            
+            // Record previous values
+            const previousValues = JSON.parse(JSON.stringify(this.config.sessions));
+
+            // Update session limits
+            if (parsed.maxInteractiveSessions !== undefined) {
+              this.config.sessions.maxInteractiveSessions = parsed.maxInteractiveSessions;
+            }
+            if (parsed.sessionTimeout !== undefined) {
+              this.config.sessions.sessionTimeout = parsed.sessionTimeout;
+            }
+            if (parsed.outputBufferSize !== undefined) {
+              this.config.sessions.outputBufferSize = parsed.outputBufferSize;
+            }
+
+            // Record configuration change
+            this.recordConfigurationChange('sessions', this.config.sessions, previousValues);
+
+            // Recreate terminal session manager
+            this.terminalSessionManager = new TerminalSessionManager(
+              this.config.sessions,
+              this.config.terminalViewer
+            );
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'Session limits updated',
+                    sessions: this.config.sessions,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'update_terminal_viewer': {
+            const parsed = UpdateTerminalViewerSchema.parse(args);
+            
+            // Record previous values
+            const previousValues = JSON.parse(JSON.stringify(this.config.terminalViewer));
+
+            // Update terminal viewer settings
+            if (parsed.port !== undefined) {
+              this.config.terminalViewer.port = parsed.port;
+            }
+            if (parsed.host !== undefined) {
+              this.config.terminalViewer.host = parsed.host;
+            }
+            if (parsed.enableAuth !== undefined) {
+              this.config.terminalViewer.enableAuth = parsed.enableAuth;
+            }
+            if (parsed.authToken !== undefined) {
+              this.config.terminalViewer.authToken = parsed.authToken;
+            }
+            if (parsed.maxSessions !== undefined) {
+              this.config.terminalViewer.maxSessions = parsed.maxSessions;
+            }
+            if (parsed.sessionTimeout !== undefined) {
+              this.config.terminalViewer.sessionTimeout = parsed.sessionTimeout;
+            }
+            if (parsed.bufferSize !== undefined) {
+              this.config.terminalViewer.bufferSize = parsed.bufferSize;
+            }
+
+            // Record configuration change
+            this.recordConfigurationChange('terminalViewer', this.config.terminalViewer, previousValues);
+
+            // Recreate terminal session manager
+            this.terminalSessionManager = new TerminalSessionManager(
+              this.config.sessions,
+              this.config.terminalViewer
+            );
+
+            // Restart terminal viewer service if enabled
+            if (this.config.terminalViewer.enabled && this.terminalViewerService) {
+              await this.terminalViewerService.stop();
+              this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
+              await this.terminalViewerService.start();
+            }
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'Terminal viewer settings updated',
+                    terminalViewer: this.config.terminalViewer,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'update_output_formatting': {
+            const parsed = UpdateOutputFormattingSchema.parse(args);
+            
+            // Record previous values
+            const previousValues = JSON.parse(JSON.stringify(this.config.output));
+
+            // Update output formatting settings
+            if (parsed.formatStructured !== undefined) {
+              this.config.output.formatStructured = parsed.formatStructured;
+            }
+            if (parsed.stripAnsi !== undefined) {
+              this.config.output.stripAnsi = parsed.stripAnsi;
+            }
+            if (parsed.enableAiOptimizations !== undefined) {
+              this.config.output.enableAiOptimizations = parsed.enableAiOptimizations;
+            }
+            if (parsed.maxOutputLength !== undefined) {
+              this.config.output.maxOutputLength = parsed.maxOutputLength;
+            }
+            if (parsed.summarizeVerbose !== undefined) {
+              this.config.output.summarizeVerbose = parsed.summarizeVerbose;
+            }
+
+            // Record configuration change
+            this.recordConfigurationChange('output', this.config.output, previousValues);
+
+            // Recreate shell executor with new config
+            this.shellExecutor = new ShellExecutor(
+              this.securityManager,
+              this.contextManager,
+              this.auditLogger,
+              this.config
+            );
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'Output formatting settings updated',
+                    output: this.config.output,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'update_display_options': {
+            const parsed = UpdateDisplayOptionsSchema.parse(args);
+            
+            // Record previous values
+            const previousValues = JSON.parse(JSON.stringify(this.config.display));
+
+            // Update display options
+            if (parsed.showCommandHeader !== undefined) {
+              this.config.display.showCommandHeader = parsed.showCommandHeader;
+            }
+            if (parsed.showExecutionTime !== undefined) {
+              this.config.display.showExecutionTime = parsed.showExecutionTime;
+            }
+            if (parsed.showExitCode !== undefined) {
+              this.config.display.showExitCode = parsed.showExitCode;
+            }
+            if (parsed.formatCodeBlocks !== undefined) {
+              this.config.display.formatCodeBlocks = parsed.formatCodeBlocks;
+            }
+            if (parsed.includeMetadata !== undefined) {
+              this.config.display.includeMetadata = parsed.includeMetadata;
+            }
+            if (parsed.includeSuggestions !== undefined) {
+              this.config.display.includeSuggestions = parsed.includeSuggestions;
+            }
+            if (parsed.useMarkdown !== undefined) {
+              this.config.display.useMarkdown = parsed.useMarkdown;
+            }
+            if (parsed.colorizeOutput !== undefined) {
+              this.config.display.colorizeOutput = parsed.colorizeOutput;
+            }
+
+            // Record configuration change
+            this.recordConfigurationChange('display', this.config.display, previousValues);
+
+            // Recreate display formatter
+            this.displayFormatter = new DisplayFormatter(this.config.display);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'Display options updated',
+                    display: this.config.display,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'update_context_config': {
+            const parsed = UpdateContextConfigSchema.parse(args);
+            
+            // Record previous values
+            const previousValues = JSON.parse(JSON.stringify(this.config.context));
+
+            // Update context configuration
+            if (parsed.preserveWorkingDirectory !== undefined) {
+              this.config.context.preserveWorkingDirectory = parsed.preserveWorkingDirectory;
+            }
+            if (parsed.sessionPersistence !== undefined) {
+              this.config.context.sessionPersistence = parsed.sessionPersistence;
+            }
+            if (parsed.maxHistorySize !== undefined) {
+              this.config.context.maxHistorySize = parsed.maxHistorySize;
+            }
+
+            // Record configuration change
+            this.recordConfigurationChange('context', this.config.context, previousValues);
+
+            // Recreate context manager
+            this.contextManager = new ContextManager(this.config.context, this.auditLogger);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'Context configuration updated',
+                    context: this.config.context,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'update_lifecycle_config': {
+            const parsed = UpdateLifecycleConfigSchema.parse(args);
+            
+            // Record previous values
+            const previousValues = JSON.parse(JSON.stringify(this.config.lifecycle));
+
+            // Update lifecycle configuration
+            if (parsed.inactivityTimeout !== undefined) {
+              this.config.lifecycle.inactivityTimeout = parsed.inactivityTimeout;
+            }
+            if (parsed.gracefulShutdownTimeout !== undefined) {
+              this.config.lifecycle.gracefulShutdownTimeout = parsed.gracefulShutdownTimeout;
+            }
+            if (parsed.enableHeartbeat !== undefined) {
+              this.config.lifecycle.enableHeartbeat = parsed.enableHeartbeat;
+            }
+
+            // Record configuration change
+            this.recordConfigurationChange('lifecycle', this.config.lifecycle, previousValues);
+
+            // Restart heartbeat if needed
+            if (this.config.lifecycle.enableHeartbeat) {
+              this.startHeartbeat();
+            } else {
+              this.stopHeartbeat();
+            }
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'Lifecycle configuration updated',
+                    lifecycle: this.config.lifecycle,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'get_configuration_history': {
+            const parsed = GetConfigurationHistorySchema.parse(args);
+            const limit = parsed.limit || 10;
+
+            const history = this.configurationHistory
+              .slice(-limit)
+              .map(entry => ({
+                id: entry.id,
+                timestamp: entry.timestamp.toISOString(),
+                section: entry.section,
+                changes: entry.changes,
+                user: entry.user
+              }));
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    history,
+                    totalChanges: this.configurationHistory.length,
+                    limit
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
+          case 'rollback_configuration': {
+            const parsed = RollbackConfigurationSchema.parse(args);
+            const { changeId } = parsed;
+
+            const changeEntry = this.configurationHistory.find(entry => entry.id === changeId);
+            if (!changeEntry) {
+              throw new Error(`Configuration change with ID '${changeId}' not found`);
+            }
+
+            // Rollback to previous values
+            const configSection = this.config[changeEntry.section as keyof ServerConfig];
+            if (configSection && typeof configSection === 'object') {
+              Object.assign(configSection, changeEntry.previousValues);
+            }
+
+            // Record the rollback as a new configuration change
+            this.recordConfigurationChange(
+              changeEntry.section,
+              changeEntry.previousValues,
+              JSON.parse(JSON.stringify(this.config[changeEntry.section as keyof ServerConfig]))
+            );
+
+            // Reinitialize components
+            await this.reinitializeComponents(changeEntry.section);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: `Configuration rolled back to change ID: ${changeId}`,
+                    rolledBackSection: changeEntry.section,
+                    rolledBackValues: changeEntry.previousValues,
+                    timestamp: new Date().toISOString()
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -2544,6 +3735,69 @@ Please start by enabling the terminal viewer service.`,
     });
 
     return lines.join('\n');
+  }
+
+  private recordConfigurationChange(section: string, changes: Record<string, any>, previousValues: Record<string, any>, user?: string): void {
+    const changeId = uuidv4();
+    this.configurationHistory.push({
+      id: changeId,
+      timestamp: new Date(),
+      section,
+      changes,
+      previousValues,
+      user
+    });
+
+    // Keep only the last 100 configuration changes
+    if (this.configurationHistory.length > 100) {
+      this.configurationHistory = this.configurationHistory.slice(-100);
+    }
+
+    // Log the configuration change
+    this.mcpLogger.notice(`Configuration changed: ${section}`, 'mcp-server', {
+      changeId,
+      section,
+      changes,
+      user
+    });
+  }
+
+  private async reinitializeComponents(section?: string): Promise<void> {
+    if (!section || section === 'security') {
+      this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+    }
+    if (!section || section === 'context') {
+      this.contextManager = new ContextManager(this.config.context, this.auditLogger);
+    }
+    if (!section || section === 'mcpLogging') {
+      this.mcpLogger = new MCPLogger(this.config.mcpLogging || {
+        enabled: true,
+        minLevel: 'info',
+        rateLimitPerMinute: 60,
+        maxQueueSize: 100,
+        includeContext: true
+      });
+    }
+    if (!section || section === 'audit') {
+      this.auditLogger = new AuditLogger(this.config.audit);
+    }
+    if (!section || section === 'display') {
+      this.displayFormatter = new DisplayFormatter(this.config.display);
+    }
+    if (!section || section === 'sessions' || section === 'terminalViewer') {
+      this.terminalSessionManager = new TerminalSessionManager(
+        this.config.sessions,
+        this.config.terminalViewer
+      );
+    }
+    if (!section || section === 'output') {
+      this.shellExecutor = new ShellExecutor(
+        this.securityManager,
+        this.contextManager,
+        this.auditLogger,
+        this.config
+      );
+    }
   }
 
   private formatSecurityStatusDisplay(securityData: any): string {

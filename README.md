@@ -168,9 +168,12 @@ The server provides comprehensive MCP tools organized into categories:
 
 ### Security Management Tools
 
-- **`update_security_config`** - Modify security settings and policies
+- **`update_security_config`** - Modify security settings and policies (legacy)
 - **`get_security_status`** - View current security configuration and restrictions
 - **`get_pending_confirmations`** - View pending dangerous command confirmations
+- **`manage_blocked_commands`** - Add, remove, or list blocked commands
+- **`manage_allowed_directories`** - Add, remove, or list allowed directories
+- **`update_resource_limits`** - Modify memory, file size, and process limits
 
 ### AI Assistance Tools
 
@@ -184,7 +187,23 @@ The server provides comprehensive MCP tools organized into categories:
 - **`get_alerts`** - View security alerts and operational warnings
 - **`acknowledge_alert`** - Acknowledge and dismiss security alerts
 - **`get_audit_config`** - View current audit configuration
-- **`update_audit_config`** - Modify audit settings and log levels
+- **`update_audit_config`** - Modify audit settings and log levels (legacy)
+- **`update_mcp_logging`** - Configure MCP client notification settings
+- **`update_audit_logging`** - Modify audit logging and monitoring settings
+
+### Dynamic Configuration Tools
+
+- **`get_configuration`** - Retrieve current configuration for any section
+- **`update_configuration`** - Update configuration settings for any section
+- **`reset_configuration`** - Reset configuration to default values
+- **`get_configuration_history`** - View history of configuration changes
+- **`rollback_configuration`** - Rollback to a previous configuration state
+- **`update_session_limits`** - Adjust session limits and timeouts
+- **`update_terminal_viewer`** - Configure terminal viewer service settings
+- **`update_output_formatting`** - Modify output processing and formatting
+- **`update_display_options`** - Adjust display and presentation settings
+- **`update_context_config`** - Configure context preservation settings
+- **`update_lifecycle_config`** - Modify server lifecycle behavior
 
 ## ⚙️ Configuration
 
@@ -271,9 +290,216 @@ MCP_EXEC_MAX_OUTPUT_LENGTH=10000          # Maximum output length in bytes
 MCP_EXEC_USE_MARKDOWN=true                # Use Markdown formatting
 ```
 
-### Runtime Configuration
+### Dynamic Configuration Tools
 
-You can also modify settings at runtime using the `update_security_config` tool:
+The server provides comprehensive runtime configuration management through MCP tools, allowing you to modify settings without restarting the server:
+
+#### 🔧 Configuration Management
+
+- **`get_configuration`** - Retrieve current configuration for any section
+- **`update_configuration`** - Update configuration settings for any section
+- **`reset_configuration`** - Reset configuration to default values
+- **`get_configuration_history`** - View history of configuration changes
+- **`rollback_configuration`** - Rollback to a previous configuration state
+
+#### 🔒 Security Management
+
+- **`manage_blocked_commands`** - Add, remove, or list blocked commands
+- **`manage_allowed_directories`** - Add, remove, or list allowed directories
+- **`update_resource_limits`** - Modify memory, file size, and process limits
+
+#### 📊 Logging Configuration
+
+- **`update_mcp_logging`** - Configure MCP client notification settings
+- **`update_audit_logging`** - Modify audit logging and monitoring settings
+
+#### 🖥️ Session & Terminal Management
+
+- **`update_session_limits`** - Adjust session limits and timeouts
+- **`update_terminal_viewer`** - Configure terminal viewer service settings
+
+#### 🎨 Output & Display Configuration
+
+- **`update_output_formatting`** - Modify output processing and formatting
+- **`update_display_options`** - Adjust display and presentation settings
+
+#### 🔄 Context & Lifecycle Management
+
+- **`update_context_config`** - Configure context preservation settings
+- **`update_lifecycle_config`** - Modify server lifecycle behavior
+
+### Runtime Configuration Examples
+
+#### Update Security Settings
+
+```javascript
+// Change security level to strict
+{
+  "tool": "update_configuration",
+  "arguments": {
+    "section": "security",
+    "settings": {
+      "level": "strict",
+      "confirmDangerous": true
+    }
+  }
+}
+
+// Add blocked commands
+{
+  "tool": "manage_blocked_commands",
+  "arguments": {
+    "action": "add",
+    "commands": ["rm -rf /", "format", "dd if=/dev/zero"]
+  }
+}
+
+// Update resource limits
+{
+  "tool": "update_resource_limits",
+  "arguments": {
+    "maxMemoryUsage": 2048,
+    "maxFileSize": 200,
+    "maxProcesses": 20
+  }
+}
+```
+
+#### Configure Logging
+
+```javascript
+// Update MCP logging settings
+{
+  "tool": "update_mcp_logging",
+  "arguments": {
+    "minLevel": "debug",
+    "rateLimitPerMinute": 120,
+    "maxQueueSize": 200,
+    "includeContext": true
+  }
+}
+
+// Update audit logging
+{
+  "tool": "update_audit_logging",
+  "arguments": {
+    "retention": 60,
+    "monitoringEnabled": true,
+    "desktopNotifications": true,
+    "alertRetention": 14,
+    "maxAlertsPerHour": 200
+  }
+}
+```
+
+#### Adjust Session Settings
+
+```javascript
+// Update session limits
+{
+  "tool": "update_session_limits",
+  "arguments": {
+    "maxInteractiveSessions": 20,
+    "sessionTimeout": 3600000,
+    "outputBufferSize": 2000
+  }
+}
+
+// Configure terminal viewer
+{
+  "tool": "update_terminal_viewer",
+  "arguments": {
+    "port": 4000,
+    "host": "0.0.0.0",
+    "enableAuth": true,
+    "authToken": "your-secure-token",
+    "maxSessions": 20,
+    "sessionTimeout": 3600000,
+    "bufferSize": 20000
+  }
+}
+```
+
+#### Customize Output Formatting
+
+```javascript
+// Update output formatting
+{
+  "tool": "update_output_formatting",
+  "arguments": {
+    "formatStructured": false,
+    "stripAnsi": false,
+    "enableAiOptimizations": false,
+    "maxOutputLength": 20000,
+    "summarizeVerbose": false
+  }
+}
+
+// Update display options
+{
+  "tool": "update_display_options",
+  "arguments": {
+    "showCommandHeader": false,
+    "showExecutionTime": false,
+    "showExitCode": false,
+    "formatCodeBlocks": false,
+    "includeMetadata": false,
+    "includeSuggestions": false,
+    "useMarkdown": false,
+    "colorizeOutput": true
+  }
+}
+```
+
+#### Manage Context and Lifecycle
+
+```javascript
+// Update context configuration
+{
+  "tool": "update_context_config",
+  "arguments": {
+    "preserveWorkingDirectory": false,
+    "sessionPersistence": false,
+    "maxHistorySize": 2000
+  }
+}
+
+// Update lifecycle settings
+{
+  "tool": "update_lifecycle_config",
+  "arguments": {
+    "inactivityTimeout": 600000,
+    "gracefulShutdownTimeout": 10000,
+    "enableHeartbeat": false
+  }
+}
+```
+
+### Configuration History and Rollback
+
+The server maintains a history of all configuration changes, allowing you to:
+
+```javascript
+// View configuration history
+{
+  "tool": "get_configuration_history",
+  "arguments": {
+    "limit": 10
+  }
+}
+
+// Rollback to a previous configuration
+{
+  "tool": "rollback_configuration",
+  "arguments": {
+    "changeId": "uuid-of-previous-change"
+  }
+}
+```
+
+### Legacy Runtime Configuration
+
+You can also modify settings at runtime using the legacy `update_security_config` tool:
 
 ```javascript
 // Example: Update security level
