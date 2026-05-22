@@ -1337,6 +1337,14 @@ class MCPShellServer {
                                 }
                             });
                             try {
+                                // Apply the same security validation used by regular execute_command
+                                const fullCommand = parsed.args && parsed.args.length > 0
+                                    ? `${parsed.command} ${parsed.args.join(' ')}`
+                                    : parsed.command;
+                                const securityCheck = await this.securityManager.validateCommand(fullCommand);
+                                if (!securityCheck.allowed) {
+                                    throw new Error(`Command blocked by security policy: ${securityCheck.reason}`);
+                                }
                                 // Ensure terminal viewer service is available
                                 if (!this.terminalViewerService) {
                                     this.terminalViewerService = new viewer_service_1.TerminalViewerService(this.config.terminalViewer);
@@ -1361,9 +1369,6 @@ class MCPShellServer {
                                 }
                                 // Get viewer URL
                                 const viewerUrl = this.terminalViewerService?.getSessionUrl(sessionId) || 'Service not available';
-                                const fullCommand = parsed.args && parsed.args.length > 0
-                                    ? `${parsed.command} ${parsed.args.join(' ')}`
-                                    : parsed.command;
                                 return {
                                     content: [
                                         {
