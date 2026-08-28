@@ -30,6 +30,7 @@ import { ConfirmationManager } from './security/confirmation';
 import { DisplayFormatter } from './utils/display-formatter';
 import { TerminalViewerService } from './terminal/viewer-service';
 import { TerminalSessionManager } from './terminal/terminal-session-manager';
+import { bufferLines } from './terminal/buffer';
 import { ServerConfig } from './types/index';
 
 // Default configuration
@@ -2303,11 +2304,12 @@ class MCPShellServer {
                     context: {
                       sessionId: parsed.sessionId,
                       status: terminalSession.status,
-                      bufferLines: terminalSession.buffer.lines.length
+                      bufferBytes: terminalSession.buffer.bytes
                     }
                   });
 
                   const buffer = this.terminalSessionManager.getTerminalBuffer(parsed.sessionId);
+                  const lines = buffer ? bufferLines(buffer) : [];
                   const viewerUrl = this.terminalViewerService?.getSessionUrl(parsed.sessionId);
 
                   return {
@@ -2322,8 +2324,8 @@ class MCPShellServer {
                           startTime: terminalSession.startTime,
                           lastActivity: terminalSession.lastActivity,
                           terminalViewerUrl: viewerUrl,
-                          bufferLines: buffer?.lines.length || 0,
-                          recentOutput: buffer?.lines.slice(-10).map(line => line.text).join('\n') || '',
+                          bufferLines: lines.length,
+                          recentOutput: lines.slice(-10).join('\n'),
                           message: 'Terminal session output is streamed live to the browser. Use the terminal viewer URL for real-time output.',
                         }, null, 2),
                       },

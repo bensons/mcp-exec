@@ -16,6 +16,7 @@ import {
   TerminalViewerSession,
   WebSocketMessage 
 } from './types';
+import { appendToBuffer, bufferText } from './buffer';
 
 export class TerminalViewerService {
   private app: express.Application;
@@ -293,29 +294,24 @@ export class TerminalViewerService {
   private sendBufferToConnection(ws: WebSocket, session: TerminalSession): void {
     if (ws.readyState !== WebSocket.OPEN) return;
 
-    const sendBuffer = () => {
-      // Send existing buffer content
-      session.buffer.lines.forEach(line => {
-        const message: WebSocketMessage = {
-          type: 'data',
-          sessionId: session.sessionId,
-          data: line.text + '\r\n',
-          timestamp: line.timestamp
-        };
-        try {
-          ws.send(JSON.stringify(message));
-        } catch (error) {
-          console.error('Error sending buffer websocket message:', error);
-        }
-      });
-    };
+    // Replay the whole scrollback as a single write - xterm.js handles arbitrary
+    // sizes, and splitting it per line would break partial lines (prompts,
+    // progress bars) that never had a newline of their own.
+    const timestamp = new Date();
+    const data = bufferText(session.buffer);
+    const messages: WebSocketMessage[] = [];
+    if (data) {
+      messages.push({ type: 'data', sessionId: session.sessionId, data, timestamp });
+    }
+    messages.push({ type: 'status', sessionId: session.sessionId, status: session.status, timestamp });
 
-    // Use process.nextTick to ensure immediate transmission and prevent buffering
-    // unless explicitly disabled in config
-    if (this.config.disableWebSocketBuffering !== false) {
-      process.nextTick(sendBuffer);
-    } else {
-      sendBuffer();
+    for (const message of messages) {
+      try {
+        ws.send(JSON.stringify(message));
+      } catch (error) {
+        console.error('Error sending buffer websocket message:', error);
+        return;
+      }
     }
   }
 
@@ -346,7 +342,8 @@ export class TerminalViewerService {
         // Immediately broadcast data to prevent buffering delays
         this.broadcastToSession(session.sessionId, data);
         // Add to buffer for new connections
-        this.addToBuffer(session, data, 'output');
+        appendToBuffer(session.buffer, data);
+        session.lastActivity = new Date();
       });
 
       // Handle process exit - PTY onExit receives (exitCode, signal) as separate parameters
@@ -439,29 +436,19 @@ export class TerminalViewerService {
       timestamp: new Date()
     };
 
-    const sendMessage = () => {
-      session.viewers.forEach(connectionId => {
-        const ws = this.connections.get(connectionId);
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          try {
-            ws.send(JSON.stringify(message));
-          } catch (error) {
-            console.error('Error sending websocket message:', error);
-            // Remove broken connection
-            this.connections.delete(connectionId);
-            session.viewers.delete(connectionId);
-          }
+    session.viewers.forEach(connectionId => {
+      const ws = this.connections.get(connectionId);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify(message));
+        } catch (error) {
+          console.error('Error sending websocket message:', error);
+          // Remove broken connection
+          this.connections.delete(connectionId);
+          session.viewers.delete(connectionId);
         }
-      });
-    };
-
-    // Use process.nextTick to ensure immediate transmission and prevent buffering
-    // unless explicitly disabled in config
-    if (this.config.disableWebSocketBuffering !== false) {
-      process.nextTick(sendMessage);
-    } else {
-      sendMessage();
-    }
+      }
+    });
   }
 
   private broadcastStatusToSession(sessionId: string, status: string): void {
@@ -475,50 +462,19 @@ export class TerminalViewerService {
       timestamp: new Date()
     };
 
-    const sendMessage = () => {
-      session.viewers.forEach(connectionId => {
-        const ws = this.connections.get(connectionId);
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          try {
-            ws.send(JSON.stringify(message));
-          } catch (error) {
-            console.error('Error sending status websocket message:', error);
-            // Remove broken connection
-            this.connections.delete(connectionId);
-            session.viewers.delete(connectionId);
-          }
+    session.viewers.forEach(connectionId => {
+      const ws = this.connections.get(connectionId);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify(message));
+        } catch (error) {
+          console.error('Error sending status websocket message:', error);
+          // Remove broken connection
+          this.connections.delete(connectionId);
+          session.viewers.delete(connectionId);
         }
-      });
-    };
-
-    // Use process.nextTick to ensure immediate transmission and prevent buffering
-    // unless explicitly disabled in config
-    if (this.config.disableWebSocketBuffering !== false) {
-      process.nextTick(sendMessage);
-    } else {
-      sendMessage();
-    }
-  }
-
-  private addToBuffer(session: TerminalSession, data: string, type: 'input' | 'output' | 'error'): void {
-    const lines = data.split('\n');
-    lines.forEach(line => {
-      if (line.length > 0) {
-        session.buffer.lines.push({
-          text: line,
-          timestamp: new Date(),
-          type,
-          ansiCodes: []
-        });
       }
     });
-
-    // Limit buffer size
-    if (session.buffer.lines.length > session.buffer.maxLines) {
-      session.buffer.lines = session.buffer.lines.slice(-session.buffer.maxLines);
-    }
-
-    session.lastActivity = new Date();
   }
 
   getStatus(): TerminalViewerStatus {
