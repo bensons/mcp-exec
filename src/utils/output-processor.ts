@@ -19,7 +19,16 @@ export class OutputProcessor {
     this.config = config;
   }
 
-  async process(rawOutput: { stdout: string; stderr: string; exitCode: number }, command?: string): Promise<CommandOutput> {
+  async process(
+    rawOutput: {
+      stdout: string;
+      stderr: string;
+      exitCode: number;
+      /** Bytes dropped per stream by the executor's in-memory cap (see ServerConfig.output.maxCollectedBytes). */
+      truncated?: { stdout: number; stderr: number };
+    },
+    command?: string
+  ): Promise<CommandOutput> {
     let { stdout, stderr, exitCode } = rawOutput;
 
     // Strip ANSI codes if configured
@@ -48,8 +57,18 @@ export class OutputProcessor {
     // Generate metadata
     const metadata = this.generateMetadata(stdout, stderr, exitCode, command);
 
+    // Surface output the executor had to drop to stay within its memory cap
+    const droppedBytes = (rawOutput.truncated?.stdout ?? 0) + (rawOutput.truncated?.stderr ?? 0);
+    const truncationWarning = `[Output truncated: ${droppedBytes} bytes dropped]`;
+    if (droppedBytes > 0) {
+      metadata.warnings.push(truncationWarning);
+    }
+
     // Generate AI-friendly summary
     const summary = this.generateSummary(stdout, stderr, exitCode, metadata);
+    if (droppedBytes > 0) {
+      summary.mainResult = `${summary.mainResult} ${truncationWarning}`;
+    }
 
     return {
       stdout,

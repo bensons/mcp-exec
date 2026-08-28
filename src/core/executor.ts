@@ -26,6 +26,56 @@ export interface ExecuteCommandOptions {
   aiContext?: string;
 }
 
+/** Bytes of the most recent output kept once the hard cap is hit (the tail usually holds the error). */
+const OUTPUT_TAIL_BYTES = 64 * 1024;
+
+/** Default hard cap on bytes retained per stream when `output.maxCollectedBytes` is not configured. */
+export function defaultMaxCollectedBytes(maxOutputLength: number): number {
+  return Math.max(4 * maxOutputLength, 1024 * 1024);
+}
+
+/**
+ * Collects a child stream's text with bounded memory: the first `cap` bytes plus a rolling tail
+ * window, so a command that prints gigabytes cannot OOM the server. The stream is always drained
+ * (never paused) so the child never blocks on a full pipe.
+ */
+class BoundedOutputCollector {
+  private head: string[] = [];
+  private headBytes = 0;
+  private tail: Array<{ chunk: string; bytes: number }> = [];
+  private tailBytes = 0;
+  droppedBytes = 0;
+
+  constructor(private readonly cap: number, private readonly tailWindow: number = OUTPUT_TAIL_BYTES) {}
+
+  push(chunk: string): void {
+    const bytes = Buffer.byteLength(chunk, 'utf8');
+    if (this.cap <= 0 || this.headBytes + bytes <= this.cap) {
+      this.head.push(chunk);
+      this.headBytes += bytes;
+      return;
+    }
+
+    this.tail.push({ chunk, bytes });
+    this.tailBytes += bytes;
+    // Evict from the front of the tail window, always keeping the newest chunk.
+    while (this.tail.length > 1 && this.tailBytes - this.tail[0].bytes >= this.tailWindow) {
+      const evicted = this.tail.shift()!;
+      this.tailBytes -= evicted.bytes;
+      this.droppedBytes += evicted.bytes;
+    }
+  }
+
+  text(): string {
+    const head = this.head.join('');
+    const tail = this.tail.map(entry => entry.chunk).join('');
+    if (this.droppedBytes === 0) {
+      return head + tail;
+    }
+    return `${head}\n... [Output truncated - ${this.droppedBytes} bytes dropped] ...\n${tail}`;
+  }
+}
+
 export class ShellExecutor {
   private securityManager: SecurityManager;
   private contextManager: ContextManager;
@@ -239,7 +289,12 @@ export class ShellExecutor {
     command: string,
     args: string[],
     options: SpawnOptions & { timeout: number }
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  ): Promise<{
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+    truncated?: { stdout: number; stderr: number };
+  }> {
     return new Promise((resolve, reject) => {
       const { timeout, ...spawnOptions } = options;
 
@@ -268,8 +323,11 @@ export class ShellExecutor {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
-      let stdout = '';
-      let stderr = '';
+      const maxCollectedBytes =
+        this.config.output.maxCollectedBytes ??
+        defaultMaxCollectedBytes(this.config.output.maxOutputLength);
+      const stdout = new BoundedOutputCollector(maxCollectedBytes);
+      const stderr = new BoundedOutputCollector(maxCollectedBytes);
       let timeoutId: NodeJS.Timeout;
 
       // Set up timeout
@@ -280,13 +338,17 @@ export class ShellExecutor {
         }, timeout);
       }
 
-      // Collect output
-      child.stdout?.on('data', (data) => {
-        stdout += data.toString();
+      // Collect output. setEncoding keeps multi-byte UTF-8 sequences intact across chunk
+      // boundaries; the collectors bound how much of the output is retained in memory.
+      child.stdout?.setEncoding('utf8');
+      child.stderr?.setEncoding('utf8');
+
+      child.stdout?.on('data', (chunk: string) => {
+        stdout.push(chunk);
       });
 
-      child.stderr?.on('data', (data) => {
-        stderr += data.toString();
+      child.stderr?.on('data', (chunk: string) => {
+        stderr.push(chunk);
       });
 
       // Handle completion
@@ -296,9 +358,10 @@ export class ShellExecutor {
         }
 
         resolve({
-          stdout,
-          stderr,
+          stdout: stdout.text(),
+          stderr: stderr.text(),
           exitCode: code || 0,
+          truncated: { stdout: stdout.droppedBytes, stderr: stderr.droppedBytes },
         });
       });
 

@@ -21,7 +21,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { MCPLogger, MCPLoggerConfig, isValidLogLevel } from './audit/mcp-logger';
 import { LogLevel, LegacyLogLevel } from './types/index';
 
-import { ShellExecutor } from './core/executor';
+import { ShellExecutor, defaultMaxCollectedBytes } from './core/executor';
 import { SecurityManager } from './security/manager';
 import { assertCommandAllowed, buildFullCommand } from './security/command-policy';
 import { ContextManager } from './context/manager';
@@ -31,6 +31,8 @@ import { DisplayFormatter } from './utils/display-formatter';
 import { TerminalViewerService } from './terminal/viewer-service';
 import { TerminalSessionManager } from './terminal/terminal-session-manager';
 import { ServerConfig } from './types/index';
+
+const DEFAULT_MAX_OUTPUT_LENGTH = parseInt(process.env.MCP_EXEC_MAX_OUTPUT_LENGTH || '10000'); // 10KB max output
 
 // Default configuration
 const DEFAULT_CONFIG: ServerConfig = {
@@ -86,7 +88,12 @@ const DEFAULT_CONFIG: ServerConfig = {
     stripAnsi: process.env.MCP_EXEC_STRIP_ANSI !== 'false', // Enabled by default
     summarizeVerbose: process.env.MCP_EXEC_SUMMARIZE_VERBOSE !== 'false', // Enabled by default
     enableAiOptimizations: process.env.MCP_EXEC_ENABLE_AI_OPTIMIZATIONS !== 'false', // Enabled by default
-    maxOutputLength: parseInt(process.env.MCP_EXEC_MAX_OUTPUT_LENGTH || '10000'), // 10KB max output
+    maxOutputLength: DEFAULT_MAX_OUTPUT_LENGTH,
+    // Hard cap on bytes buffered in memory per stream while a command runs (0 = unlimited)
+    maxCollectedBytes: parseInt(
+      process.env.MCP_EXEC_MAX_COLLECTED_BYTES ||
+        String(defaultMaxCollectedBytes(DEFAULT_MAX_OUTPUT_LENGTH))
+    ),
   },
   display: {
     showCommandHeader: process.env.MCP_EXEC_SHOW_COMMAND_HEADER !== 'false', // Enabled by default
@@ -345,6 +352,7 @@ const UpdateOutputFormattingSchema = z.object({
   stripAnsi: z.boolean().optional().describe('Strip ANSI escape codes'),
   enableAiOptimizations: z.boolean().optional().describe('Enable AI-powered optimizations'),
   maxOutputLength: z.number().optional().describe('Maximum output length in bytes'),
+  maxCollectedBytes: z.number().optional().describe('Maximum bytes buffered in memory per stream while a command runs (0 = unlimited)'),
   summarizeVerbose: z.boolean().optional().describe('Summarize verbose output'),
 });
 
@@ -1255,6 +1263,7 @@ class MCPShellServer {
                 stripAnsi: { type: 'boolean', description: 'Strip ANSI escape codes' },
                 enableAiOptimizations: { type: 'boolean', description: 'Enable AI-powered optimizations' },
                 maxOutputLength: { type: 'number', description: 'Maximum output length in bytes' },
+                maxCollectedBytes: { type: 'number', description: 'Maximum bytes buffered in memory per stream while a command runs (0 = unlimited)' },
                 summarizeVerbose: { type: 'boolean', description: 'Summarize verbose output' },
               },
             },
@@ -3016,6 +3025,9 @@ class MCPShellServer {
             }
             if (parsed.maxOutputLength !== undefined) {
               this.config.output.maxOutputLength = parsed.maxOutputLength;
+            }
+            if (parsed.maxCollectedBytes !== undefined) {
+              this.config.output.maxCollectedBytes = parsed.maxCollectedBytes;
             }
             if (parsed.summarizeVerbose !== undefined) {
               this.config.output.summarizeVerbose = parsed.summarizeVerbose;

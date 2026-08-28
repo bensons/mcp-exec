@@ -302,6 +302,9 @@ MCP_EXEC_STRIP_ANSI=true                    # Strip ANSI escape codes
 MCP_EXEC_SUMMARIZE_VERBOSE=true             # Summarize verbose output
 MCP_EXEC_ENABLE_AI_OPTIMIZATIONS=true       # Enable AI-powered optimizations
 MCP_EXEC_MAX_OUTPUT_LENGTH=10000            # Maximum output length in bytes
+MCP_EXEC_MAX_COLLECTED_BYTES=1048576        # Max bytes buffered in memory per stream while a
+                                            # command runs (0 = unlimited). Defaults to
+                                            # max(4 x MCP_EXEC_MAX_OUTPUT_LENGTH, 1 MB).
 MCP_EXEC_USE_MARKDOWN=true                  # Use Markdown formatting
 ```
 
@@ -459,6 +462,7 @@ The dynamic configuration system supports the following configuration sections:
     "stripAnsi": false,
     "enableAiOptimizations": false,
     "maxOutputLength": 20000,
+    "maxCollectedBytes": 1048576,
     "summarizeVerbose": false
   }
 }
