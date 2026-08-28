@@ -7,6 +7,7 @@ import { createServer, Server as HttpServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import * as crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 
 import { 
@@ -35,7 +36,50 @@ export class TerminalViewerService {
     this.setupRoutes();
   }
 
+  /** Constant-time token comparison; false unless a token is configured. */
+  private tokenMatches(provided: unknown): boolean {
+    const expected = this.config.authToken;
+    if (!expected || typeof provided !== 'string' || provided.length === 0) {
+      return false;
+    }
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+
+  /** Accepts `Authorization: Bearer <token>` or `?token=<token>`. */
+  private isAuthorized(authHeader: unknown, queryToken: unknown): boolean {
+    if (!this.config.enableAuth) {
+      return true;
+    }
+    const bearer = typeof authHeader === 'string' ? /^Bearer\s+(.+)$/i.exec(authHeader) : null;
+    return this.tokenMatches(bearer?.[1]) || this.tokenMatches(queryToken);
+  }
+
+  /** `?token=...` suffix for generated URLs, empty when auth is off. */
+  private tokenQuery(): string {
+    return this.config.enableAuth && this.config.authToken
+      ? `?token=${encodeURIComponent(this.config.authToken)}`
+      : '';
+  }
+
+  private sessionUrl(sessionId: string): string {
+    return `http://${this.config.host}:${this.config.port}/terminal/${sessionId}/view${this.tokenQuery()}`;
+  }
+
+  private static isLoopbackHost(host: string): boolean {
+    return /^(localhost|127(?:\.\d{1,3}){3}|::1|\[::1\]|::ffff:127(?:\.\d{1,3}){3})$/i.test(host);
+  }
+
   private setupRoutes(): void {
+    // Authentication gate — must be registered before every other route/handler
+    this.app.use((req, res, next) => {
+      if (this.isAuthorized(req.headers.authorization, req.query.token)) {
+        return next();
+      }
+      res.status(401).json({ error: 'Unauthorized' });
+    });
+
     // Serve static files from our terminal directory
     const staticPath = path.join(__dirname, 'static');
     this.app.use('/static', express.static(staticPath));
@@ -55,7 +99,7 @@ export class TerminalViewerService {
         startTime: session.startTime,
         status: session.status,
         viewerCount: session.viewers.size,
-        url: `http://${this.config.host}:${this.config.port}/terminal/${session.sessionId}/view`
+        url: this.sessionUrl(session.sessionId)
       }));
       res.json({ sessions, total: sessions.length });
     });
@@ -138,6 +182,8 @@ export class TerminalViewerService {
     const escapedStartedHtml = this.escapeHtml(session.startTime.toLocaleString());
     const escapedSessionIdJs = this.escapeJsString(sessionId);
     const escapedHostJs = this.escapeJsString(this.config.host);
+    // Static assets go through the same auth gate, so carry the token on their URLs too.
+    const q = this.tokenQuery();
 
     return `
 <!DOCTYPE html>
@@ -146,8 +192,8 @@ export class TerminalViewerService {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Terminal: ${escapedCommandHtml}</title>
-    <link rel="stylesheet" href="/static/xterm.css">
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/xterm.css${q}">
+    <link rel="stylesheet" href="/static/styles.css${q}">
 </head>
 <body>
     <div class="terminal-container">
@@ -162,10 +208,10 @@ export class TerminalViewerService {
         <div id="terminal"></div>
     </div>
     
-    <script src="/static/xterm.js"></script>
-    <script src="/static/addon-fit.js"></script>
-    <script src="/static/addon-web-links.js"></script>
-    <script src="/static/terminal.js"></script>
+    <script src="/static/xterm.js${q}"></script>
+    <script src="/static/addon-fit.js${q}"></script>
+    <script src="/static/addon-web-links.js${q}"></script>
+    <script src="/static/terminal.js${q}"></script>
     <script>
         window.addEventListener('load', function() {
             console.log('[DEBUG] Window loaded, checking if initTerminal exists...');
@@ -188,6 +234,18 @@ export class TerminalViewerService {
 
     if (this.isRunning) {
       throw new Error('Terminal viewer service is already running');
+    }
+
+    if (!this.config.enableAuth && !TerminalViewerService.isLoopbackHost(this.config.host)) {
+      throw new Error(
+        `Refusing to start terminal viewer on non-loopback host "${this.config.host}" without authentication. ` +
+        `Set enableAuth: true (MCP_EXEC_TERMINAL_VIEWER_ENABLE_AUTH=true) or bind to 127.0.0.1.`
+      );
+    }
+
+    if (this.config.enableAuth && !this.config.authToken) {
+      this.config.authToken = crypto.randomBytes(24).toString('base64url');
+      console.error(`Terminal viewer auth token (generated): ${this.config.authToken}`);
     }
 
     console.error(`[DEBUG] Starting terminal viewer service on ${this.config.host}:${this.config.port}`);
@@ -252,8 +310,14 @@ export class TerminalViewerService {
 
     this.wss.on('connection', (ws, req) => {
       const url = new URL(req.url!, `http://${req.headers.host}`);
+
+      if (!this.isAuthorized(req.headers.authorization, url.searchParams.get('token'))) {
+        ws.close(1008, 'Unauthorized');
+        return;
+      }
+
       const sessionId = url.pathname.split('/').pop();
-      
+
       if (!sessionId || !this.sessions.has(sessionId)) {
         ws.close(1008, 'Invalid session ID');
         return;
@@ -324,11 +388,21 @@ export class TerminalViewerService {
     if (!session) return;
 
     switch (message.type) {
-      case 'resize':
-        if (message.size && session.pty) {
-          session.pty.resize(message.size.cols, message.size.rows);
+      case 'resize': {
+        if (!message.size || !session.pty) {
+          break;
         }
+        const { cols, rows } = message.size;
+        if (
+          !Number.isInteger(cols) || cols < 1 || cols > 500 ||
+          !Number.isInteger(rows) || rows < 1 || rows > 300
+        ) {
+          console.error(`Ignoring out-of-range terminal resize: ${cols}x${rows}`);
+          break;
+        }
+        session.pty.resize(cols, rows);
         break;
+      }
       default:
         console.error('Unknown WebSocket message type:', message.type);
     }
@@ -524,7 +598,7 @@ export class TerminalViewerService {
   getStatus(): TerminalViewerStatus {
     const activeSessions: TerminalViewerSession[] = Array.from(this.sessions.values()).map(session => ({
       sessionId: session.sessionId,
-      url: `http://${this.config.host}:${this.config.port}/terminal/${session.sessionId}/view`,
+      url: this.sessionUrl(session.sessionId),
       command: session.command,
       startTime: session.startTime,
       status: session.status,
@@ -549,6 +623,6 @@ export class TerminalViewerService {
     if (!this.isRunning || !this.sessions.has(sessionId)) {
       return null;
     }
-    return `http://${this.config.host}:${this.config.port}/terminal/${sessionId}/view`;
+    return this.sessionUrl(sessionId);
   }
 }

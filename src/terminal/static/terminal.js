@@ -113,8 +113,11 @@ function connectWebSocket() {
     console.log('[DEBUG] Connection params:', { sessionId, host, port });
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${host}:${port}/terminal/${sessionId}`;
-    console.log('[DEBUG] WebSocket URL:', wsUrl);
+    // Forward the viewer token (if any) from the page URL; browsers cannot set WS headers.
+    const token = new URLSearchParams(window.location.search).get('token');
+    const query = token ? `?token=${encodeURIComponent(token)}` : '';
+    const wsUrl = `${protocol}//${host}:${port}/terminal/${sessionId}${query}`;
+    console.log('[DEBUG] WebSocket URL:', `${protocol}//${host}:${port}/terminal/${sessionId}`);
 
     showConnectionStatus('connecting');
 
