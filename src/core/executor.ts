@@ -155,6 +155,9 @@ export class ShellExecutor {
         command: fullCommand,
         workingDirectory,
         environment: environment as Record<string, string>,
+        // Per-command overrides are reported separately so they are not mistaken for
+        // persistent session state.
+        envOverrides: options.env,
         output: processedOutput,
         aiContext: options.aiContext,
       });

@@ -6,6 +6,39 @@
 
 const { spawn } = require('child_process');
 const path = require('path');
+const os = require('os');
+const fs = require('fs');
+const { startServer } = require('./test-environment-variables');
+
+/**
+ * Issue #38 smoke test: a per-command `env` override, an `export` that is only
+ * echoed, and a `cd` buried in a compound command.
+ */
+async function testContextEnvSimple() {
+  console.log('🧪 Simple context env/cwd test...');
+  const client = startServer({ MCP_EXEC_SECURITY_LEVEL: 'permissive' });
+  try {
+    await client.initialize();
+
+    await client.call('execute_command', { command: 'echo hi', env: { MCP_SIMPLE_CI: '1' } });
+    await client.call('execute_command', { command: "echo 'export MCP_SIMPLE_FOO=bar'" });
+    await client.call('execute_command', { command: 'cd /tmp && ls' });
+
+    const context = await client.call('get_context', {});
+    const problems = [];
+    if (context.includes('MCP_SIMPLE_CI')) problems.push('per-command env override persisted');
+    if (context.includes('MCP_SIMPLE_FOO')) problems.push('echoed export mutated the context');
+    if (!/\*\*Working Directory:\*\* `(\/private)?\/tmp`/.test(context)) {
+      problems.push(`working directory not tracked: ${context.split('\n').find((l) => l.includes('Working Directory'))}`);
+    }
+    if (problems.length > 0) {
+      throw new Error(problems.join('; '));
+    }
+    console.log('✅ Per-command env stays scoped, echoed export ignored, cd tracked');
+  } finally {
+    client.stop();
+  }
+}
 
 function testEnvSimple() {
   return new Promise((resolve, reject) => {
@@ -16,6 +49,9 @@ function testEnvSimple() {
     // Set a few key environment variables
     const testEnv = {
       ...process.env,
+      // Keep the server's writes out of the repo and the user's home directory
+      MCP_EXEC_LOG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-test-')),
+      MCP_EXEC_SESSION_PERSISTENCE: 'false',
       MCP_EXEC_SECURITY_LEVEL: 'strict',
       MCP_EXEC_CONFIRM_DANGEROUS: 'true',
       MCP_EXEC_TIMEOUT: '600000'
@@ -94,6 +130,7 @@ function testEnvSimple() {
 // Run the test
 if (require.main === module) {
   testEnvSimple()
+    .then(testContextEnvSimple)
     .then(() => {
       console.log('🎉 Simple env test completed!');
       process.exit(0);
@@ -104,4 +141,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { testEnvSimple };
+module.exports = { testEnvSimple, testContextEnvSimple };
