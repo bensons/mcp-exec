@@ -142,7 +142,7 @@ const ExecuteCommandSchema = z.object({
   cwd: z.string().optional().describe('Working directory for command execution'),
   env: z.record(z.string()).optional().describe('Environment variables'),
   timeout: z.number().optional().describe('Timeout in milliseconds'),
-  shell: z.union([z.boolean(), z.string()]).optional().describe('Shell to use for execution'),
+  shell: z.union([z.boolean(), z.string()]).optional().describe('Shell to use for execution: true (default) runs the command through the platform shell, false runs it directly with args passed verbatim (no shell parsing), or the path/name of a specific shell such as "/bin/zsh"'),
   aiContext: z.string().optional().describe('AI context/intent for this command'),
   enableTerminalViewer: z.boolean().optional().describe('Create a terminal session with browser viewer instead of regular execution'),
   terminalSize: z.object({
@@ -156,7 +156,7 @@ const StartInteractiveSessionSchema = z.object({
   args: z.array(z.string()).optional().describe('Command arguments'),
   cwd: z.string().optional().describe('Working directory for the session'),
   env: z.record(z.string()).optional().describe('Environment variables'),
-  shell: z.union([z.boolean(), z.string()]).optional().describe('Shell to use for execution'),
+  shell: z.union([z.boolean(), z.string()]).optional().describe('Shell to use for execution: true (default) runs the command through the platform shell, false runs it directly with args passed verbatim (no shell parsing), or the path/name of a specific shell such as "/bin/zsh"'),
   aiContext: z.string().optional().describe('AI context/intent for this session'),
 });
 
@@ -545,7 +545,7 @@ class MCPShellServer {
                 cwd: { type: 'string', description: 'Working directory for command execution' },
                 env: { type: 'object', description: 'Environment variables' },
                 timeout: { type: 'number', description: 'Timeout in milliseconds' },
-                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution' },
+                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution: true (default) runs the command through the platform shell, false runs it directly with args passed verbatim (no shell parsing), or the path/name of a specific shell such as "/bin/zsh"' },
                 aiContext: { type: 'string', description: 'AI context/intent for this command' },
                 enableTerminalViewer: { type: 'boolean', description: 'Create a terminal session with browser viewer instead of regular execution' },
                 terminalSize: {
@@ -577,7 +577,7 @@ class MCPShellServer {
                 args: { type: 'array', items: { type: 'string' }, description: 'Command arguments' },
                 cwd: { type: 'string', description: 'Working directory for the session' },
                 env: { type: 'object', description: 'Environment variables' },
-                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution' },
+                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution: true (default) runs the command through the platform shell, false runs it directly with args passed verbatim (no shell parsing), or the path/name of a specific shell such as "/bin/zsh"' },
                 aiContext: { type: 'string', description: 'AI context/intent for this session' },
               },
             },

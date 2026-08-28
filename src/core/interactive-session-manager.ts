@@ -6,6 +6,7 @@ import { spawn, ChildProcess } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { InteractiveSession, SessionOutput, SessionInfo, ServerConfig } from '../types/index';
 import { CommandGuard, buildFullCommand } from '../security/command-policy';
+import { resolveShellOption } from './shell-option';
 
 export interface StartSessionOptions {
   command: string;
@@ -52,27 +53,9 @@ export class InteractiveSessionManager {
     const sessionId = uuidv4();
     const startTime = new Date();
 
-    // Determine execution method based on shell option
-    let execCommand: string;
-    let execArgs: string[];
-
-    if (options.shell !== false) {
-      // When shell=true or undefined, let Node.js handle the shell execution
-      execCommand = options.command;
-      execArgs = options.args || [];
-    } else {
-      // When shell=false, manually construct shell command
-      if (process.platform === 'win32') {
-        execCommand = 'cmd.exe';
-        execArgs = ['/c', options.command, ...(options.args || [])];
-      } else {
-        execCommand = '/bin/sh';
-        const fullCommand = options.args && options.args.length > 0 
-          ? `${options.command} ${options.args.join(' ')}` 
-          : options.command;
-        execArgs = ['-c', fullCommand];
-      }
-    }
+    // shell: true/undefined -> platform default shell, false -> no shell at all,
+    // string -> the requested shell executable.
+    const shell = resolveShellOption(options.shell);
 
     // Spawn the process
     const environment: Record<string, string> = {
@@ -82,10 +65,10 @@ export class InteractiveSessionManager {
       ...options.env,
     };
 
-    const childProcess = spawn(execCommand, execArgs, {
+    const childProcess = spawn(options.command, options.args || [], {
       cwd: options.cwd || process.cwd(),
       env: environment,
-      shell: options.shell !== false,
+      shell,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
