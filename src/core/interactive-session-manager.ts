@@ -100,8 +100,9 @@ export class InteractiveSessionManager {
       cwd: options.cwd || process.cwd(),
       env: environment,
       status: 'running',
-      outputBuffer: [],
-      errorBuffer: [],
+      outputBuffer: '',
+      errorBuffer: '',
+      droppedBytes: 0,
       aiContext: options.aiContext,
     };
 
@@ -140,13 +141,15 @@ export class InteractiveSessionManager {
       throw new Error(`Session ${sessionId} not found`);
     }
 
-    // Get buffered output
-    const stdout = session.outputBuffer.join('\n');
-    const stderr = session.errorBuffer.join('\n');
+    // Return the raw buffers verbatim; splitting/joining here corrupts output
+    const stdout = session.outputBuffer;
+    const stderr = session.errorBuffer;
+    const droppedBytes = session.droppedBytes;
 
     // Clear buffers after reading
-    session.outputBuffer = [];
-    session.errorBuffer = [];
+    session.outputBuffer = '';
+    session.errorBuffer = '';
+    session.droppedBytes = 0;
 
     return {
       sessionId,
@@ -154,6 +157,7 @@ export class InteractiveSessionManager {
       stderr,
       hasMore: session.status === 'running',
       status: session.status,
+      droppedBytes,
     };
   }
 
@@ -198,28 +202,20 @@ export class InteractiveSessionManager {
   private setupProcessHandlers(session: InteractiveSession): void {
     const { process: childProcess } = session;
 
-    // Handle stdout data
-    childProcess.stdout?.on('data', (data: Buffer) => {
-      const output = data.toString();
-      session.outputBuffer.push(...output.split('\n').filter(line => line.length > 0));
-      session.lastActivity = new Date();
+    // Decode as UTF-8 so Node re-assembles code points split across chunks
+    childProcess.stdout?.setEncoding('utf8');
+    childProcess.stderr?.setEncoding('utf8');
 
-      // Limit buffer size
-      if (session.outputBuffer.length > this.config.outputBufferSize) {
-        session.outputBuffer = session.outputBuffer.slice(-this.config.outputBufferSize);
-      }
+    // Handle stdout data
+    childProcess.stdout?.on('data', (chunk: string) => {
+      session.outputBuffer = this.appendCapped(session, session.outputBuffer, chunk);
+      session.lastActivity = new Date();
     });
 
     // Handle stderr data
-    childProcess.stderr?.on('data', (data: Buffer) => {
-      const output = data.toString();
-      session.errorBuffer.push(...output.split('\n').filter(line => line.length > 0));
+    childProcess.stderr?.on('data', (chunk: string) => {
+      session.errorBuffer = this.appendCapped(session, session.errorBuffer, chunk);
       session.lastActivity = new Date();
-
-      // Limit buffer size
-      if (session.errorBuffer.length > this.config.outputBufferSize) {
-        session.errorBuffer = session.errorBuffer.slice(-this.config.outputBufferSize);
-      }
     });
 
     // Handle process exit
@@ -231,9 +227,37 @@ export class InteractiveSessionManager {
     // Handle process errors
     childProcess.on('error', (error: Error) => {
       session.status = 'error';
-      session.errorBuffer.push(`Process error: ${error.message}`);
+      session.errorBuffer = this.appendCapped(session, session.errorBuffer, `Process error: ${error.message}\n`);
       session.lastActivity = new Date();
     });
+  }
+
+  /**
+   * Append a chunk to a raw output buffer, keeping it under `outputBufferBytes`.
+   * Overflow is dropped from the front, preferring a line boundary and never
+   * splitting a UTF-8 code point; dropped bytes are counted on the session.
+   */
+  private appendCapped(session: InteractiveSession, buffer: string, chunk: string): string {
+    const text = buffer + chunk;
+    const maxBytes = this.config.outputBufferBytes;
+    if (Buffer.byteLength(text, 'utf8') <= maxBytes) {
+      return text;
+    }
+
+    const bytes = Buffer.from(text, 'utf8');
+    let cut = bytes.length - maxBytes;
+    const newline = bytes.indexOf(0x0a, cut); // \n is never part of a multi-byte sequence
+    if (newline !== -1) {
+      cut = newline + 1;
+    } else {
+      // Single oversized line: keep code points intact by skipping continuation bytes
+      while (cut < bytes.length && (bytes[cut] & 0xc0) === 0x80) {
+        cut++;
+      }
+    }
+
+    session.droppedBytes += cut;
+    return bytes.subarray(cut).toString('utf8');
   }
 
   private cleanupExpiredSessions(): void {

@@ -289,7 +289,7 @@ MCP_EXEC_MCP_INCLUDE_CONTEXT=true           # Include context data
 # Interactive Sessions
 MCP_EXEC_MAX_SESSIONS=10                    # Maximum concurrent sessions
 MCP_EXEC_SESSION_TIMEOUT=1800000            # Session timeout (30 minutes)
-MCP_EXEC_SESSION_BUFFER_SIZE=1000           # Session output buffer size
+MCP_EXEC_SESSION_BUFFER_BYTES=262144        # Session output buffer size in bytes (256 KB)
 
 # Server Lifecycle
 MCP_EXEC_INACTIVITY_TIMEOUT=0               # Inactivity timeout in ms (0 = disabled, recommended for MCP)
@@ -429,7 +429,7 @@ The dynamic configuration system supports the following configuration sections:
   "arguments": {
     "maxInteractiveSessions": 20,
     "sessionTimeout": 3600000,
-    "outputBufferSize": 2000
+    "outputBufferBytes": 524288
   }
 }
 
@@ -699,8 +699,11 @@ MCP_EXEC_MAX_SESSIONS=10
 # Session timeout in milliseconds (default: 30 minutes)
 MCP_EXEC_SESSION_TIMEOUT=1800000
 
-# Output buffer size per session (default: 1000 lines)
-MCP_EXEC_SESSION_BUFFER_SIZE=1000
+# Output buffer size per session, in bytes (default: 262144 = 256 KB).
+# Renamed from MCP_EXEC_SESSION_BUFFER_SIZE, which counted lines. Session output is
+# now buffered verbatim; when the cap is exceeded the oldest bytes are dropped and
+# read_session_output reports how many via `droppedBytes`.
+MCP_EXEC_SESSION_BUFFER_BYTES=262144
 ```
 
 ## Development
