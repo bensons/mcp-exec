@@ -6,7 +6,7 @@ import { spawn as nodeSpawn, ChildProcess } from 'child_process';
 import * as pty from 'node-pty';
 import { v4 as uuidv4 } from 'uuid';
 import { TerminalSession, TerminalBuffer } from './types';
-import { InteractiveSessionManager, StartSessionOptions, SendInputOptions } from '../core/interactive-session-manager';
+import { InteractiveSessionManager, StartSessionOptions, SendInputOptions, FINISHED_SESSION_GRACE_MS } from '../core/interactive-session-manager';
 import { ServerConfig } from '../types/index';
 import { CommandGuard, buildFullCommand } from '../security/command-policy';
 
@@ -23,6 +23,7 @@ export class TerminalSessionManager {
   private cleanupInterval: NodeJS.Timeout;
   private fallbackSessionManager: InteractiveSessionManager;
   private commandGuard?: CommandGuard;
+  private sessionRemovedHandler?: (sessionId: string) => void;
 
   constructor(
     config: ServerConfig['sessions'], 
@@ -39,6 +40,15 @@ export class TerminalSessionManager {
     this.cleanupInterval = setInterval(() => {
       this.cleanupExpiredSessions();
     }, 60000); // Check every minute
+    this.cleanupInterval.unref();
+  }
+
+  /**
+   * Register a callback invoked whenever a terminal session is removed from this manager
+   * (kill, terminate or sweep). Used to keep the terminal viewer service in sync.
+   */
+  onSessionRemoved(handler: (sessionId: string) => void): void {
+    this.sessionRemovedHandler = handler;
   }
 
   async startSession(options: TerminalStartSessionOptions): Promise<string> {
@@ -61,8 +71,8 @@ export class TerminalSessionManager {
 
     console.error(`[DEBUG] Creating terminal session, current sessions: ${this.sessions.size}/${this.terminalViewerConfig.maxSessions}`);
 
-    // Check session limit
-    if (this.sessions.size >= this.terminalViewerConfig.maxSessions) {
+    // Check session limit - only sessions that are still running occupy a slot
+    if (this.countRunningSessions() >= this.terminalViewerConfig.maxSessions) {
       throw new Error(`Maximum number of terminal sessions (${this.terminalViewerConfig.maxSessions}) reached`);
     }
 
@@ -298,6 +308,17 @@ export class TerminalSessionManager {
 
     // Remove from active sessions
     this.sessions.delete(sessionId);
+    this.sessionRemovedHandler?.(sessionId);
+  }
+
+  countRunningSessions(): number {
+    let count = 0;
+    for (const session of this.sessions.values()) {
+      if (session.status === 'running') {
+        count++;
+      }
+    }
+    return count;
   }
 
   getSession(sessionId: string): TerminalSession | undefined {
@@ -356,15 +377,21 @@ export class TerminalSessionManager {
 
     this.sessions.forEach((session, sessionId) => {
       const timeSinceLastActivity = now.getTime() - session.lastActivity.getTime();
-      
-      if (timeSinceLastActivity > this.terminalViewerConfig.sessionTimeout) {
+      // Finished sessions are reaped after a short grace period, independent of sessionTimeout
+      const maxIdle = session.status === 'running'
+        ? this.terminalViewerConfig.sessionTimeout
+        : Math.min(this.terminalViewerConfig.sessionTimeout, FINISHED_SESSION_GRACE_MS);
+
+      if (timeSinceLastActivity > maxIdle) {
         expiredSessions.push(sessionId);
       }
     });
 
     expiredSessions.forEach(sessionId => {
       console.error(`Cleaning up expired terminal session: ${sessionId}`);
-      this.killSession(sessionId);
+      this.killSession(sessionId).catch(error => {
+        console.error(`Error cleaning up expired terminal session ${sessionId}:`, error);
+      });
     });
 
     // Also cleanup fallback sessions
