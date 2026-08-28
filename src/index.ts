@@ -393,6 +393,8 @@ class MCPShellServer {
   private config: ServerConfig;
   private isShuttingDown: boolean = false;
   private transport?: any;
+  /** True only between `server.connect()` resolving and shutdown starting. */
+  private connected: boolean = false;
   private shutdownTimeout?: NodeJS.Timeout;
   private heartbeatInterval?: NodeJS.Timeout;
   private lastActivity: number = Date.now();
@@ -491,21 +493,9 @@ class MCPShellServer {
       this.config
     );
 
-    // Set up MCP logger notification callback
-    this.mcpLogger.setNotificationCallback((message) => {
-      try {
-        // Only send notifications if server is connected
-        if (this.transport) {
-          this.server.notification({
-            method: 'notifications/message',
-            params: message as any
-          });
-        }
-      } catch (error) {
-        // Silently ignore notification errors to avoid infinite loops
-        console.error('Failed to send MCP log notification:', error instanceof Error ? error.message : 'Unknown error');
-      }
-    });
+    // NOTE: the MCP logger notification callback is installed in start(), once
+    // the transport is actually connected. Until then MCPLogger queues messages
+    // and start() flushes them with processQueuedMessages().
 
     this.setupHandlers();
   }
@@ -3437,15 +3427,34 @@ Please start by enabling the terminal viewer service.`,
 
       this.transport = new StdioServerTransport();
 
-      // Set up connection monitoring
-      this.setupConnectionMonitoring();
-      this.mcpLogger.debug('Connection monitoring configured', 'mcp-server');
-
       await this.server.connect(this.transport);
-      this.mcpLogger.info('MCP server transport connected', 'mcp-server');
+      this.connected = true;
+
+      // Only now can notifications be sent: server.notification() rejects with
+      // "Not connected" until connect() resolves.
+      this.mcpLogger.setNotificationCallback((message) => {
+        if (!this.connected) {
+          return;
+        }
+        Promise.resolve(
+          this.server.notification({
+            method: 'notifications/message',
+            params: message as any,
+          })
+        ).catch((error) => {
+          // Never let this reject unhandled - it would trip the global handler.
+          console.error('Failed to send MCP log notification:', error instanceof Error ? error.message : 'Unknown error');
+        });
+      });
 
       // Process any queued MCP log messages now that transport is ready
       this.mcpLogger.processQueuedMessages();
+      this.mcpLogger.info('MCP server transport connected', 'mcp-server');
+
+      // Set up connection monitoring (after connect, so the stdin listeners
+      // below never put stdin in flowing mode before the transport attaches)
+      this.setupConnectionMonitoring();
+      this.mcpLogger.debug('Connection monitoring configured', 'mcp-server');
 
       // Log server start with audit log location info
       await this.auditLogger.log({
@@ -3637,6 +3646,7 @@ Please start by enabling the terminal viewer service.`,
     }
 
     this.isShuttingDown = true;
+    this.connected = false; // stop emitting notifications on a closing transport
     console.error(`🔄 Initiating graceful shutdown: ${reason}`);
 
     try {
@@ -3950,9 +3960,10 @@ if (require.main === module) {
     server.gracefulShutdown('Uncaught exception');
   });
 
-  process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled rejection at:', promise, 'reason:', reason);
-    server.gracefulShutdown('Unhandled rejection');
+  // A stray rejection is not a reason to kill a working server: log and keep
+  // running. Fatal transport failures still arrive via the stdio error monitors.
+  process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled rejection (continuing):', reason);
   });
 }
 

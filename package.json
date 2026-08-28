@@ -19,7 +19,8 @@
     "test:dynamic-config": "node tests/test-dynamic-configuration.js",
     "test:command-policy": "node tests/test-command-policy.js",
     "test:session-policy": "node tests/test-session-command-policy.js",
-    "test:all": "npm run test && npm run test:server && npm run test:ssh && npm run test:lifecycle && npm run test:annotations && npm run test:dynamic-config && npm run test:command-policy && npm run test:session-policy",
+    "test:debug-log-level": "node tests/test-debug-log-level-startup.js",
+    "test:all": "npm run test && npm run test:server && npm run test:ssh && npm run test:lifecycle && npm run test:annotations && npm run test:dynamic-config && npm run test:command-policy && npm run test:session-policy && npm run test:debug-log-level",
     "clean": "rm -rf dist",
     "setup-claude": "node tests/setup-claude-desktop.js",
     "postbuild": "chmod +x dist/index.js"
