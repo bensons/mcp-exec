@@ -8,7 +8,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 import {
   CommandOutput,
-  CommandContext,
+  AuditContext,
   ValidationResult,
   LogEntry,
   LogFilters,
@@ -19,6 +19,12 @@ import {
   LOG_LEVELS
 } from '../types/index';
 import { MonitoringSystem, MonitoringConfig } from './monitoring';
+import { compileRedactPatterns, redactSecrets } from './redact';
+
+const DEFAULT_MAX_OUTPUT_BYTES = 4 * 1024;
+const DEFAULT_MAX_IN_MEMORY_ENTRIES = 1000;
+/** Upper bound on how much of the log file tail is read at startup. */
+const MAX_TAIL_BYTES = 4 * 1024 * 1024;
 
 export interface AuditConfig {
   enabled: boolean;
@@ -26,13 +32,16 @@ export interface AuditConfig {
   retention: number;
   logFile?: string; // Full path to log file
   logDirectory?: string; // Directory for log files
+  maxOutputBytes?: number; // truncate stdout/stderr in audit entries (default 4096)
+  maxInMemoryEntries?: number; // cap on entries kept in memory (default 1000)
+  redactPatterns?: string[]; // key patterns whose values are redacted before writing
   monitoring?: MonitoringConfig;
 }
 
 export interface LogCommandOptions {
   commandId: string;
   command: string;
-  context: CommandContext;
+  context: AuditContext;
   result: CommandOutput;
   securityCheck: ValidationResult;
   executionTime: number;
@@ -42,7 +51,7 @@ export interface LogErrorOptions {
   commandId: string;
   command: string;
   error: Error;
-  context: CommandContext;
+  context: AuditContext;
 }
 
 export interface LogOptions {
@@ -57,11 +66,17 @@ export class AuditLogger {
   private logFile: string;
   private logs: LogEntry[];
   private monitoringSystem?: MonitoringSystem;
+  private redactPatterns: RegExp[];
+  private maxOutputBytes: number;
+  private maxInMemoryEntries: number;
 
   constructor(config: AuditConfig) {
     this.config = config;
     this.logFile = this.resolveLogFilePath(config);
     this.logs = [];
+    this.redactPatterns = compileRedactPatterns(config.redactPatterns);
+    this.maxOutputBytes = config.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    this.maxInMemoryEntries = config.maxInMemoryEntries ?? DEFAULT_MAX_IN_MEMORY_ENTRIES;
 
     if (config.enabled) {
       this.initializeLogging();
@@ -78,20 +93,20 @@ export class AuditLogger {
       return;
     }
 
-    const logEntry: LogEntry = {
+    const logEntry: LogEntry = this.sanitizeEntry({
       id: uuidv4(),
       timestamp: new Date(),
       sessionId: options.context.sessionId,
       userId: process.env.USER || process.env.USERNAME,
       command: options.command,
       context: options.context,
-      result: options.result,
+      result: this.truncateOutput(options.result),
       securityCheck: options.securityCheck,
       aiIntent: options.context.aiIntent,
-    };
+    });
 
     await this.writeLogEntry(logEntry);
-    this.logs.push(logEntry);
+    this.appendToMemory(logEntry);
 
     // Process monitoring alerts
     if (this.monitoringSystem) {
@@ -124,23 +139,23 @@ export class AuditLogger {
       },
     };
 
-    const logEntry: LogEntry = {
+    const logEntry: LogEntry = this.sanitizeEntry({
       id: uuidv4(),
       timestamp: new Date(),
       sessionId: options.context.sessionId,
       userId: process.env.USER || process.env.USERNAME,
       command: options.command,
       context: options.context,
-      result: errorOutput,
+      result: this.truncateOutput(errorOutput),
       securityCheck: {
         allowed: false,
         reason: 'Command execution failed',
         riskLevel: 'medium',
       },
-    };
+    });
 
     await this.writeLogEntry(logEntry);
-    this.logs.push(logEntry);
+    this.appendToMemory(logEntry);
   }
 
   async log(options: LogOptions): Promise<void> {
@@ -158,7 +173,7 @@ export class AuditLogger {
       timestamp: new Date().toISOString(),
       level: normalizedLevel.toUpperCase(),
       message: options.message,
-      context: options.context,
+      context: redactSecrets(options.context, this.redactPatterns),
       logger: options.logger,
       pid: process.pid,
       severity: LOG_LEVELS[normalizedLevel], // RFC 5424 numeric severity
@@ -546,17 +561,42 @@ export class AuditLogger {
     return path.join(tempDir, defaultFilename);
   }
 
+  /**
+   * Load only the tail of the log file. Parsing the whole file made startup cost
+   * (and resident memory) grow with the lifetime of the log; we only ever expose
+   * the most recent `maxInMemoryEntries` anyway.
+   */
   private async loadExistingLogs(): Promise<void> {
     try {
-      const logContent = await fs.readFile(this.logFile, 'utf-8');
-      const lines = logContent.split('\n').filter(line => line.trim());
+      const { size } = await fs.stat(this.logFile);
+      const start = Math.max(0, size - MAX_TAIL_BYTES);
+      const length = size - start;
 
+      let tail = '';
+      if (length > 0) {
+        const handle = await fs.open(this.logFile, 'r');
+        try {
+          const buffer = Buffer.alloc(length);
+          await handle.read(buffer, 0, length, start);
+          tail = buffer.toString('utf-8');
+        } finally {
+          await handle.close();
+        }
+      }
+
+      const lines = tail.split('\n');
+      if (start > 0) {
+        lines.shift(); // first line is likely truncated mid-record
+      }
+
+      const entries: LogEntry[] = [];
       for (const line of lines) {
+        if (!line.trim()) continue;
         try {
           const logData = JSON.parse(line);
           if (logData.id && logData.command) {
             // This is a command log entry
-            this.logs.push({
+            entries.push({
               ...logData,
               timestamp: new Date(logData.timestamp),
             });
@@ -565,8 +605,49 @@ export class AuditLogger {
           // Skip invalid log lines
         }
       }
+
+      this.logs.push(...entries.slice(-this.maxInMemoryEntries));
+      this.trimMemory();
     } catch {
       // No existing logs or file not readable
+    }
+  }
+
+  /** Redact secret-bearing values anywhere in the entry before it is stored or written. */
+  private sanitizeEntry(entry: LogEntry): LogEntry {
+    return redactSecrets(entry, this.redactPatterns);
+  }
+
+  /**
+   * Audit entries record a bounded excerpt of stdout/stderr; the full output
+   * still lives in the context output cache.
+   */
+  private truncateOutput(result: CommandOutput): CommandOutput {
+    return {
+      ...result,
+      stdout: this.truncate(result.stdout),
+      stderr: this.truncate(result.stderr),
+    };
+  }
+
+  private truncate(value: string): string {
+    if (typeof value !== 'string' || Buffer.byteLength(value, 'utf-8') <= this.maxOutputBytes) {
+      return value;
+    }
+    const kept = Buffer.from(value, 'utf-8')
+      .subarray(0, this.maxOutputBytes)
+      .toString('utf-8');
+    return `${kept}\n... [truncated to ${this.maxOutputBytes} bytes]`;
+  }
+
+  private appendToMemory(entry: LogEntry): void {
+    this.logs.push(entry);
+    this.trimMemory();
+  }
+
+  private trimMemory(): void {
+    if (this.logs.length > this.maxInMemoryEntries) {
+      this.logs.splice(0, this.logs.length - this.maxInMemoryEntries);
     }
   }
 

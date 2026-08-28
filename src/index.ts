@@ -102,6 +102,11 @@ const DEFAULT_CONFIG: ServerConfig = {
     enabled: process.env.MCP_EXEC_AUDIT_ENABLED !== 'false', // Enabled by default
     logLevel: (process.env.MCP_EXEC_AUDIT_LOG_LEVEL as LogLevel | LegacyLogLevel) || 'debug',
     retention: parseInt(process.env.MCP_EXEC_AUDIT_RETENTION || '30'),
+    maxOutputBytes: parseInt(process.env.MCP_EXEC_AUDIT_MAX_OUTPUT_BYTES || '4096'),
+    maxInMemoryEntries: parseInt(process.env.MCP_EXEC_AUDIT_MAX_IN_MEMORY_ENTRIES || '1000'),
+    redactPatterns: process.env.MCP_EXEC_AUDIT_REDACT_PATTERNS
+      ? process.env.MCP_EXEC_AUDIT_REDACT_PATTERNS.split(',').map(p => p.trim()).filter(Boolean)
+      : undefined,
     logDirectory: process.env.MCP_EXEC_LOG_DIR ||
                   (process.env.HOME && path.join(process.env.HOME, '.mcp-exec')) ||
                   (process.env.USERPROFILE && path.join(process.env.USERPROFILE, '.mcp-exec')), // Safer default

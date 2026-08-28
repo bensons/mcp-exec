@@ -182,7 +182,7 @@ export interface AuditLogger {
     sessionId: string;
     userId?: string;
     command: string;
-    context: CommandContext;
+    context: AuditContext;
     result: CommandOutput;
     securityCheck: ValidationResult;
     aiIntent?: string;
@@ -215,6 +215,20 @@ export interface CommandContext {
   aiIntent?: string;
 }
 
+/**
+ * Slim, non-recursive context recorded on every audit entry. Deliberately
+ * excludes commandHistory / outputCache / fileSystemChanges / environment maps:
+ * embedding the full CommandContext made entry N contain entries 1..N-1 and put
+ * the whole process environment on disk. See issue #30.
+ */
+export interface AuditContext {
+  sessionId: string;
+  workingDirectory: string;
+  previousCommands: string[]; // last few command strings only
+  aiIntent?: string;
+  userId?: string;
+}
+
 export interface LogFilters {
   sessionId?: string;
   userId?: string;
@@ -234,7 +248,7 @@ export interface LogEntry {
   sessionId: string;
   userId?: string;
   command: string;
-  context: CommandContext;
+  context: AuditContext;
   result: CommandOutput;
   securityCheck: ValidationResult;
   aiIntent?: string;
@@ -306,6 +320,9 @@ export interface ServerConfig {
     retention: number;
     logFile?: string; // Full path to log file
     logDirectory?: string; // Directory for log files
+    maxOutputBytes?: number; // truncate stdout/stderr in audit entries (default 4096)
+    maxInMemoryEntries?: number; // cap on entries kept in memory / loaded at startup (default 1000)
+    redactPatterns?: string[]; // key patterns whose values are redacted before writing
     monitoring?: {
       enabled: boolean;
       alertRetention: number;
