@@ -47,6 +47,15 @@ export class SecurityManager {
     }, 'security-manager');
   }
 
+  /**
+   * Apply configuration changes in place. Callers must use this instead of
+   * constructing a replacement manager, otherwise components that captured
+   * this instance (e.g. ShellExecutor) keep validating against the old policy.
+   */
+  updateConfig(config: Partial<SecurityConfig>): void {
+    Object.assign(this.config, config);
+  }
+
 
 
   private initializeDangerousPatterns(): void {

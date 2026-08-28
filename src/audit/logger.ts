@@ -73,6 +73,36 @@ export class AuditLogger {
     }
   }
 
+  /**
+   * Apply configuration changes in place. Callers must use this instead of
+   * constructing a replacement logger, otherwise components that captured this
+   * instance (ShellExecutor, SecurityManager, ContextManager) keep writing to
+   * the old logger and its entries never reach the reporting tools.
+   *
+   * The log file is only reopened (and re-read) when logging is newly enabled
+   * or the resolved path actually changed.
+   */
+  updateConfig(config: Partial<AuditConfig>): void {
+    const previousLogFile = this.logFile;
+    const previousMonitoring = this.config.monitoring;
+    const wasEnabled = this.config.enabled;
+
+    Object.assign(this.config, config);
+
+    if (!this.config.monitoring) {
+      this.monitoringSystem = undefined;
+    } else if (!this.monitoringSystem || this.config.monitoring !== previousMonitoring) {
+      this.monitoringSystem = new MonitoringSystem(this.config.monitoring);
+    }
+
+    this.logFile = this.resolveLogFilePath(this.config);
+
+    if (this.config.enabled && (!wasEnabled || this.logFile !== previousLogFile)) {
+      this.logs = [];
+      void this.initializeLogging();
+    }
+  }
+
   async logCommand(options: LogCommandOptions): Promise<void> {
     if (!this.config.enabled) {
       return;

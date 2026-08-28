@@ -69,6 +69,23 @@ export class ContextManager {
     }, 'context-manager');
   }
 
+  /**
+   * Apply configuration changes in place, preserving history and working
+   * directory. Callers must use this instead of constructing a replacement
+   * manager, otherwise ShellExecutor keeps writing to the old instance.
+   */
+  updateConfig(config: Partial<ContextConfig>): void {
+    Object.assign(this.config, config);
+
+    // Honour a shrunken history limit immediately.
+    while (this.commandHistory.length > this.config.maxHistorySize) {
+      const removed = this.commandHistory.shift();
+      if (removed) {
+        this.outputCache.delete(removed.id);
+      }
+    }
+  }
+
   async getCurrentContext(sessionId?: string): Promise<CommandContext> {
     return {
       sessionId: sessionId || this.sessionId,

@@ -7,19 +7,37 @@
 
 const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+
+const SERVER_PATH = path.resolve(__dirname, '..', 'dist', 'index.js');
+
+/**
+ * Isolated scratch directory for a server run: keeps audit logs and session
+ * state out of ~/.mcp-exec and the repo, so concurrent test runs cannot
+ * clobber each other.
+ */
+function makeScratchDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-test-'));
+}
 
 function testDynamicConfiguration() {
   return new Promise((resolve, reject) => {
-    const serverPath = path.resolve(__dirname, '..', 'dist', 'index.js');
-    
+    const serverPath = SERVER_PATH;
+    const scratchDir = makeScratchDir();
+
     console.log('🧪 Testing dynamic configuration tools...');
     console.log(`Server path: ${serverPath}`);
-    
+
     const server = spawn('node', [serverPath], {
+      cwd: scratchDir,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        MCP_EXEC_SECURITY_LEVEL: 'permissive'
+        MCP_EXEC_SECURITY_LEVEL: 'permissive',
+        MCP_EXEC_LOG_DIR: scratchDir,
+        MCP_EXEC_MONITORING_ENABLED: 'false',
+        MCP_EXEC_DESKTOP_NOTIFICATIONS_ENABLED: 'false'
       }
     });
     
@@ -387,9 +405,171 @@ function testDynamicConfiguration() {
   });
 }
 
+/**
+ * Regression tests for issue #27: configuration tools used to recreate
+ * SecurityManager / ContextManager / AuditLogger while ShellExecutor kept the
+ * originals, so `execute_command` silently diverged from the session tools.
+ */
+function testStaleComponentReferences() {
+  const scratchDir = makeScratchDir();
+  const workDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-cwd-')));
+
+  console.log('\n🧪 Testing component reference stability after config changes (issue #27)...');
+
+  const server = spawn('node', [SERVER_PATH], {
+    cwd: scratchDir,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      MCP_EXEC_SECURITY_LEVEL: 'permissive',
+      MCP_EXEC_LOG_DIR: scratchDir,
+      MCP_EXEC_MONITORING_ENABLED: 'false',
+      MCP_EXEC_DESKTOP_NOTIFICATIONS_ENABLED: 'false',
+      MCP_EXEC_ALLOWED_DIRECTORIES: `${scratchDir},${workDir},/tmp`
+    }
+  });
+
+  let stderr = '';
+  server.stderr.on('data', (d) => { stderr += d.toString(); });
+
+  const pending = new Map();
+  let buffer = '';
+  let nextId = 1;
+
+  server.stdout.on('data', (chunk) => {
+    buffer += chunk.toString();
+    let idx;
+    while ((idx = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!line) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch (e) {
+        continue; // not a JSON-RPC frame
+      }
+      const waiter = pending.get(message.id);
+      if (waiter) {
+        pending.delete(message.id);
+        waiter(message);
+      }
+    }
+  });
+
+  function request(method, params) {
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`Timed out waiting for response to ${method}`));
+      }, 20000);
+      pending.set(id, (message) => {
+        clearTimeout(timer);
+        resolve(message);
+      });
+      server.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    });
+  }
+
+  async function callTool(name, args) {
+    const response = await request('tools/call', { name, arguments: args || {} });
+    if (response.error) {
+      throw new Error(`${name} failed: ${JSON.stringify(response.error)}`);
+    }
+    return response.result.content.map((c) => c.text).join('\n');
+  }
+
+  const failures = [];
+  function check(label, condition, detail) {
+    if (condition) {
+      console.log(`✅ ${label}`);
+    } else {
+      console.log(`❌ ${label}${detail ? ` — ${detail}` : ''}`);
+      failures.push(label);
+    }
+  }
+
+  return (async () => {
+    await request('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'issue-27-test', version: '1.0.0' }
+    });
+
+    // --- Sequence 1: history survives update_context_config -----------------
+    console.log('📝 Sequence 1: history survives update_context_config');
+    await callTool('execute_command', { command: 'pwd' });
+    await callTool('update_context_config', { maxHistorySize: 500 });
+    await callTool('execute_command', { command: 'pwd' });
+
+    const history = await callTool('get_history', {});
+    const historyCount = Number((history.match(/Showing (\d+) command/) || [])[1] || 0);
+    check(
+      'get_history reports 2 entries after update_context_config',
+      historyCount === 2,
+      `got ${historyCount}\n${history}`
+    );
+
+    // --- Sequence 2: set_working_directory still affects execute_command ----
+    console.log('📝 Sequence 2: set_working_directory affects execute_command after a config update');
+    const setCwd = await callTool('set_working_directory', { directory: workDir });
+    check('set_working_directory succeeded', setCwd.includes('"success": true'), setCwd);
+
+    const pwdOutput = await callTool('execute_command', { command: 'pwd' });
+    check(
+      'execute_command runs in the directory set via set_working_directory',
+      pwdOutput.includes(workDir),
+      `expected ${workDir} in:\n${pwdOutput}`
+    );
+
+    // --- Sequence 3: security policy resets apply to execute_command --------
+    console.log('📝 Sequence 3: reset_configuration security applies to execute_command');
+    await callTool('update_security_config', { level: 'strict' });
+
+    const blocked = await callTool('execute_command', { command: 'sudo', args: ['-n', 'true'] });
+    check(
+      'strict mode blocks sudo via execute_command',
+      blocked.includes('blocked by security policy'),
+      blocked
+    );
+
+    await callTool('reset_configuration', { section: 'security' });
+
+    const afterReset = await callTool('execute_command', { command: 'sudo', args: ['-n', 'true'] });
+    check(
+      'reset_configuration security unblocks sudo via execute_command',
+      !afterReset.includes('blocked by security policy'),
+      afterReset
+    );
+
+    // reset_configuration with no section must not throw on the schema-only
+    // 'logging' section.
+    const resetAll = await callTool('reset_configuration', {});
+    check('reset_configuration (all sections) succeeds', resetAll.includes('"success": true'), resetAll);
+
+    return failures;
+  })()
+    .then((result) => {
+      server.kill();
+      if (result.length > 0) {
+        throw new Error(`Issue #27 regressions: ${result.join('; ')}`);
+      }
+      console.log('✅ Component references stayed live across configuration changes');
+    })
+    .catch((error) => {
+      server.kill();
+      if (stderr.trim()) {
+        console.error('📝 Server stderr:\n' + stderr);
+      }
+      throw error;
+    });
+}
+
 // Run the test
 if (require.main === module) {
   testDynamicConfiguration()
+    .then(() => testStaleComponentReferences())
     .then(() => {
       console.log('\n🎉 All dynamic configuration tests passed!');
       process.exit(0);
@@ -400,4 +580,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { testDynamicConfiguration }; 
+module.exports = { testDynamicConfiguration, testStaleComponentReferences }; 

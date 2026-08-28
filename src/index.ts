@@ -1870,8 +1870,8 @@ class MCPShellServer {
               }
             }
 
-            // Recreate security manager with new config
-            this.securityManager = new SecurityManager(this.config.security);
+            // Apply in place so ShellExecutor validates against the new policy
+            this.securityManager.updateConfig(this.config.security);
 
             return {
               content: [
@@ -2579,11 +2579,20 @@ class MCPShellServer {
             const resetResults: Record<string, any> = {};
 
             for (const resetSection of resetSections) {
+              // 'logging' is accepted by the schema but is not a ServerConfig
+              // key; skip anything absent instead of throwing on JSON.parse(undefined).
+              if (this.config[resetSection as keyof ServerConfig] === undefined) {
+                resetResults[resetSection] = 'skipped (no such configuration section)';
+                continue;
+              }
+
               // Record previous values
               const previousValues = JSON.parse(JSON.stringify(this.config[resetSection as keyof ServerConfig]));
-              
-              // Reset to original values
-              this.config[resetSection as keyof ServerConfig] = JSON.parse(JSON.stringify(this.originalConfig[resetSection as keyof ServerConfig]));
+
+              // Reset in place: every component holds a reference to this
+              // section object, so replacing its identity would strand them
+              // on the pre-reset values.
+              this.resetSectionInPlace(resetSection as keyof ServerConfig);
               
               // Record the reset as a configuration change
               const resetSectionConfig = this.config[resetSection as keyof ServerConfig];
@@ -2655,8 +2664,8 @@ class MCPShellServer {
                 break;
             }
 
-            // Recreate security manager with updated blocked commands
-            this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+            // Apply in place so ShellExecutor sees the updated blocked commands
+            this.securityManager.updateConfig(this.config.security);
 
             return {
               content: [
@@ -2711,8 +2720,8 @@ class MCPShellServer {
                 break;
             }
 
-            // Recreate security manager with updated allowed directories
-            this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+            // Apply in place so ShellExecutor sees the updated allowed directories
+            this.securityManager.updateConfig(this.config.security);
 
             return {
               content: [
@@ -2748,8 +2757,8 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('security', { resourceLimits: this.config.security.resourceLimits }, { resourceLimits: previousValues });
 
-            // Recreate security manager
-            this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+            // Apply in place so ShellExecutor sees the new resource limits
+            this.securityManager.updateConfig(this.config.security);
 
             return {
               content: [
@@ -2799,8 +2808,8 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('mcpLogging', this.config.mcpLogging, previousValues);
 
-            // Recreate MCP logger
-            this.mcpLogger = new MCPLogger(this.config.mcpLogging);
+            // Apply in place to keep the notification callback and queue
+            this.mcpLogger.updateConfig(this.config.mcpLogging);
 
             return {
               content: [
@@ -2877,8 +2886,8 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('audit', this.config.audit, previousValues);
 
-            // Recreate audit logger
-            this.auditLogger = new AuditLogger(this.config.audit);
+            // Apply in place so every component keeps writing to this logger
+            this.auditLogger.updateConfig(this.config.audit);
 
             return {
               content: [
@@ -3082,8 +3091,8 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('display', this.config.display, previousValues);
 
-            // Recreate display formatter
-            this.displayFormatter = new DisplayFormatter(this.config.display);
+            // Apply in place
+            this.displayFormatter.updateConfig(this.config.display);
 
             return {
               content: [
@@ -3120,8 +3129,8 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('context', this.config.context, previousValues);
 
-            // Recreate context manager
-            this.contextManager = new ContextManager(this.config.context, this.auditLogger);
+            // Apply in place so history and working directory survive the change
+            this.contextManager.updateConfig(this.config.context);
 
             return {
               content: [
@@ -3795,27 +3804,51 @@ Please start by enabling the terminal viewer service.`,
     });
   }
 
+  /**
+   * Restore a configuration section to its original values without replacing
+   * the section object itself. Components (SecurityManager, ContextManager,
+   * AuditLogger, MonitoringSystem) hold a live reference to these objects, so
+   * a reset that swapped in a fresh object would leave them on stale values.
+   */
+  private resetSectionInPlace(section: keyof ServerConfig): void {
+    const current = this.config[section];
+    const original = this.originalConfig[section];
+
+    if (!current || typeof current !== 'object' || !original || typeof original !== 'object') {
+      // Primitive/absent section: a plain assignment is safe, nothing holds it.
+      (this.config as unknown as Record<string, unknown>)[section] = JSON.parse(JSON.stringify(original ?? null));
+      return;
+    }
+
+    const target = current as Record<string, unknown>;
+    const source = JSON.parse(JSON.stringify(original)) as Record<string, unknown>;
+
+    // Drop keys that were added after startup, then restore the originals.
+    for (const key of Object.keys(target)) {
+      if (!(key in source)) {
+        delete target[key];
+      }
+    }
+    Object.assign(target, source);
+  }
+
   private async reinitializeComponents(section?: string): Promise<void> {
     if (!section || section === 'security') {
-      this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+      this.securityManager.updateConfig(this.config.security);
     }
     if (!section || section === 'context') {
-      this.contextManager = new ContextManager(this.config.context, this.auditLogger);
+      this.contextManager.updateConfig(this.config.context);
     }
     if (!section || section === 'mcpLogging') {
-      this.mcpLogger = new MCPLogger(this.config.mcpLogging || {
-        enabled: true,
-        minLevel: 'info',
-        rateLimitPerMinute: 60,
-        maxQueueSize: 100,
-        includeContext: true
-      });
+      if (this.config.mcpLogging) {
+        this.mcpLogger.updateConfig(this.config.mcpLogging);
+      }
     }
     if (!section || section === 'audit') {
-      this.auditLogger = new AuditLogger(this.config.audit);
+      this.auditLogger.updateConfig(this.config.audit);
     }
     if (!section || section === 'display') {
-      this.displayFormatter = new DisplayFormatter(this.config.display);
+      this.displayFormatter.updateConfig(this.config.display);
     }
     if (!section || section === 'sessions' || section === 'terminalViewer') {
       this.terminalSessionManager = new TerminalSessionManager(
