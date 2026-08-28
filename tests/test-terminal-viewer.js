@@ -97,6 +97,24 @@ function testTerminalViewer() {
 
       server.stdin.write(listResourcesMessage);
     }, 400);
+
+    // Test 5: Blocked command should still be rejected with terminal viewer enabled
+    setTimeout(() => {
+      const blockedCommandMessage = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 6,
+        method: 'tools/call',
+        params: {
+          name: 'execute_command',
+          arguments: {
+            command: 'rm -rf /',
+            enableTerminalViewer: true
+          }
+        }
+      }) + '\n';
+
+      server.stdin.write(blockedCommandMessage);
+    }, 500);
     
     server.stdout.on('data', (data) => {
       stdout += data.toString();
@@ -105,7 +123,8 @@ function testTerminalViewer() {
       if (stdout.includes('toggle_terminal_viewer') &&
           stdout.includes('get_terminal_viewer_status') &&
           stdout.includes('Terminal Viewer Status: Disabled') &&
-          stdout.includes('Hello World!')) {
+          stdout.includes('Hello World!') &&
+          stdout.includes('blocked by security policy')) {
         testPassed = true;
         console.log('✅ Terminal viewer functionality test passed!');
         console.log('\nKey features verified:');
