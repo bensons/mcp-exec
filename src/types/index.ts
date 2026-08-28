@@ -78,11 +78,19 @@ export interface FileSystemDiff {
   commandId: string;
 }
 
+/** Why a command was flagged; monitoring alert rules key off this. */
+export type SecurityCategory =
+  | 'destructive'
+  | 'privilege-escalation'
+  | 'system-control'
+  | 'remote-execution';
+
 export interface ValidationResult {
   allowed: boolean;
   reason?: string;
   suggestions?: string[];
   riskLevel: 'low' | 'medium' | 'high';
+  category?: SecurityCategory;
 }
 
 export interface SecurityProvider {

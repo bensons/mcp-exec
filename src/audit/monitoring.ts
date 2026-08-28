@@ -267,7 +267,7 @@ export class MonitoringSystem {
       id: 'privileged-command',
       name: 'Privileged Command Executed',
       description: 'Command executed with elevated privileges',
-      condition: (log) => log.command.toLowerCase().includes('sudo') || log.command.toLowerCase().includes('su '),
+      condition: (log) => log.securityCheck.category === 'privilege-escalation',
       severity: 'medium',
       enabled: true,
       cooldownMinutes: 10,
@@ -289,10 +289,8 @@ export class MonitoringSystem {
       id: 'suspicious-file-ops',
       name: 'Suspicious File Operations',
       description: 'Potentially dangerous file operations detected',
-      condition: (log) => {
-        const cmd = log.command.toLowerCase();
-        return cmd.includes('rm -rf') || cmd.includes('del /f /s') || cmd.includes('format');
-      },
+      condition: (log) =>
+        log.securityCheck.category === 'destructive' && log.securityCheck.riskLevel === 'high',
       severity: 'critical',
       enabled: true,
       cooldownMinutes: 1,
