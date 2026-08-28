@@ -6,6 +6,22 @@ import * as path from 'path';
 import * as os from 'os';
 import { ValidationResult, LogLevel } from '../types/index';
 import { AuditLogger } from '../audit/logger';
+import { tokenizeCommand, matchesPattern, SubCommand } from './tokenize';
+
+/** A dangerous-command check. `RegExp` satisfies this structurally. */
+interface DangerousCheck {
+  readonly source: string;
+  test(command: string): boolean;
+}
+
+const RM_DESTRUCTIVE_FLAGS = ['r', 'R', 'recursive', 'f', 'force', 'no-preserve-root'];
+
+/** True when any sub-command is an `rm` carrying a recursive/force flag, however the flags are spelled. */
+function hasDestructiveRm(command: string): boolean {
+  return tokenizeCommand(command).some(
+    sub => sub.argv0 === 'rm' && RM_DESTRUCTIVE_FLAGS.some(flag => sub.flags.has(flag))
+  );
+}
 
 export interface SecurityConfig {
   level: 'strict' | 'moderate' | 'permissive';
@@ -27,7 +43,7 @@ export interface SecurityConfig {
 
 export class SecurityManager {
   private config: SecurityConfig;
-  private dangerousPatterns: RegExp[] = [];
+  private dangerousPatterns: DangerousCheck[] = [];
   private systemDirectories: string[] = [];
   private auditLogger?: AuditLogger;
 
@@ -51,8 +67,9 @@ export class SecurityManager {
 
   private initializeDangerousPatterns(): void {
     this.dangerousPatterns = [
-      // File system destruction
-      /rm\s+(-[rf]+|--recursive|--force)/i,
+      // File system destruction. Token-aware so flag order/clustering cannot hide it
+      // (`rm -vrf`, `rm --no-preserve-root -r`, `sudo -u root rm -rf` all match).
+      { source: 'rm with recursive/force flag', test: hasDestructiveRm },
       /del\s+\/[fs]/i,
       /rmdir\s+\/s/i,
       /format\s+[a-z]:/i,
@@ -340,6 +357,39 @@ export class SecurityManager {
     return { allowed: true, riskLevel: 'low' };
   }
 
+  /**
+   * Matches a `blockedCommands` entry against the parsed command.
+   *
+   * Entries are command patterns, not substrings: a single-word entry (`format`)
+   * matches only when it is the command being run, and a multi-word entry
+   * (`rm -rf /`) matches when the same command runs with at least those flags and
+   * operands. An entry prefixed with `re:` is treated as a raw regex escape hatch.
+   */
+  private matchesBlockedCommand(command: string, subCommands: SubCommand[], blocked: string): boolean {
+    const entry = blocked.trim();
+    if (!entry) {
+      return false;
+    }
+
+    if (entry.toLowerCase().startsWith('re:')) {
+      try {
+        return new RegExp(entry.slice(3), 'i').test(command);
+      } catch (error) {
+        this.auditLogger?.warning('Invalid regex in blockedCommands entry', {
+          entry,
+          error: error instanceof Error ? error.message : String(error),
+        }, 'security-validator');
+        return false;
+      }
+    }
+
+    const pattern = tokenizeCommand(entry)[0];
+    if (!pattern) {
+      return false;
+    }
+    return subCommands.some(sub => matchesPattern(sub, pattern));
+  }
+
   async validateCommand(command: string): Promise<ValidationResult> {
     const normalizedCommand = command.trim().toLowerCase();
 
@@ -349,8 +399,9 @@ export class SecurityManager {
     }, 'security-validator');
 
     // Check blocked commands first
+    const subCommands = tokenizeCommand(command);
     for (const blocked of this.config.blockedCommands) {
-      if (normalizedCommand.includes(blocked.toLowerCase())) {
+      if (this.matchesBlockedCommand(command, subCommands, blocked)) {
         this.auditLogger?.warning('Command blocked by explicit block list', {
           command: command.substring(0, 100),
           blockedPattern: blocked,
