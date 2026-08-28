@@ -12,6 +12,13 @@ export declare class IntentTracker {
     private intentPatterns;
     private commandHistory;
     constructor();
+    /**
+     * Pure classification - no side effects, safe to call for suggestions/previews.
+     */
+    classify(command: string, aiContext?: string): CommandIntent;
+    /**
+     * Classify and record the command in history. Call once per executed command.
+     */
     analyzeIntent(command: string, aiContext?: string): CommandIntent;
     getRecentIntents(limit?: number): Array<{
         command: string;

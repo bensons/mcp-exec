@@ -10,26 +10,33 @@ class IntentTracker {
     constructor() {
         this.initializeIntentPatterns();
     }
-    analyzeIntent(command, aiContext) {
+    /**
+     * Pure classification - no side effects, safe to call for suggestions/previews.
+     */
+    classify(command, aiContext) {
         const normalizedCommand = command.toLowerCase().trim();
         // Check for explicit patterns first
         for (const [pattern, intent] of this.intentPatterns) {
             if (pattern.test(normalizedCommand)) {
-                const enhancedIntent = this.enhanceIntentWithContext(intent, aiContext);
-                this.recordIntent(command, enhancedIntent);
-                return enhancedIntent;
+                return this.enhanceIntentWithContext(intent, aiContext);
             }
         }
         // Fallback to heuristic analysis
-        const heuristicIntent = this.analyzeHeuristically(normalizedCommand, aiContext);
-        this.recordIntent(command, heuristicIntent);
-        return heuristicIntent;
+        return this.analyzeHeuristically(normalizedCommand, aiContext);
+    }
+    /**
+     * Classify and record the command in history. Call once per executed command.
+     */
+    analyzeIntent(command, aiContext) {
+        const intent = this.classify(command, aiContext);
+        this.recordIntent(command, intent);
+        return intent;
     }
     getRecentIntents(limit = 10) {
         return this.commandHistory.slice(-limit);
     }
     suggestNextCommands(currentCommand) {
-        const intent = this.analyzeIntent(currentCommand);
+        const intent = this.classify(currentCommand);
         const suggestions = [...intent.suggestedFollowups];
         // Add context-aware suggestions based on recent history
         const recentIntents = this.getRecentIntents(5);
@@ -42,7 +49,7 @@ class IntentTracker {
     }
     initializeIntentPatterns() {
         // File operations
-        this.intentPatterns.set(/^ls|dir/, {
+        this.intentPatterns.set(/^(ls|dir)\b/, {
             category: 'exploration',
             purpose: 'List directory contents',
             confidence: 0.9,
@@ -56,7 +63,7 @@ class IntentTracker {
             relatedCommands: ['ls', 'pwd', 'find'],
             suggestedFollowups: ['ls', 'pwd', 'ls -la'],
         });
-        this.intentPatterns.set(/^cat|less|more|head|tail/, {
+        this.intentPatterns.set(/^(cat|less|more|head|tail)\b/, {
             category: 'inspection',
             purpose: 'View file contents',
             confidence: 0.9,
@@ -86,7 +93,7 @@ class IntentTracker {
             suggestedFollowups: ['npm start', 'npm test', 'npm run dev'],
         });
         // System operations
-        this.intentPatterns.set(/^ps|top|htop/, {
+        this.intentPatterns.set(/^(ps|top|htop)\b/, {
             category: 'monitoring',
             purpose: 'Monitor system processes',
             confidence: 0.9,
@@ -101,7 +108,7 @@ class IntentTracker {
             suggestedFollowups: ['grep <pattern> <file>', 'ls -la <found-file>'],
         });
         // Network operations
-        this.intentPatterns.set(/^curl|wget/, {
+        this.intentPatterns.set(/^(curl|wget)\b/, {
             category: 'network',
             purpose: 'Download or test network resources',
             confidence: 0.9,
