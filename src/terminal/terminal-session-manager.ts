@@ -45,7 +45,7 @@ export class TerminalSessionManager {
     console.error(`[DEBUG] TerminalSessionManager.startSession called with enableTerminalViewer: ${options.enableTerminalViewer}`);
 
     if (this.commandGuard && options.command) {
-      await this.commandGuard(buildFullCommand(options.command, options.args));
+      await this.commandGuard(buildFullCommand(options.command, options.args), options.cwd);
     }
 
     // If terminal viewer is not requested, use fallback
@@ -251,7 +251,8 @@ export class TerminalSessionManager {
     console.error(`[DEBUG] TerminalSessionManager.sendInput called for session ${options.sessionId}`);
 
     if (this.commandGuard) {
-      await this.commandGuard(options.input);
+      // Validate input against the session's own working directory.
+      await this.commandGuard(options.input, this.sessions.get(options.sessionId)?.cwd);
     }
 
     const session = this.sessions.get(options.sessionId);

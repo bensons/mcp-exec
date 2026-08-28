@@ -65,7 +65,9 @@ export interface ValidationResult {
 }
 export interface SecurityProvider {
     securityLevel: 'strict' | 'moderate' | 'permissive';
-    validateCommand(command: string): ValidationResult;
+    validateCommand(command: string, options?: {
+        cwd?: string;
+    }): ValidationResult;
     resourceLimits: {
         maxExecutionTime: number;
         maxMemoryUsage: number;

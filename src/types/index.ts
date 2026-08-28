@@ -90,7 +90,7 @@ export interface SecurityProvider {
   securityLevel: 'strict' | 'moderate' | 'permissive';
   
   // Command validation before execution
-  validateCommand(command: string): ValidationResult;
+  validateCommand(command: string, options?: { cwd?: string }): ValidationResult;
   
   // Resource limits
   resourceLimits: {

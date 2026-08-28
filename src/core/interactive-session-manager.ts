@@ -41,7 +41,7 @@ export class InteractiveSessionManager {
 
   async startSession(options: StartSessionOptions): Promise<string> {
     if (this.commandGuard) {
-      await this.commandGuard(buildFullCommand(options.command, options.args));
+      await this.commandGuard(buildFullCommand(options.command, options.args), options.cwd);
     }
 
     // Check session limit
@@ -116,7 +116,8 @@ export class InteractiveSessionManager {
 
   async sendInput(options: SendInputOptions): Promise<void> {
     if (this.commandGuard) {
-      await this.commandGuard(options.input);
+      // Validate input against the session's own working directory.
+      await this.commandGuard(options.input, this.sessions.get(options.sessionId)?.cwd);
     }
 
     const session = this.sessions.get(options.sessionId);

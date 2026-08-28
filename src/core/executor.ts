@@ -49,10 +49,27 @@ export class ShellExecutor {
     this.intentTracker = new IntentTracker();
     this.sessionManager = new InteractiveSessionManager(
       config.sessions,
-      (command) => assertCommandAllowed(this.securityManager, command, this.auditLogger, {
-        source: 'interactive-session',
-      })
+      async (command, cwd) => assertCommandAllowed(
+        this.securityManager,
+        command,
+        this.auditLogger,
+        { source: 'interactive-session' },
+        await this.getEffectiveCwd(cwd)
+      )
     );
+  }
+
+  /**
+   * Effective working directory a command will run in: explicit cwd, else the
+   * session context directory, else the server's cwd. Relative and `~` paths in
+   * the command are validated against this, not against process.cwd().
+   */
+  private async getEffectiveCwd(cwd?: string): Promise<string> {
+    if (cwd) {
+      return cwd;
+    }
+    const context = await this.contextManager.getCurrentContext();
+    return context.currentDirectory || process.cwd();
   }
 
   async executeCommand(options: ExecuteCommandOptions): Promise<CommandOutput> {
@@ -82,7 +99,14 @@ export class ShellExecutor {
         fullCommand
       }, 'security-validator');
 
-      const securityCheck = await this.securityManager.validateCommand(fullCommand);
+      // Determine the working directory up front: directory checks resolve
+      // relative and `~` paths against it.
+      const context = await this.contextManager.getCurrentContext();
+      const workingDirectory = options.cwd || context.currentDirectory || process.cwd();
+
+      const securityCheck = await this.securityManager.validateCommand(fullCommand, {
+        cwd: workingDirectory,
+      });
 
       if (!securityCheck.allowed) {
         await this.auditLogger.warning('Command blocked by security policy', {
@@ -102,12 +126,6 @@ export class ShellExecutor {
       // Analyze command intent
       const intent = this.intentTracker.analyzeIntent(fullCommand, options.aiContext);
 
-      // Get current context
-      const context = await this.contextManager.getCurrentContext();
-      
-      // Determine working directory
-      const workingDirectory = options.cwd || context.currentDirectory || process.cwd();
-      
       // Merge environment variables
       const environment = {
         ...process.env,
@@ -327,7 +345,8 @@ export class ShellExecutor {
       this.securityManager,
       this.buildFullCommand(options),
       this.auditLogger,
-      { source: 'start_interactive_session' }
+      { source: 'start_interactive_session' },
+      await this.getEffectiveCwd(options.cwd)
     );
     return await this.sessionManager.startSession(options);
   }

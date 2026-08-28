@@ -37,7 +37,41 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SecurityManager = void 0;
+exports.isInside = isInside;
+exports.resolvePath = resolvePath;
 const path = __importStar(require("path"));
+const os = __importStar(require("os"));
+/**
+ * True when `child` is `parent` itself or lives underneath it.
+ * Uses path.relative so allowing `/home/user` does not also allow `/home/user-other`.
+ */
+function isInside(parent, child) {
+    const rel = path.relative(parent, child);
+    return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+/** Expand a leading `~` and resolve against `baseDir` (not the server's own cwd). */
+function resolvePath(target, baseDir) {
+    if (target === '~' || target.startsWith('~/') || target.startsWith(`~${path.sep}`)) {
+        return path.resolve(os.homedir(), target.slice(2) || '.');
+    }
+    return path.resolve(baseDir, target);
+}
+/**
+ * Only tokens containing a path separator (or a leading `~`, or `.`/`..`) are treated
+ * as paths. Bare words like `hello.txt` or `1.2.3` are skipped: without a separator
+ * they cannot escape the working directory, and checking them would false-positive on
+ * ordinary arguments.
+ */
+function isPathLike(token) {
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(token)) {
+        return false; // URL, not a path
+    }
+    return (token.includes('/') ||
+        token.includes(path.sep) ||
+        token.startsWith('~') ||
+        token === '.' ||
+        token === '..');
+}
 class SecurityManager {
     config;
     dangerousPatterns = [];
@@ -117,18 +151,40 @@ class SecurityManager {
             ];
         }
     }
-    validateDirectoryAccess(command) {
-        // Extract potential paths from command
-        const pathMatches = command.match(/(?:^|\s)([\/\\]?[\w\-\.\/\\]+)/g);
-        if (!pathMatches) {
-            return { allowed: true, riskLevel: 'low' };
+    /**
+     * Extract tokens from a command that look like filesystem paths.
+     * Handles quoted strings, `--flag=value` forms and shell redirect prefixes.
+     */
+    extractPathTokens(command) {
+        const tokens = [];
+        const tokenPattern = /"([^"]*)"|'([^']*)'|(\S+)/g;
+        let match;
+        while ((match = tokenPattern.exec(command)) !== null) {
+            let token = match[1] ?? match[2] ?? match[3] ?? '';
+            // Strip leading shell operators/redirects and trailing separators.
+            token = token.replace(/^[<>|&;()]+/, '').replace(/[;)&|]+$/, '');
+            // `--output=/etc/x` / `if=/dev/sda` -> check the value side.
+            const eq = token.indexOf('=');
+            if (eq !== -1) {
+                token = token.slice(eq + 1);
+            }
+            // Unwrap quotes that survived (e.g. --output="/etc/x").
+            token = token.replace(/^["']|["']$/g, '');
+            if (token && isPathLike(token)) {
+                tokens.push(token);
+            }
         }
-        for (const match of pathMatches) {
-            const cleanPath = match.trim();
+        return tokens;
+    }
+    validateDirectoryAccess(command, cwd) {
+        const baseDir = cwd || process.cwd();
+        const allowedDirectories = this.config.allowedDirectories.map(dir => resolvePath(dir, baseDir));
+        for (const token of this.extractPathTokens(command)) {
+            const resolvedPath = resolvePath(token, baseDir);
             // Check if accessing system directories
-            for (const sysDir of this.systemDirectories) {
-                if (cleanPath.startsWith(sysDir)) {
-                    if (this.config.level === 'strict') {
+            if (this.config.level === 'strict') {
+                for (const sysDir of this.systemDirectories) {
+                    if (isInside(sysDir, resolvedPath)) {
                         return {
                             allowed: false,
                             reason: `Access to system directory blocked: ${sysDir}`,
@@ -138,17 +194,13 @@ class SecurityManager {
                     }
                 }
             }
-            // Check allowed directories
-            if (this.config.allowedDirectories.length > 0) {
-                const isAllowed = this.config.allowedDirectories.some(allowedDir => {
-                    const resolvedAllowed = path.resolve(allowedDir);
-                    const resolvedPath = path.resolve(cleanPath);
-                    return resolvedPath.startsWith(resolvedAllowed);
-                });
-                if (!isAllowed && path.isAbsolute(cleanPath)) {
+            // Check allowed directories (relative and `~` paths included, after resolution)
+            if (allowedDirectories.length > 0) {
+                const isAllowed = allowedDirectories.some(allowedDir => isInside(allowedDir, resolvedPath));
+                if (!isAllowed) {
                     return {
                         allowed: false,
-                        reason: `Path not in allowed directories: ${cleanPath}`,
+                        reason: `Path not in allowed directories: ${token}`,
                         riskLevel: 'medium',
                         suggestions: [`Use a path within: ${this.config.allowedDirectories.join(', ')}`],
                     };
@@ -311,7 +363,7 @@ class SecurityManager {
         }
         return { allowed: true, riskLevel: 'low' };
     }
-    async validateCommand(command) {
+    async validateCommand(command, options = {}) {
         const normalizedCommand = command.trim().toLowerCase();
         this.auditLogger?.debug('Starting command validation', {
             command: command.substring(0, 100), // Truncate for logging
@@ -372,7 +424,7 @@ class SecurityManager {
             }
         }
         // Check directory access
-        const directoryCheck = this.validateDirectoryAccess(command);
+        const directoryCheck = this.validateDirectoryAccess(command, options.cwd);
         if (!directoryCheck.allowed) {
             return directoryCheck;
         }

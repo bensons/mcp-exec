@@ -256,7 +256,12 @@ The server supports comprehensive configuration through environment variables wi
 ```bash
 MCP_EXEC_SECURITY_LEVEL=permissive          # strict|moderate|permissive
 MCP_EXEC_CONFIRM_DANGEROUS=false            # Require confirmation for dangerous commands
-MCP_EXEC_ALLOWED_DIRECTORIES="cwd,/tmp"     # Comma-separated allowed directories
+MCP_EXEC_ALLOWED_DIRECTORIES="/home/user,/tmp" # Comma-separated allowed directories.
+                                            # Unset = no directory restriction. A path is allowed
+                                            # only if it is one of these directories or inside it;
+                                            # `/home/user` does not allow `/home/user-other`.
+                                            # Relative and `~` paths are resolved against the
+                                            # session's working directory before the check.
 MCP_EXEC_BLOCKED_COMMANDS="rm -rf /,format" # Comma-separated blocked commands
 MCP_EXEC_TIMEOUT=300000                     # Command timeout in milliseconds
 MCP_EXEC_MAX_MEMORY=1024                    # Maximum memory usage in MB
