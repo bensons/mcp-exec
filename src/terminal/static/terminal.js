@@ -339,6 +339,10 @@ function showError(title, message) {
 
 function showLoading(message = 'Loading terminal...') {
     const terminalElement = document.getElementById('terminal');
+    if (!terminalElement) {
+        console.error('[ERROR] Terminal element not found in showLoading');
+        return;
+    }
     terminalElement.textContent = '';
 
     const loading = document.createElement('div');
