@@ -43,11 +43,16 @@ export interface MonitoringConfig {
   };
 }
 
+const DESKTOP_NOTIFICATION_TIMEOUT_MS = 5000;
+
 export class MonitoringSystem {
   private config: MonitoringConfig;
   private alertRules: Map<string, AlertRule> = new Map();
   private alerts: Alert[] = [];
   private lastAlertTime: Map<string, Date> = new Map();
+  // ponytail: fixed-window rate limit, swap for a sliding window if burst shaping matters
+  private alertWindowStart = Date.now();
+  private alertsInWindow = 0;
 
   constructor(config: MonitoringConfig) {
     this.config = config;
@@ -73,6 +78,16 @@ export class MonitoringSystem {
   async processLogEntry(logEntry: LogEntry): Promise<Alert[]> {
     if (!this.config.enabled) return [];
 
+    // Enforce maxAlertsPerHour
+    const now = Date.now();
+    if (now - this.alertWindowStart >= 60 * 60 * 1000) {
+      this.alertWindowStart = now;
+      this.alertsInWindow = 0;
+    }
+    if (this.config.maxAlertsPerHour > 0 && this.alertsInWindow >= this.config.maxAlertsPerHour) {
+      return [];
+    }
+
     const triggeredAlerts: Alert[] = [];
 
     for (const rule of this.alertRules.values()) {
@@ -89,16 +104,21 @@ export class MonitoringSystem {
 
       // Check condition
       if (rule.condition(logEntry)) {
-        const alert = await this.createAlert(rule, logEntry);
+        const alert = this.createAlert(rule, logEntry);
         triggeredAlerts.push(alert);
+        this.alertsInWindow += 1;
         this.lastAlertTime.set(rule.id, new Date());
+
+        if (this.config.maxAlertsPerHour > 0 && this.alertsInWindow >= this.config.maxAlertsPerHour) {
+          break;
+        }
       }
     }
 
     return triggeredAlerts;
   }
 
-  private async createAlert(rule: AlertRule, logEntry: LogEntry): Promise<Alert> {
+  private createAlert(rule: AlertRule, logEntry: LogEntry): Alert {
     const alert: Alert = {
       id: this.generateAlertId(),
       ruleId: rule.id,
@@ -111,8 +131,9 @@ export class MonitoringSystem {
     };
 
     this.alerts.push(alert);
-    await this.sendNotification(alert);
-    
+    // Fire-and-forget: webhooks and desktop notifiers must never block the command response.
+    void this.sendNotification(alert);
+
     return alert;
   }
 
@@ -179,11 +200,26 @@ export class MonitoringSystem {
 
   async sendDesktopNotification(title: string, message: string): Promise<void> {
     return new Promise((resolve, reject) => {
+      let settled = false;
+
+      // node-notifier spawns terminal-notifier/notify-send, which can hang
+      // indefinitely when no display or notification daemon is available.
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        console.error('Desktop notification timed out after 5000ms');
+        resolve();
+      }, DESKTOP_NOTIFICATION_TIMEOUT_MS);
+      timer.unref();
+
       notifier.notify({
         title,
         message,
         wait: false,
-      }, (err, response, metadata) => {
+      }, (err) => {
+        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
         if (err) {
           console.error('Error sending desktop notification:', err);
           reject(err);

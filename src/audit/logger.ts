@@ -3,6 +3,7 @@
  */
 
 import * as fs from 'fs/promises';
+import { createWriteStream, WriteStream } from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -52,11 +53,16 @@ export interface LogOptions {
   logger?: string; // Optional logger name for categorization
 }
 
+const MAINTENANCE_INTERVAL_MS = 60 * 60 * 1000; // hourly
+
 export class AuditLogger {
   private config: AuditConfig;
   private logFile: string;
   private logs: LogEntry[];
   private monitoringSystem?: MonitoringSystem;
+  private logStream?: WriteStream;
+  private logStreamPath?: string;
+  private maintenanceTimer?: NodeJS.Timeout;
 
   constructor(config: AuditConfig) {
     this.config = config;
@@ -71,6 +77,70 @@ export class AuditLogger {
     if (config.monitoring) {
       this.monitoringSystem = new MonitoringSystem(config.monitoring);
     }
+
+    if (config.enabled) {
+      // Retention/alert pruning used to run on every command; do it on a timer instead.
+      this.maintenanceTimer = setInterval(() => {
+        this.enforceRetention();
+        this.monitoringSystem?.cleanup();
+      }, MAINTENANCE_INTERVAL_MS);
+      this.maintenanceTimer.unref();
+    }
+  }
+
+  /**
+   * Append-only log stream, opened lazily so it picks up any fallback logFile
+   * chosen by initializeLogging(). Writes are fire-and-forget: back-pressure is
+   * ignored, which is acceptable for line-oriented logs and keeps the command
+   * hot path off the event loop.
+   */
+  private getStream(): WriteStream | undefined {
+    if (this.logStream && this.logStreamPath === this.logFile) {
+      return this.logStream;
+    }
+
+    this.logStream?.end();
+    this.logStream = undefined;
+    this.logStreamPath = undefined;
+
+    const stream = createWriteStream(this.logFile, { flags: 'a' });
+    stream.on('error', (error) => {
+      console.error('Failed to write to audit log:', error);
+      if (this.logStream === stream) {
+        this.logStream = undefined;
+        this.logStreamPath = undefined;
+      }
+    });
+
+    this.logStream = stream;
+    this.logStreamPath = this.logFile;
+    return stream;
+  }
+
+  private writeLine(line: string): void {
+    this.getStream()?.write(line);
+  }
+
+  /**
+   * Flush and close the log stream. Called from graceful shutdown.
+   */
+  async flush(): Promise<void> {
+    if (this.maintenanceTimer) {
+      clearInterval(this.maintenanceTimer);
+      this.maintenanceTimer = undefined;
+    }
+
+    const stream = this.logStream;
+    if (!stream) {
+      return;
+    }
+    this.logStream = undefined;
+    this.logStreamPath = undefined;
+
+    await new Promise<void>((resolve) => {
+      stream.once('error', () => resolve());
+      stream.end(() => resolve());
+    });
   }
 
   async logCommand(options: LogCommandOptions): Promise<void> {
@@ -90,15 +160,13 @@ export class AuditLogger {
       aiIntent: options.context.aiIntent,
     };
 
-    await this.writeLogEntry(logEntry);
+    this.writeLogEntry(logEntry);
     this.logs.push(logEntry);
 
-    // Process monitoring alerts
+    // Process monitoring alerts (notifications are dispatched in the background)
     if (this.monitoringSystem) {
       await this.monitoringSystem.processLogEntry(logEntry);
     }
-
-    await this.enforceRetention();
   }
 
   async logError(options: LogErrorOptions): Promise<void> {
@@ -139,7 +207,7 @@ export class AuditLogger {
       },
     };
 
-    await this.writeLogEntry(logEntry);
+    this.writeLogEntry(logEntry);
     this.logs.push(logEntry);
   }
 
@@ -164,11 +232,7 @@ export class AuditLogger {
       severity: LOG_LEVELS[normalizedLevel], // RFC 5424 numeric severity
     };
 
-    try {
-      await fs.appendFile(this.logFile, JSON.stringify(logLine) + '\n');
-    } catch (error) {
-      console.error('Failed to write to audit log:', error);
-    }
+    this.writeLine(JSON.stringify(logLine) + '\n');
   }
 
   // Convenience methods for RFC 5424 log levels
@@ -570,13 +634,8 @@ export class AuditLogger {
     }
   }
 
-  private async writeLogEntry(entry: LogEntry): Promise<void> {
-    try {
-      const logLine = JSON.stringify(entry) + '\n';
-      await fs.appendFile(this.logFile, logLine);
-    } catch (error) {
-      console.error('Failed to write log entry:', error);
-    }
+  private writeLogEntry(entry: LogEntry): void {
+    this.writeLine(JSON.stringify(entry) + '\n');
   }
 
   private shouldLog(level: LogLevel | LegacyLogLevel): boolean {
@@ -610,7 +669,7 @@ export class AuditLogger {
     }
   }
 
-  private async enforceRetention(): Promise<void> {
+  private enforceRetention(): void {
     if (this.config.retention <= 0) {
       return;
     }

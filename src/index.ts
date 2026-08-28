@@ -1406,10 +1406,8 @@ class MCPShellServer {
               });
 
               try {
+                // Command policy is enforced once, by the terminal session manager's commandGuard.
                 const fullCommand = buildFullCommand(parsed.command, parsed.args);
-                await this.assertCommandAllowed(fullCommand, 'execute_command', {
-                  enableTerminalViewer: true,
-                });
 
                 // Ensure terminal viewer service is available
                 if (!this.terminalViewerService) {
@@ -1502,11 +1500,7 @@ class MCPShellServer {
             });
 
             try {
-              const sessionCommand = parsed.command || this.getDefaultShell();
-              await this.assertCommandAllowed(
-                buildFullCommand(sessionCommand, parsed.args),
-                'start_interactive_session'
-              );
+              // Command policy is enforced once, by the interactive session manager's commandGuard.
 
               // Use the session manager directly to create an interactive session
               const context = await this.contextManager.getCurrentContext();
@@ -1565,12 +1559,7 @@ class MCPShellServer {
             });
 
             try {
-              if (parsed.command) {
-                await this.assertCommandAllowed(
-                  buildFullCommand(parsed.command, parsed.args),
-                  'start_terminal_session'
-                );
-              }
+              // Command policy is enforced once, by the terminal session manager's commandGuard.
 
               // Ensure terminal viewer service is available
               if (!this.terminalViewerService) {
@@ -1637,25 +1626,18 @@ class MCPShellServer {
             });
 
             try {
-              await this.assertCommandAllowed(parsed.input, 'send_to_session', {
-                sessionId: parsed.sessionId,
-              });
-
+              // Command policy is enforced once, by each session manager's commandGuard.
               // Try terminal session manager first
               const terminalSession = this.terminalSessionManager?.getSession(parsed.sessionId);
               if (terminalSession) {
-                // If terminal viewer service is available and has this session, use it for input
-                // This ensures proper WebSocket broadcasting
-                if (this.terminalViewerService && this.terminalViewerService.hasSession(parsed.sessionId)) {
-                  this.terminalViewerService.sendInput(parsed.sessionId, parsed.input, parsed.addNewline);
-                } else {
-                  // Fallback to direct terminal session manager
-                  await this.terminalSessionManager!.sendInput({
-                    sessionId: parsed.sessionId,
-                    input: parsed.input,
-                    addNewline: parsed.addNewline,
-                  });
-                }
+                // Always route through the terminal session manager: it holds the same
+                // PTY the viewer service does (viewer sessions are registered from here),
+                // and it is the guarded entry point.
+                await this.terminalSessionManager!.sendInput({
+                  sessionId: parsed.sessionId,
+                  input: parsed.input,
+                  addNewline: parsed.addNewline,
+                });
 
                 return {
                   content: [
