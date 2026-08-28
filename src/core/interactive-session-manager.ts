@@ -14,12 +14,16 @@ export interface StartSessionOptions {
   env?: Record<string, string>;
   shell?: boolean | string;
   aiContext?: string;
+  /** Set when the command was already approved via confirm_command. */
+  skipConfirmation?: boolean;
 }
 
 export interface SendInputOptions {
   sessionId: string;
   input: string;
   addNewline?: boolean;
+  /** Set when the input was already approved via confirm_command. */
+  skipConfirmation?: boolean;
 }
 
 export class InteractiveSessionManager {
@@ -41,7 +45,7 @@ export class InteractiveSessionManager {
 
   async startSession(options: StartSessionOptions): Promise<string> {
     if (this.commandGuard) {
-      await this.commandGuard(buildFullCommand(options.command, options.args));
+      await this.commandGuard(buildFullCommand(options.command, options.args), { skipConfirmation: options.skipConfirmation });
     }
 
     // Check session limit
@@ -116,7 +120,7 @@ export class InteractiveSessionManager {
 
   async sendInput(options: SendInputOptions): Promise<void> {
     if (this.commandGuard) {
-      await this.commandGuard(options.input);
+      await this.commandGuard(options.input, { skipConfirmation: options.skipConfirmation });
     }
 
     const session = this.sessions.get(options.sessionId);

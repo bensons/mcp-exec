@@ -402,6 +402,7 @@ export class SecurityManager {
 
           return {
             allowed: false,
+            requiresConfirmation: true,
             reason: 'Dangerous command requires confirmation',
             riskLevel,
             suggestions: ['Review command carefully before proceeding'],

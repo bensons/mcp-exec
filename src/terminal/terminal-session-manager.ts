@@ -45,7 +45,7 @@ export class TerminalSessionManager {
     console.error(`[DEBUG] TerminalSessionManager.startSession called with enableTerminalViewer: ${options.enableTerminalViewer}`);
 
     if (this.commandGuard && options.command) {
-      await this.commandGuard(buildFullCommand(options.command, options.args));
+      await this.commandGuard(buildFullCommand(options.command, options.args), { skipConfirmation: options.skipConfirmation });
     }
 
     // If terminal viewer is not requested, use fallback
@@ -251,7 +251,7 @@ export class TerminalSessionManager {
     console.error(`[DEBUG] TerminalSessionManager.sendInput called for session ${options.sessionId}`);
 
     if (this.commandGuard) {
-      await this.commandGuard(options.input);
+      await this.commandGuard(options.input, { skipConfirmation: options.skipConfirmation });
     }
 
     const session = this.sessions.get(options.sessionId);
