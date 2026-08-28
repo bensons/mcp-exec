@@ -25,6 +25,7 @@ declare class MCPShellServer {
     private originalConfig;
     constructor(config?: Partial<ServerConfig>);
     private getDefaultShell;
+    private assertCommandAllowed;
     private setupHandlers;
     start(): Promise<void>;
     private setupConnectionMonitoring;

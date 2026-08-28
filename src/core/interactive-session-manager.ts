@@ -5,6 +5,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { InteractiveSession, SessionOutput, SessionInfo, ServerConfig } from '../types/index';
+import { CommandGuard, buildFullCommand } from '../security/command-policy';
 
 export interface StartSessionOptions {
   command: string;
@@ -25,10 +26,12 @@ export class InteractiveSessionManager {
   private sessions: Map<string, InteractiveSession>;
   private config: ServerConfig['sessions'];
   private cleanupInterval: NodeJS.Timeout;
+  private commandGuard?: CommandGuard;
 
-  constructor(config: ServerConfig['sessions']) {
+  constructor(config: ServerConfig['sessions'], commandGuard?: CommandGuard) {
     this.sessions = new Map();
     this.config = config;
+    this.commandGuard = commandGuard;
     
     // Set up periodic cleanup of expired sessions
     this.cleanupInterval = setInterval(() => {
@@ -37,6 +40,10 @@ export class InteractiveSessionManager {
   }
 
   async startSession(options: StartSessionOptions): Promise<string> {
+    if (this.commandGuard) {
+      await this.commandGuard(buildFullCommand(options.command, options.args));
+    }
+
     // Check session limit
     if (this.sessions.size >= this.config.maxInteractiveSessions) {
       throw new Error(`Maximum number of interactive sessions (${this.config.maxInteractiveSessions}) reached`);
@@ -108,6 +115,10 @@ export class InteractiveSessionManager {
   }
 
   async sendInput(options: SendInputOptions): Promise<void> {
+    if (this.commandGuard) {
+      await this.commandGuard(options.input);
+    }
+
     const session = this.sessions.get(options.sessionId);
     if (!session) {
       throw new Error(`Session ${options.sessionId} not found`);
