@@ -104,11 +104,40 @@ export class TerminalViewerService {
     });
   }
 
+  private escapeHtml(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  private escapeJsString(value: string): string {
+    return value
+      .replace(/\\/g, '\\\\')
+      .replace(/'/g, "\\'")
+      .replace(/"/g, '\\"')
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029')
+      .replace(/</g, '\\x3C')
+      .replace(/>/g, '\\x3E');
+  }
+
   private async generateTerminalHTML(sessionId: string): Promise<string> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error('Session not found');
     }
+
+    const escapedSessionIdHtml = this.escapeHtml(sessionId);
+    const escapedCommandHtml = this.escapeHtml(session.command);
+    const escapedStatusHtml = this.escapeHtml(session.status);
+    const escapedStartedHtml = this.escapeHtml(session.startTime.toLocaleString());
+    const escapedSessionIdJs = this.escapeJsString(sessionId);
+    const escapedHostJs = this.escapeJsString(this.config.host);
 
     return `
 <!DOCTYPE html>
@@ -116,18 +145,18 @@ export class TerminalViewerService {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Terminal: ${session.command}</title>
+    <title>Terminal: ${escapedCommandHtml}</title>
     <link rel="stylesheet" href="/static/xterm.css">
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
     <div class="terminal-container">
         <div class="terminal-header">
-            <h1>Terminal Session: ${session.command}</h1>
+            <h1>Terminal Session: ${escapedCommandHtml}</h1>
             <div class="session-info">
-                <span>Session ID: ${sessionId}</span>
-                <span>Status: <span id="status">${session.status}</span></span>
-                <span>Started: ${session.startTime.toLocaleString()}</span>
+                <span>Session ID: ${escapedSessionIdHtml}</span>
+                <span>Status: <span id="status">${escapedStatusHtml}</span></span>
+                <span>Started: ${escapedStartedHtml}</span>
             </div>
         </div>
         <div id="terminal"></div>
@@ -142,7 +171,7 @@ export class TerminalViewerService {
             console.log('[DEBUG] Window loaded, checking if initTerminal exists...');
             if (typeof initTerminal === 'function') {
                 console.log('[DEBUG] initTerminal function found, calling it...');
-                initTerminal('${sessionId}', '${this.config.host}', ${this.config.port});
+                initTerminal('${escapedSessionIdJs}', '${escapedHostJs}', ${this.config.port});
             } else {
                 console.error('[ERROR] initTerminal function not found!');
                 alert('Error: initTerminal function not found. Check if terminal.js loaded correctly.');

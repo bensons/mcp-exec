@@ -304,24 +304,60 @@ function updateSessionStatus(status) {
 
 function showError(title, message) {
     const terminalElement = document.getElementById('terminal');
-    terminalElement.innerHTML = `
-        <div class="error-container">
-            <div class="error-icon">⚠️</div>
-            <div class="error-title">${title}</div>
-            <div class="error-message">${message}</div>
-            <button class="retry-button" onclick="location.reload()">Retry</button>
-        </div>
-    `;
+    if (!terminalElement) {
+        console.error('[ERROR] Terminal element not found in showError');
+        return;
+    }
+    terminalElement.textContent = '';
+
+    const container = document.createElement('div');
+    container.className = 'error-container';
+
+    const icon = document.createElement('div');
+    icon.className = 'error-icon';
+    icon.textContent = '⚠️';
+
+    const titleDiv = document.createElement('div');
+    titleDiv.className = 'error-title';
+    titleDiv.textContent = title;
+
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'error-message';
+    messageDiv.textContent = message;
+
+    const retryButton = document.createElement('button');
+    retryButton.className = 'retry-button';
+    retryButton.textContent = 'Retry';
+    retryButton.addEventListener('click', () => location.reload());
+
+    container.appendChild(icon);
+    container.appendChild(titleDiv);
+    container.appendChild(messageDiv);
+    container.appendChild(retryButton);
+    terminalElement.appendChild(container);
 }
 
 function showLoading(message = 'Loading terminal...') {
     const terminalElement = document.getElementById('terminal');
-    terminalElement.innerHTML = `
-        <div class="loading">
-            <div class="loading-spinner"></div>
-            <div class="loading-text">${message}</div>
-        </div>
-    `;
+    if (!terminalElement) {
+        console.error('[ERROR] Terminal element not found in showLoading');
+        return;
+    }
+    terminalElement.textContent = '';
+
+    const loading = document.createElement('div');
+    loading.className = 'loading';
+
+    const spinner = document.createElement('div');
+    spinner.className = 'loading-spinner';
+
+    const text = document.createElement('div');
+    text.className = 'loading-text';
+    text.textContent = message;
+
+    loading.appendChild(spinner);
+    loading.appendChild(text);
+    terminalElement.appendChild(loading);
 }
 
 function hideLoading() {

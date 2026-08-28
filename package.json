@@ -51,8 +51,8 @@
     "express": "^5.2.1",
     "node-notifier": "^10.0.1",
     "node-pty": "^1.0.0",
-    "uuid": "^14.0.0",
-    "ws": "^8.18.3",
+    "uuid": "^14.0.1",
+    "ws": "^8.21.0",
     "zod": "^3.25.67"
   },
   "devDependencies": {
