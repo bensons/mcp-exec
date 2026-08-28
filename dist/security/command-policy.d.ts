@@ -4,7 +4,7 @@
  */
 import { SecurityManager } from './manager';
 import { AuditLogger } from '../audit/logger';
-export type CommandGuard = (command: string, cwd?: string) => Promise<void>;
+export type CommandGuard = (command: string) => Promise<void>;
 export declare function buildFullCommand(command?: string, args?: string[]): string;
-export declare function assertCommandAllowed(securityManager: SecurityManager, command: string, auditLogger?: AuditLogger, context?: Record<string, unknown>, cwd?: string): Promise<void>;
+export declare function assertCommandAllowed(securityManager: SecurityManager, command: string, auditLogger?: AuditLogger, context?: Record<string, unknown>): Promise<void>;
 //# sourceMappingURL=command-policy.d.ts.map

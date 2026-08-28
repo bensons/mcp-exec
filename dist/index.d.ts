@@ -25,12 +25,6 @@ declare class MCPShellServer {
     private originalConfig;
     constructor(config?: Partial<ServerConfig>);
     private getDefaultShell;
-    /**
-     * Effective working directory a command will run in: explicit cwd, else the
-     * session context directory, else the server's cwd. Relative and `~` paths in
-     * the command are validated against this, not against process.cwd().
-     */
-    private getEffectiveCwd;
     private assertCommandAllowed;
     private setupHandlers;
     start(): Promise<void>;

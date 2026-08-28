@@ -25,19 +25,9 @@ class ShellExecutor {
         this.config = config;
         this.outputProcessor = new output_processor_1.OutputProcessor(config.output);
         this.intentTracker = new intent_tracker_1.IntentTracker();
-        this.sessionManager = new interactive_session_manager_1.InteractiveSessionManager(config.sessions, async (command, cwd) => (0, command_policy_1.assertCommandAllowed)(this.securityManager, command, this.auditLogger, { source: 'interactive-session' }, await this.getEffectiveCwd(cwd)));
-    }
-    /**
-     * Effective working directory a command will run in: explicit cwd, else the
-     * session context directory, else the server's cwd. Relative and `~` paths in
-     * the command are validated against this, not against process.cwd().
-     */
-    async getEffectiveCwd(cwd) {
-        if (cwd) {
-            return cwd;
-        }
-        const context = await this.contextManager.getCurrentContext();
-        return context.currentDirectory || process.cwd();
+        this.sessionManager = new interactive_session_manager_1.InteractiveSessionManager(config.sessions, (command) => (0, command_policy_1.assertCommandAllowed)(this.securityManager, command, this.auditLogger, {
+            source: 'interactive-session',
+        }));
     }
     async executeCommand(options) {
         const commandId = (0, uuid_1.v4)();
@@ -62,13 +52,7 @@ class ShellExecutor {
                 commandId,
                 fullCommand
             }, 'security-validator');
-            // Determine the working directory up front: directory checks resolve
-            // relative and `~` paths against it.
-            const context = await this.contextManager.getCurrentContext();
-            const workingDirectory = options.cwd || context.currentDirectory || process.cwd();
-            const securityCheck = await this.securityManager.validateCommand(fullCommand, {
-                cwd: workingDirectory,
-            });
+            const securityCheck = await this.securityManager.validateCommand(fullCommand);
             if (!securityCheck.allowed) {
                 await this.auditLogger.warning('Command blocked by security policy', {
                     commandId,
@@ -84,6 +68,10 @@ class ShellExecutor {
             }, 'security-validator');
             // Analyze command intent
             const intent = this.intentTracker.analyzeIntent(fullCommand, options.aiContext);
+            // Get current context
+            const context = await this.contextManager.getCurrentContext();
+            // Determine working directory
+            const workingDirectory = options.cwd || context.currentDirectory || process.cwd();
             // Merge environment variables
             const environment = {
                 ...process.env,
@@ -264,7 +252,7 @@ class ShellExecutor {
     }
     // Public method to start a new interactive session
     async startInteractiveSession(options) {
-        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, this.buildFullCommand(options), this.auditLogger, { source: 'start_interactive_session' }, await this.getEffectiveCwd(options.cwd));
+        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, this.buildFullCommand(options), this.auditLogger, { source: 'start_interactive_session' });
         return await this.sessionManager.startSession(options);
     }
     // Public method to send input to a session

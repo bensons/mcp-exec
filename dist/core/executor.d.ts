@@ -24,12 +24,6 @@ export declare class ShellExecutor {
     private sessionManager;
     private config;
     constructor(securityManager: SecurityManager, contextManager: ContextManager, auditLogger: AuditLogger, config: ServerConfig);
-    /**
-     * Effective working directory a command will run in: explicit cwd, else the
-     * session context directory, else the server's cwd. Relative and `~` paths in
-     * the command are validated against this, not against process.cwd().
-     */
-    private getEffectiveCwd;
     executeCommand(options: ExecuteCommandOptions): Promise<CommandOutput>;
     getIntentSummary(): {
         categories: Record<string, number>;
