@@ -12,9 +12,18 @@ import { SecurityManager } from '../security/manager';
 import { assertCommandAllowed } from '../security/command-policy';
 import { ContextManager } from '../context/manager';
 import { AuditLogger } from '../audit/logger';
-import { OutputProcessor } from '../utils/output-processor';
+import { OutputProcessor, RawCommandResult } from '../utils/output-processor';
 import { IntentTracker } from '../utils/intent-tracker';
 import { InteractiveSessionManager, StartSessionOptions, SendInputOptions } from './interactive-session-manager';
+
+/** How long a timed-out process gets to handle SIGTERM before SIGKILL. */
+const SIGKILL_GRACE_MS = 2000;
+/** How long after SIGKILL we wait for 'close' before settling anyway. */
+const SIGKILL_SETTLE_MS = 500;
+
+function signalNumber(signal: NodeJS.Signals): number {
+  return (os.constants.signals as unknown as Record<string, number>)[signal] ?? 0;
+}
 
 export interface ExecuteCommandOptions {
   command: string;
@@ -239,7 +248,7 @@ export class ShellExecutor {
     command: string,
     args: string[],
     options: SpawnOptions & { timeout: number }
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  ): Promise<RawCommandResult> {
     return new Promise((resolve, reject) => {
       const { timeout, ...spawnOptions } = options;
 
@@ -266,18 +275,67 @@ export class ShellExecutor {
       const child = spawn(execCommand, execArgs, {
         ...spawnOptions,
         stdio: ['pipe', 'pipe', 'pipe'],
+        // Own process group so a timeout can kill the whole tree, not just the
+        // wrapping shell (`a; b` would otherwise leave `b` running as an orphan).
+        detached: process.platform !== 'win32',
       });
 
       let stdout = '';
       let stderr = '';
-      let timeoutId: NodeJS.Timeout;
+      let settled = false;
+      let timedOut = false;
+      const timers: NodeJS.Timeout[] = [];
+
+      const settle = (result: RawCommandResult) => {
+        if (settled) return;
+        settled = true;
+        timers.forEach(clearTimeout);
+        resolve(result);
+      };
+
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        timers.forEach(clearTimeout);
+        reject(error);
+      };
+
+      const timeoutResult = (): RawCommandResult => ({
+        stdout,
+        stderr,
+        exitCode: 124, // coreutils `timeout` convention
+        timedOut: true,
+        timeoutMs: timeout,
+      });
+
+      const killTree = (signal: NodeJS.Signals) => {
+        try {
+          if (child.pid !== undefined && process.platform !== 'win32') {
+            process.kill(-child.pid, signal);
+          } else {
+            child.kill(signal);
+          }
+        } catch {
+          // Process (group) already gone
+        }
+      };
 
       // Set up timeout
       if (timeout > 0) {
-        timeoutId = setTimeout(() => {
-          child.kill('SIGTERM');
-          reject(new Error(`Command timed out after ${timeout}ms`));
-        }, timeout);
+        timers.push(setTimeout(() => {
+          timedOut = true;
+          killTree('SIGTERM');
+
+          const sigkill = setTimeout(() => {
+            killTree('SIGKILL');
+            // Hard fallback: settle even if 'close' never arrives
+            const giveUp = setTimeout(() => settle(timeoutResult()), SIGKILL_SETTLE_MS);
+            giveUp.unref();
+            timers.push(giveUp);
+          }, SIGKILL_GRACE_MS);
+          sigkill.unref();
+          timers.push(sigkill);
+        }, timeout));
       }
 
       // Collect output
@@ -290,24 +348,25 @@ export class ShellExecutor {
       });
 
       // Handle completion
-      child.on('close', (code) => {
-        if (timeoutId) {
-          clearTimeout(timeoutId);
+      child.on('close', (code, signal) => {
+        if (timedOut) {
+          // Return the partial output collected before the timeout
+          settle(timeoutResult());
+          return;
         }
 
-        resolve({
+        settle({
           stdout,
           stderr,
-          exitCode: code || 0,
+          // code is null when the process was terminated by a signal
+          exitCode: code ?? (signal ? 128 + signalNumber(signal) : 1),
+          signal: signal ?? undefined,
         });
       });
 
       // Handle errors
       child.on('error', (error) => {
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-        }
-        reject(error);
+        fail(error);
       });
     });
   }
