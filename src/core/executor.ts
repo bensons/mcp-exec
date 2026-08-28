@@ -341,6 +341,16 @@ export class ShellExecutor {
     return await this.sessionManager.readOutput(sessionId);
   }
 
+  /**
+   * Apply a new config to the live components instead of recreating the
+   * executor, which would orphan every running interactive session.
+   */
+  updateConfig(config: ServerConfig): void {
+    this.config = config;
+    this.outputProcessor.updateConfig(config.output);
+    this.sessionManager.updateConfig(config.sessions);
+  }
+
   async shutdown(): Promise<void> {
     await this.sessionManager.shutdown();
   }

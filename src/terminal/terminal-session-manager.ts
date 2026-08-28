@@ -39,6 +39,20 @@ export class TerminalSessionManager {
     this.cleanupInterval = setInterval(() => {
       this.cleanupExpiredSessions();
     }, 60000); // Check every minute
+    this.cleanupInterval.unref();
+  }
+
+  /**
+   * Swap in new config without recreating the manager (which would orphan every
+   * running PTY / child process). Limits/timeouts are read at call time.
+   */
+  updateConfig(
+    config: ServerConfig['sessions'],
+    terminalViewerConfig: ServerConfig['terminalViewer']
+  ): void {
+    this.config = config;
+    this.terminalViewerConfig = terminalViewerConfig;
+    this.fallbackSessionManager.updateConfig(config);
   }
 
   async startSession(options: TerminalStartSessionOptions): Promise<string> {

@@ -37,6 +37,15 @@ export class InteractiveSessionManager {
     this.cleanupInterval = setInterval(() => {
       this.cleanupExpiredSessions();
     }, 60000); // Check every minute
+    this.cleanupInterval.unref();
+  }
+
+  /**
+   * Swap in a new sessions config without recreating the manager (which would
+   * orphan every running child process). Limits/timeouts are read at call time.
+   */
+  updateConfig(config: ServerConfig['sessions']): void {
+    this.config = config;
   }
 
   async startSession(options: StartSessionOptions): Promise<string> {

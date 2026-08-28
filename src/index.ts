@@ -2915,12 +2915,9 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('sessions', this.config.sessions, previousValues);
 
-            // Recreate terminal session manager
-            this.terminalSessionManager = new TerminalSessionManager(
-              this.config.sessions,
-              this.config.terminalViewer,
-              (command) => this.assertCommandAllowed(command, 'terminal-session')
-            );
+            // Apply the new limits to the live managers (recreating them would
+            // orphan every running session).
+            await this.reinitializeComponents('sessions');
 
             return {
               content: [
@@ -2969,12 +2966,9 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('terminalViewer', this.config.terminalViewer, previousValues);
 
-            // Recreate terminal session manager
-            this.terminalSessionManager = new TerminalSessionManager(
-              this.config.sessions,
-              this.config.terminalViewer,
-              (command) => this.assertCommandAllowed(command, 'terminal-session')
-            );
+            // Apply the new settings to the live manager (recreating it would
+            // orphan every running session).
+            await this.reinitializeComponents('terminalViewer');
 
             // Restart terminal viewer service if enabled
             if (this.config.terminalViewer.enabled && this.terminalViewerService) {
@@ -3024,13 +3018,9 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('output', this.config.output, previousValues);
 
-            // Recreate shell executor with new config
-            this.shellExecutor = new ShellExecutor(
-              this.securityManager,
-              this.contextManager,
-              this.auditLogger,
-              this.config
-            );
+            // Apply the new output config to the live executor (recreating it
+            // would orphan every running interactive session).
+            await this.reinitializeComponents('output');
 
             return {
               content: [
@@ -3817,20 +3807,14 @@ Please start by enabling the terminal viewer service.`,
     if (!section || section === 'display') {
       this.displayFormatter = new DisplayFormatter(this.config.display);
     }
+    // Session managers are never recreated: that would orphan every running
+    // PTY / child process (unreachable by list_sessions / kill_session) and leak
+    // the old manager's cleanup timer. Swap the config in place instead.
     if (!section || section === 'sessions' || section === 'terminalViewer') {
-      this.terminalSessionManager = new TerminalSessionManager(
-        this.config.sessions,
-        this.config.terminalViewer,
-        (command) => this.assertCommandAllowed(command, 'terminal-session')
-      );
+      this.terminalSessionManager?.updateConfig(this.config.sessions, this.config.terminalViewer);
     }
-    if (!section || section === 'output') {
-      this.shellExecutor = new ShellExecutor(
-        this.securityManager,
-        this.contextManager,
-        this.auditLogger,
-        this.config
-      );
+    if (!section || section === 'sessions' || section === 'output') {
+      this.shellExecutor.updateConfig(this.config);
     }
   }
 
