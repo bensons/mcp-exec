@@ -1,209 +1,218 @@
 #!/usr/bin/env node
 
 /**
- * Test script for session persistence functionality
+ * Test script for session-file persistence (issue #31).
+ *
+ * Verifies that the session snapshot:
+ *  - lives next to the audit log (MCP_EXEC_LOG_DIR/session.json), not process.cwd()
+ *  - is written a handful of times for 200 commands (debounced), not once per command
+ *  - stays small (< 200 KB) with truncated output
+ *  - never contains the inherited process environment (no SUPER_SECRET)
+ *  - restores history (and its output cache) on the next server start
  */
 
 const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
-function testSessionPersistence() {
-  return new Promise((resolve, reject) => {
-    const serverPath = path.resolve(__dirname, '..', 'dist', 'index.js');
-    
-    console.log('🧪 Testing session persistence functionality...');
-    console.log(`Server path: ${serverPath}`);
-    
-    const server = spawn('node', [serverPath], {
-      stdio: ['pipe', 'pipe', 'pipe']
+const SERVER_PATH = path.resolve(__dirname, '..', 'dist', 'index.js');
+const COMMAND_COUNT = 200;
+const MAX_SESSION_FILE_BYTES = 200 * 1024;
+const MAX_WRITES = 20; // "a handful" -- one write per command would be ~200
+
+class Client {
+  constructor(logDir, extraEnv = {}) {
+    this.proc = spawn('node', [SERVER_PATH], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        MCP_EXEC_LOG_DIR: logDir,
+        MCP_EXEC_TERMINAL_VIEWER_ENABLED: 'false',
+        ...extraEnv,
+      },
     });
-    
-    let stdout = '';
-    let stderr = '';
-    let testPassed = false;
-    let sessionId = null;
-    
-    // Send MCP initialization message
-    const initMessage = JSON.stringify({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2024-11-05',
-        capabilities: {
-          roots: {
-            listChanged: false
-          }
-        },
-        clientInfo: {
-          name: 'test-client',
-          version: '1.0.0'
-        }
+    this.nextId = 1;
+    this.pending = new Map();
+    this.buffer = '';
+    this.proc.stdout.on('data', (chunk) => this.onData(chunk));
+    this.proc.stderr.on('data', () => {}); // server logs progress to stderr
+  }
+
+  onData(chunk) {
+    this.buffer += chunk.toString();
+    let index;
+    while ((index = this.buffer.indexOf('\n')) >= 0) {
+      const line = this.buffer.slice(0, index).trim();
+      this.buffer = this.buffer.slice(index + 1);
+      if (!line) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        continue;
       }
-    }) + '\n';
-    
-    server.stdin.write(initMessage);
-    
-    // Test 1: Create a terminal session
-    setTimeout(() => {
-      console.log('Creating terminal session...');
-      const executeMessage = JSON.stringify({
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: {
-          name: 'execute_command',
-          arguments: {
-            command: 'echo',
-            args: ['Session persistence test'],
-            enableTerminalViewer: true
-          }
-        }
-      }) + '\n';
-      
-      server.stdin.write(executeMessage);
-    }, 200);
-    
-    // Test 2: List sessions to verify it appears
-    setTimeout(() => {
-      console.log('Listing sessions...');
-      const listMessage = JSON.stringify({
-        jsonrpc: '2.0',
-        id: 3,
-        method: 'tools/call',
-        params: {
-          name: 'list_sessions',
-          arguments: {}
-        }
-      }) + '\n';
-      
-      server.stdin.write(listMessage);
-    }, 400);
-    
-    // Test 3: Read session output
-    setTimeout(() => {
-      if (sessionId) {
-        console.log(`Reading session output for ${sessionId}...`);
-        const readMessage = JSON.stringify({
-          jsonrpc: '2.0',
-          id: 4,
-          method: 'tools/call',
-          params: {
-            name: 'read_session_output',
-            arguments: {
-              sessionId: sessionId
-            }
-          }
-        }) + '\n';
-        
-        server.stdin.write(readMessage);
+      const resolve = this.pending.get(message.id);
+      if (resolve) {
+        this.pending.delete(message.id);
+        resolve(message);
       }
-    }, 600);
-    
-    // Test 4: Get terminal viewer status
-    setTimeout(() => {
-      console.log('Getting terminal viewer status...');
-      const statusMessage = JSON.stringify({
-        jsonrpc: '2.0',
-        id: 5,
-        method: 'tools/call',
-        params: {
-          name: 'get_terminal_viewer_status',
-          arguments: {}
-        }
-      }) + '\n';
-      
-      server.stdin.write(statusMessage);
-    }, 800);
-    
-    server.stdout.on('data', (data) => {
-      const output = data.toString();
-      stdout += output;
-      
-      // Extract session ID from terminal session creation response
-      if (output.includes('Terminal Session Created') && !sessionId) {
-        const match = output.match(/Session ID.*?`([^`]+)`/);
-        if (match) {
-          sessionId = match[1];
-          console.log(`✅ Extracted session ID: ${sessionId}`);
-        }
-      }
-      
-      // Check for successful responses
-      if (stdout.includes('Terminal Session Created') &&
-          stdout.includes('terminalSessions') &&
-          stdout.includes('sessionType') &&
-          stdout.includes('Terminal Viewer Status: Enabled')) {
-        
-        // Parse the list_sessions response to verify session count
-        try {
-          const listSessionsMatch = stdout.match(/totalSessions.*?(\d+)/);
-          const terminalSessionsMatch = stdout.match(/terminalSessions.*?(\d+)/);
-          
-          if (listSessionsMatch && terminalSessionsMatch) {
-            const totalSessions = parseInt(listSessionsMatch[1]);
-            const terminalSessions = parseInt(terminalSessionsMatch[1]);
-            
-            console.log(`✅ Total sessions: ${totalSessions}`);
-            console.log(`✅ Terminal sessions: ${terminalSessions}`);
-            
-            if (totalSessions > 0 && terminalSessions > 0) {
-              testPassed = true;
-              console.log('✅ Session persistence test passed!');
-              console.log('\nKey features verified:');
-              console.log('• Terminal sessions are created successfully');
-              console.log('• Sessions appear in list_sessions output');
-              console.log('• Session output can be read');
-              console.log('• Terminal viewer shows active sessions');
-              console.log('• Session persistence is working correctly');
-              
-              server.kill();
-              resolve();
-            }
-          }
-        } catch (error) {
-          console.error('Error parsing session data:', error);
-        }
-      }
+    }
+  }
+
+  request(method, params) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Timed out waiting for ${method} (id ${id})`));
+      }, 30000);
+      this.pending.set(id, (message) => {
+        clearTimeout(timer);
+        resolve(message);
+      });
+      this.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
     });
-    
-    server.stderr.on('data', (data) => {
-      const output = data.toString();
-      stderr += output;
-      console.log('STDERR:', output);
+  }
+
+  async initialize() {
+    await this.request('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'session-persistence-test', version: '1.0.0' },
     });
-    
-    server.on('close', (code) => {
-      console.log(`Server closed with code: ${code}`);
-      if (!testPassed) {
-        console.error('❌ Session persistence test failed');
-        console.error('Exit code:', code);
-        console.error('Full stdout:', stdout);
-        console.error('Full stderr:', stderr);
-        reject(new Error('Session persistence test failed'));
+  }
+
+  call(name, args) {
+    return this.request('tools/call', { name, arguments: args });
+  }
+
+  shutdown(signal = 'SIGTERM') {
+    return new Promise((resolve) => {
+      this.proc.on('close', resolve);
+      this.proc.kill(signal);
+      setTimeout(() => {
+        this.proc.kill('SIGKILL');
+        resolve();
+      }, 8000).unref();
+    });
+  }
+}
+
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+  console.log(`✅ ${message}`);
+}
+
+async function run() {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-session-'));
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-cwd-'));
+  const sessionFile = path.join(logDir, 'session.json');
+  const legacyFile = path.join(workDir, '.mcp-exec-session.json');
+
+  console.log('🧪 Testing session-file persistence (issue #31)');
+  console.log(`   log dir: ${logDir}`);
+
+  // Count distinct session-file writes while commands are running.
+  const seenMtimes = new Set();
+  const poller = setInterval(() => {
+    try {
+      seenMtimes.add(fs.statSync(sessionFile).mtimeMs);
+    } catch {
+      // not written yet
+    }
+  }, 25);
+
+  const client = new Client(logDir, { SUPER_SECRET: 'abc123', PWD: workDir });
+  try {
+    await client.initialize();
+
+    for (let i = 0; i < COMMAND_COUNT; i++) {
+      const response = await client.call('execute_command', {
+        command: 'true',
+        args: [],
+        cwd: workDir,
+      });
+      if (response.error) {
+        throw new Error(`execute_command failed: ${JSON.stringify(response.error)}`);
       }
-    });
-    
-    server.on('error', (error) => {
-      console.error('❌ Error starting server:', error);
-      reject(error);
-    });
-    
-    // Timeout after 15 seconds
-    setTimeout(() => {
-      if (!testPassed) {
-        console.error('❌ Session persistence test timed out');
-        console.error('Stdout so far:', stdout);
-        console.error('Stderr so far:', stderr);
-        server.kill();
-        reject(new Error('Test timeout'));
-      }
-    }, 15000);
-  });
+    }
+    console.log(`   ran ${COMMAND_COUNT} commands`);
+
+    // Let the trailing debounce timer fire, then flush on shutdown.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  } finally {
+    clearInterval(poller);
+    await client.shutdown();
+  }
+
+  try {
+    seenMtimes.add(fs.statSync(sessionFile).mtimeMs);
+  } catch {
+    // handled by the assertion below
+  }
+
+  assert(fs.existsSync(sessionFile), `session file written to the log directory (${sessionFile})`);
+  assert(!fs.existsSync(legacyFile), 'no .mcp-exec-session.json written to the working directory');
+  assert(!fs.existsSync(path.join(process.cwd(), '.mcp-exec-session.json')),
+    'no .mcp-exec-session.json written to the repo root');
+
+  const stats = fs.statSync(sessionFile);
+  assert(stats.size < MAX_SESSION_FILE_BYTES,
+    `session file stays under 200 KB (${(stats.size / 1024).toFixed(1)} KB)`);
+  assert(seenMtimes.size <= MAX_WRITES,
+    `session file written ${seenMtimes.size} times for ${COMMAND_COUNT} commands (<= ${MAX_WRITES})`);
+
+  const raw = fs.readFileSync(sessionFile, 'utf-8');
+  assert(!raw.includes('abc123') && !raw.includes('SUPER_SECRET'),
+    'inherited secret env var (SUPER_SECRET=abc123) is absent from the session file');
+
+  const data = JSON.parse(raw);
+  assert(typeof data.sessionId === 'string', 'session file records a sessionId');
+  assert(data.environmentVariables === undefined && typeof data.environmentOverrides === 'object',
+    'session file stores environmentOverrides only, not a full environment snapshot');
+  assert(data.commandHistory.length <= 50,
+    `command history capped at 50 entries (${data.commandHistory.length})`);
+  assert(data.commandHistory.every((e) => e.environment === undefined),
+    'history entries carry no per-command environment copy');
+  assert(data.commandHistory.every((e) => (e.output.stdout || '').length <= 1024 &&
+    (e.output.stderr || '').length <= 1024), 'history entry output truncated to 1 KB');
+
+  // Restart against the same log dir: history must come back.
+  const second = new Client(logDir, {});
+  try {
+    await second.initialize();
+    const history = await second.call('get_history', { limit: 5 });
+    const text = history.result.content[0].text;
+    assert(/Showing 5 command\(s\)/.test(text) && text.includes('`true`'),
+      'restored history is available after restart');
+  } finally {
+    await second.shutdown();
+  }
+
+  // loadSession must rebuild the output cache so get_output-style lookups hit.
+  const { ContextManager } = require(path.resolve(__dirname, '..', 'dist', 'context', 'manager.js'));
+  process.env.MCP_EXEC_LOG_DIR = logDir;
+  const manager = new ContextManager(
+    { preserveWorkingDirectory: true, sessionPersistence: true, maxHistorySize: 100 }
+  );
+  await manager.loadSession();
+  const restoredId = data.commandHistory[data.commandHistory.length - 1].id;
+  const cached = await manager.getOutput(restoredId);
+  assert(cached !== undefined && cached.exitCode === 0,
+    'output cache rebuilt from restored history entries');
+  assert(process.env.PATH === undefined ||
+    (await manager.getCurrentContext()).environmentVariables.PATH === process.env.PATH,
+    'live process environment is preserved on load (overrides merged on top)');
+
+  fs.rmSync(logDir, { recursive: true, force: true });
+  fs.rmSync(workDir, { recursive: true, force: true });
 }
 
 if (require.main === module) {
-  testSessionPersistence()
+  run()
     .then(() => {
       console.log('\n🎉 Session persistence test completed successfully!');
       process.exit(0);
@@ -214,4 +223,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { testSessionPersistence };
+module.exports = { run };

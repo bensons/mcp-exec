@@ -2,6 +2,7 @@
  * Context manager for preserving state across command executions
  */
 
+import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { v4 as uuidv4 } from 'uuid';
@@ -19,6 +20,26 @@ export interface ContextConfig {
   preserveWorkingDirectory: boolean;
   sessionPersistence: boolean;
   maxHistorySize: number;
+}
+
+/** Persisted-session limits (issue #31): keep the file small and cheap to write. */
+const PERSIST_DEBOUNCE_MS = 1000;
+const PERSIST_MAX_HISTORY = 50;
+const PERSIST_MAX_OUTPUT_CHARS = 1024;
+const PERSIST_MAX_FS_CHANGES = 100;
+
+// ponytail: local copy of the redaction helper; dedupe against src/audit/redact.ts from #30 once it lands.
+const SECRET_KEY_PATTERN = /(pass|pwd|secret|token|key|credential|auth|session)/i;
+
+function redactValue(key: string, value: string): string {
+  return SECRET_KEY_PATTERN.test(key) ? '[REDACTED]' : value;
+}
+
+/** Redact `NAME=value` assignments with secret-looking names inside a command string. */
+function redactCommand(command: string): string {
+  return command.replace(/([A-Za-z_][A-Za-z0-9_]*)=(\S+)/g, (match, key: string) =>
+    SECRET_KEY_PATTERN.test(key) ? `${key}=[REDACTED]` : match
+  );
 }
 
 export interface UpdateCommandOptions {
@@ -41,6 +62,8 @@ export class ContextManager {
   private outputCache: Map<string, CommandOutput>;
   private fileSystemChanges: FileSystemDiff[];
   private auditLogger?: AuditLogger;
+  private sessionFile: string;
+  private persistTimer?: NodeJS.Timeout;
 
   constructor(config: ContextConfig, auditLogger?: AuditLogger) {
     this.config = config;
@@ -51,6 +74,7 @@ export class ContextManager {
     this.commandHistory = [];
     this.outputCache = new Map();
     this.fileSystemChanges = [];
+    this.sessionFile = ContextManager.resolveSessionFile(auditLogger);
 
     // Initialize with current environment
     Object.entries(process.env).forEach(([key, value]) => {
@@ -132,10 +156,8 @@ export class ContextManager {
     // Cache output for reference
     this.outputCache.set(id, output);
 
-    // Persist session if configured
-    if (this.config.sessionPersistence) {
-      await this.persistSession();
-    }
+    // Persist session if configured (debounced; see flushSession)
+    this.schedulePersist();
   }
 
   async getHistory(limit?: number, filter?: string): Promise<CommandHistoryEntry[]> {
@@ -192,9 +214,7 @@ export class ContextManager {
     this.outputCache.clear();
     this.fileSystemChanges = [];
 
-    if (this.config.sessionPersistence) {
-      await this.persistSession();
-    }
+    this.schedulePersist();
   }
 
   private async updateWorkingDirectory(
@@ -378,22 +398,98 @@ export class ContextManager {
     return related;
   }
 
+  /**
+   * Where the session snapshot lives: alongside the audit log (MCP_EXEC_LOG_DIR /
+   * ~/.mcp-exec), never process.cwd() -- see issue #31.
+   */
+  private static resolveSessionFile(auditLogger?: AuditLogger): string {
+    const filename = 'session.json';
+    const logFile = auditLogger?.getLogFilePath?.();
+    if (logFile) {
+      return path.join(path.dirname(logFile), filename);
+    }
+    if (process.env.MCP_EXEC_LOG_DIR) {
+      return path.join(path.resolve(process.env.MCP_EXEC_LOG_DIR), filename);
+    }
+    const homeDir = process.env.HOME || process.env.USERPROFILE;
+    return homeDir
+      ? path.join(homeDir, '.mcp-exec', filename)
+      : path.join(os.tmpdir(), filename);
+  }
+
+  /**
+   * Environment variables that differ from the inherited process environment.
+   * Only these are persisted -- the full process env holds the caller's secrets.
+   */
+  private getEnvironmentOverrides(): Record<string, string> {
+    const overrides: Record<string, string> = {};
+    for (const [key, value] of this.environmentVariables) {
+      if (process.env[key] !== value) {
+        overrides[key] = redactValue(key, value);
+      }
+    }
+    return overrides;
+  }
+
+  /** Queue a trailing, unref'd write so a burst of commands costs one file write. */
+  private schedulePersist(): void {
+    if (!this.config.sessionPersistence || this.persistTimer) {
+      return;
+    }
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = undefined;
+      void this.persistSession();
+    }, PERSIST_DEBOUNCE_MS);
+    this.persistTimer.unref?.();
+  }
+
+  /** Write any pending session state now (called from gracefulShutdown). */
+  async flushSession(): Promise<void> {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = undefined;
+    }
+    if (this.config.sessionPersistence) {
+      await this.persistSession();
+    }
+  }
+
   private async persistSession(): Promise<void> {
     try {
       const sessionData = {
         sessionId: this.sessionId,
         currentDirectory: this.currentDirectory,
-        environmentVariables: Object.fromEntries(this.environmentVariables),
-        commandHistory: this.commandHistory,
-        fileSystemChanges: this.fileSystemChanges,
+        environmentOverrides: this.getEnvironmentOverrides(),
+        commandHistory: this.commandHistory
+          .slice(-PERSIST_MAX_HISTORY)
+          .map(entry => ({
+            id: entry.id,
+            command: redactCommand(entry.command),
+            timestamp: entry.timestamp,
+            workingDirectory: entry.workingDirectory,
+            output: {
+              stdout: (entry.output.stdout || '').slice(0, PERSIST_MAX_OUTPUT_CHARS),
+              stderr: (entry.output.stderr || '').slice(0, PERSIST_MAX_OUTPUT_CHARS),
+              exitCode: entry.output.exitCode,
+            },
+            aiContext: entry.aiContext,
+            sessionId: entry.sessionId,
+            sessionType: entry.sessionType,
+          })),
+        fileSystemChanges: this.fileSystemChanges.slice(-PERSIST_MAX_FS_CHANGES),
         timestamp: new Date(),
       };
 
-      const sessionFile = path.join(process.cwd(), '.mcp-exec-session.json');
-      await fs.writeFile(sessionFile, JSON.stringify(sessionData, null, 2));
+      const tmpFile = `${this.sessionFile}.${process.pid}.tmp`;
+      await fs.mkdir(path.dirname(this.sessionFile), { recursive: true });
+      await fs.writeFile(tmpFile, JSON.stringify(sessionData, null, 2));
+      await fs.rename(tmpFile, this.sessionFile);
     } catch (error) {
-      // Silently fail session persistence to avoid disrupting command execution
-      console.warn('Failed to persist session:', error);
+      // Never disrupt (or spam stderr during) command execution because of persistence.
+      this.auditLogger?.debug('Failed to persist session', {
+        sessionFile: this.sessionFile,
+        error: error instanceof Error ? error.message : String(error),
+      }, 'context-manager');
     }
   }
 
@@ -403,24 +499,38 @@ export class ContextManager {
     }
 
     try {
-      const sessionFile = path.join(process.cwd(), '.mcp-exec-session.json');
-      const sessionData = JSON.parse(await fs.readFile(sessionFile, 'utf-8'));
+      const sessionData = JSON.parse(await fs.readFile(this.sessionFile, 'utf-8'));
 
       this.sessionId = sessionData.sessionId || this.sessionId;
       this.currentDirectory = sessionData.currentDirectory || this.currentDirectory;
-      
-      if (sessionData.environmentVariables) {
-        this.environmentVariables = new Map(Object.entries(sessionData.environmentVariables));
+
+      // Merge only the recorded overrides on top of the live process environment;
+      // never restore a wholesale environment snapshot (issue #31).
+      if (sessionData.environmentOverrides) {
+        for (const [key, value] of Object.entries(sessionData.environmentOverrides)) {
+          if (typeof value === 'string' && value !== '[REDACTED]') {
+            this.environmentVariables.set(key, value);
+          }
+        }
       }
-      
-      if (sessionData.commandHistory) {
+
+      if (Array.isArray(sessionData.commandHistory)) {
         this.commandHistory = sessionData.commandHistory.map((entry: any) => ({
           ...entry,
           timestamp: new Date(entry.timestamp),
+          environment: entry.environment || {},
+          relatedCommands: entry.relatedCommands || [],
         }));
+        // Rebuild the output cache so get_output works for restored entries.
+        this.outputCache.clear();
+        for (const entry of this.commandHistory) {
+          if (entry.output) {
+            this.outputCache.set(entry.id, entry.output);
+          }
+        }
       }
-      
-      if (sessionData.fileSystemChanges) {
+
+      if (Array.isArray(sessionData.fileSystemChanges)) {
         this.fileSystemChanges = sessionData.fileSystemChanges.map((change: any) => ({
           ...change,
           timestamp: new Date(change.timestamp),

@@ -3660,9 +3660,9 @@ Please start by enabling the terminal viewer service.`,
         },
       });
 
-      // Save session state
+      // Save session state (flushes any debounced write)
       if (this.config.context.sessionPersistence) {
-        await (this.contextManager as any).persistSession();
+        await this.contextManager.flushSession();
         console.error('💾 Session state saved');
       }
 
