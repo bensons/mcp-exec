@@ -304,6 +304,10 @@ function updateSessionStatus(status) {
 
 function showError(title, message) {
     const terminalElement = document.getElementById('terminal');
+    if (!terminalElement) {
+        console.error('[ERROR] Terminal element not found in showError');
+        return;
+    }
     terminalElement.textContent = '';
 
     const container = document.createElement('div');
