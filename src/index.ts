@@ -1393,6 +1393,20 @@ class MCPShellServer {
               });
 
               try {
+                // Apply the same security validation used by regular execute_command
+                const fullCommand = parsed.args && parsed.args.length > 0
+                  ? `${parsed.command} ${parsed.args.join(' ')}`
+                const securityCheck = await this.securityManager.validateCommand(fullCommand);
+
+                if (!securityCheck.allowed) {
+                  await this.auditLogger.warning('Command blocked by security policy', {
+                    fullCommand,
+                    reason: securityCheck.reason,
+                    riskLevel: securityCheck.riskLevel,
+                  }, 'security-validator');
+                  throw new Error(`Command blocked by security policy: ${securityCheck.reason}`);
+                }
+
                 // Ensure terminal viewer service is available
                 if (!this.terminalViewerService) {
                   this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
@@ -1421,10 +1435,6 @@ class MCPShellServer {
 
                 // Get viewer URL
                 const viewerUrl = this.terminalViewerService?.getSessionUrl(sessionId) || 'Service not available';
-
-                const fullCommand = parsed.args && parsed.args.length > 0
-                  ? `${parsed.command} ${parsed.args.join(' ')}`
-                  : parsed.command;
 
                 return {
                   content: [
