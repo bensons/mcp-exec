@@ -48,6 +48,7 @@ const uuid_1 = require("uuid");
 const mcp_logger_1 = require("./audit/mcp-logger");
 const executor_1 = require("./core/executor");
 const manager_1 = require("./security/manager");
+const command_policy_1 = require("./security/command-policy");
 const manager_2 = require("./context/manager");
 const logger_1 = require("./audit/logger");
 const confirmation_1 = require("./security/confirmation");
@@ -423,7 +424,7 @@ class MCPShellServer {
             mcpLogLevel: this.config.mcpLogging?.minLevel
         });
         // Initialize terminal components
-        this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer);
+        this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer, (command) => this.assertCommandAllowed(command, 'terminal-session'));
         // Auto-start terminal viewer service if enabled in config
         if (this.config.terminalViewer.enabled) {
             try {
@@ -465,6 +466,12 @@ class MCPShellServer {
         else {
             return process.env.SHELL || '/bin/bash';
         }
+    }
+    async assertCommandAllowed(command, source, extraContext = {}) {
+        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, command, this.auditLogger, {
+            source,
+            ...extraContext,
+        });
     }
     setupHandlers() {
         // List available tools
@@ -1337,14 +1344,10 @@ class MCPShellServer {
                                 }
                             });
                             try {
-                                // Apply the same security validation used by regular execute_command
-                                const fullCommand = parsed.args && parsed.args.length > 0
-                                    ? `${parsed.command} ${parsed.args.join(' ')}`
-                                    : parsed.command;
-                                const securityCheck = await this.securityManager.validateCommand(fullCommand);
-                                if (!securityCheck.allowed) {
-                                    throw new Error(`Command blocked by security policy: ${securityCheck.reason}`);
-                                }
+                                const fullCommand = (0, command_policy_1.buildFullCommand)(parsed.command, parsed.args);
+                                await this.assertCommandAllowed(fullCommand, 'execute_command', {
+                                    enableTerminalViewer: true,
+                                });
                                 // Ensure terminal viewer service is available
                                 if (!this.terminalViewerService) {
                                     this.terminalViewerService = new viewer_service_1.TerminalViewerService(this.config.terminalViewer);
@@ -1421,6 +1424,8 @@ class MCPShellServer {
                             }
                         });
                         try {
+                            const sessionCommand = parsed.command || this.getDefaultShell();
+                            await this.assertCommandAllowed((0, command_policy_1.buildFullCommand)(sessionCommand, parsed.args), 'start_interactive_session');
                             // Use the session manager directly to create an interactive session
                             const context = await this.contextManager.getCurrentContext();
                             const workingDirectory = parsed.cwd || context.currentDirectory || process.cwd();
@@ -1471,6 +1476,9 @@ class MCPShellServer {
                             }
                         });
                         try {
+                            if (parsed.command) {
+                                await this.assertCommandAllowed((0, command_policy_1.buildFullCommand)(parsed.command, parsed.args), 'start_terminal_session');
+                            }
                             // Ensure terminal viewer service is available
                             if (!this.terminalViewerService) {
                                 this.terminalViewerService = new viewer_service_1.TerminalViewerService(this.config.terminalViewer);
@@ -1528,6 +1536,9 @@ class MCPShellServer {
                             }
                         });
                         try {
+                            await this.assertCommandAllowed(parsed.input, 'send_to_session', {
+                                sessionId: parsed.sessionId,
+                            });
                             // Try terminal session manager first
                             const terminalSession = this.terminalSessionManager?.getSession(parsed.sessionId);
                             if (terminalSession) {
@@ -2671,7 +2682,7 @@ class MCPShellServer {
                         // Record configuration change
                         this.recordConfigurationChange('sessions', this.config.sessions, previousValues);
                         // Recreate terminal session manager
-                        this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer);
+                        this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer, (command) => this.assertCommandAllowed(command, 'terminal-session'));
                         return {
                             content: [
                                 {
@@ -2715,7 +2726,7 @@ class MCPShellServer {
                         // Record configuration change
                         this.recordConfigurationChange('terminalViewer', this.config.terminalViewer, previousValues);
                         // Recreate terminal session manager
-                        this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer);
+                        this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer, (command) => this.assertCommandAllowed(command, 'terminal-session'));
                         // Restart terminal viewer service if enabled
                         if (this.config.terminalViewer.enabled && this.terminalViewerService) {
                             await this.terminalViewerService.stop();
@@ -3432,7 +3443,7 @@ Please start by enabling the terminal viewer service.`,
             this.displayFormatter = new display_formatter_1.DisplayFormatter(this.config.display);
         }
         if (!section || section === 'sessions' || section === 'terminalViewer') {
-            this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer);
+            this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer, (command) => this.assertCommandAllowed(command, 'terminal-session'));
         }
         if (!section || section === 'output') {
             this.shellExecutor = new executor_1.ShellExecutor(this.securityManager, this.contextManager, this.auditLogger, this.config);

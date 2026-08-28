@@ -8,6 +8,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { TerminalSession, TerminalBuffer } from './types';
 import { InteractiveSessionManager, StartSessionOptions, SendInputOptions } from '../core/interactive-session-manager';
 import { ServerConfig } from '../types/index';
+import { CommandGuard, buildFullCommand } from '../security/command-policy';
 
 export interface TerminalStartSessionOptions extends Omit<StartSessionOptions, 'command'> {
   command?: string; // Optional for terminal sessions - defaults to system shell
@@ -21,15 +22,18 @@ export class TerminalSessionManager {
   private terminalViewerConfig: ServerConfig['terminalViewer'];
   private cleanupInterval: NodeJS.Timeout;
   private fallbackSessionManager: InteractiveSessionManager;
+  private commandGuard?: CommandGuard;
 
   constructor(
     config: ServerConfig['sessions'], 
-    terminalViewerConfig: ServerConfig['terminalViewer']
+    terminalViewerConfig: ServerConfig['terminalViewer'],
+    commandGuard?: CommandGuard
   ) {
     this.sessions = new Map();
     this.config = config;
     this.terminalViewerConfig = terminalViewerConfig;
-    this.fallbackSessionManager = new InteractiveSessionManager(config);
+    this.commandGuard = commandGuard;
+    this.fallbackSessionManager = new InteractiveSessionManager(config, commandGuard);
     
     // Set up periodic cleanup of expired sessions
     this.cleanupInterval = setInterval(() => {
@@ -39,6 +43,10 @@ export class TerminalSessionManager {
 
   async startSession(options: TerminalStartSessionOptions): Promise<string> {
     console.error(`[DEBUG] TerminalSessionManager.startSession called with enableTerminalViewer: ${options.enableTerminalViewer}`);
+
+    if (this.commandGuard && options.command) {
+      await this.commandGuard(buildFullCommand(options.command, options.args));
+    }
 
     // If terminal viewer is not requested, use fallback
     if (!options.enableTerminalViewer) {
@@ -241,6 +249,11 @@ export class TerminalSessionManager {
 
   async sendInput(options: SendInputOptions): Promise<void> {
     console.error(`[DEBUG] TerminalSessionManager.sendInput called for session ${options.sessionId}`);
+
+    if (this.commandGuard) {
+      await this.commandGuard(options.input);
+    }
+
     const session = this.sessions.get(options.sessionId);
 
     if (!session) {

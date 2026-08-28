@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.ShellExecutor = void 0;
 const child_process_1 = require("child_process");
 const uuid_1 = require("uuid");
+const command_policy_1 = require("../security/command-policy");
 const output_processor_1 = require("../utils/output-processor");
 const intent_tracker_1 = require("../utils/intent-tracker");
 const interactive_session_manager_1 = require("./interactive-session-manager");
@@ -24,7 +25,9 @@ class ShellExecutor {
         this.config = config;
         this.outputProcessor = new output_processor_1.OutputProcessor(config.output);
         this.intentTracker = new intent_tracker_1.IntentTracker();
-        this.sessionManager = new interactive_session_manager_1.InteractiveSessionManager(config.sessions);
+        this.sessionManager = new interactive_session_manager_1.InteractiveSessionManager(config.sessions, (command) => (0, command_policy_1.assertCommandAllowed)(this.securityManager, command, this.auditLogger, {
+            source: 'interactive-session',
+        }));
     }
     async executeCommand(options) {
         const commandId = (0, uuid_1.v4)();
@@ -249,6 +252,7 @@ class ShellExecutor {
     }
     // Public method to start a new interactive session
     async startInteractiveSession(options) {
+        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, this.buildFullCommand(options), this.auditLogger, { source: 'start_interactive_session' });
         return await this.sessionManager.startSession(options);
     }
     // Public method to send input to a session

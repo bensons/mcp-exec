@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { CommandOutput, ServerConfig, SessionOutput } from '../types/index';
 import { SecurityManager } from '../security/manager';
+import { assertCommandAllowed } from '../security/command-policy';
 import { ContextManager } from '../context/manager';
 import { AuditLogger } from '../audit/logger';
 import { OutputProcessor } from '../utils/output-processor';
@@ -46,7 +47,12 @@ export class ShellExecutor {
     this.config = config;
     this.outputProcessor = new OutputProcessor(config.output);
     this.intentTracker = new IntentTracker();
-    this.sessionManager = new InteractiveSessionManager(config.sessions);
+    this.sessionManager = new InteractiveSessionManager(
+      config.sessions,
+      (command) => assertCommandAllowed(this.securityManager, command, this.auditLogger, {
+        source: 'interactive-session',
+      })
+    );
   }
 
   async executeCommand(options: ExecuteCommandOptions): Promise<CommandOutput> {
@@ -317,6 +323,12 @@ export class ShellExecutor {
 
   // Public method to start a new interactive session
   async startInteractiveSession(options: StartSessionOptions): Promise<string> {
+    await assertCommandAllowed(
+      this.securityManager,
+      this.buildFullCommand(options),
+      this.auditLogger,
+      { source: 'start_interactive_session' }
+    );
     return await this.sessionManager.startSession(options);
   }
 
