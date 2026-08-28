@@ -416,11 +416,22 @@ export class TerminalViewerService {
       throw new Error(`Session ${sessionId} not found or has no PTY`);
     }
 
+    if (session.status !== 'running') {
+      throw new Error(`Session ${sessionId} is not running (status: ${session.status})`);
+    }
+
     console.error(`[DEBUG] Session found, sending input to PTY: "${input}"`);
 
-    // Send input to PTY
+    // Send input to PTY - writing to a PTY whose child already exited throws (EIO/EPIPE),
+    // so translate it into a normal tool error instead of letting it escape.
     const inputToSend = addNewline ? input + '\r' : input;
-    session.pty.write(inputToSend);
+    try {
+      session.pty.write(inputToSend);
+    } catch (error) {
+      throw new Error(
+        `Failed to write to session ${sessionId} PTY: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
 
     console.error(`[DEBUG] Input sent to PTY: "${inputToSend}"`);
 

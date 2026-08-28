@@ -3,6 +3,7 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
+import { Writable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
 import { InteractiveSession, SessionOutput, SessionInfo, ServerConfig } from '../types/index';
 import { CommandGuard, buildFullCommand } from '../security/command-policy';
@@ -128,9 +129,27 @@ export class InteractiveSessionManager {
       throw new Error(`Session ${options.sessionId} is not running (status: ${session.status})`);
     }
 
+    // Writing to a child that closed (or never opened) its stdin raises EPIPE. Without this
+    // guard + the 'error' listener in setupProcessHandlers it surfaces as an uncaught
+    // exception and takes the whole server down.
+    const stdin: Writable | null | undefined = session.process.stdin;
+    if (!stdin || stdin.destroyed || !stdin.writable) {
+      throw new Error(`Session ${options.sessionId} stdin is closed`);
+    }
+
     // Send input to the process
     const input = options.addNewline !== false ? options.input + '\n' : options.input;
-    session.process.stdin?.write(input);
+    await new Promise<void>((resolve, reject) => {
+      const settle = (error?: Error | null) => {
+        clearTimeout(graceTimer);
+        if (error) reject(error); else resolve();
+      };
+      // ponytail: bounded wait for the flush. A child that never reads its stdin can leave a
+      // backpressured write pending forever, so we stop waiting after the grace period; a late
+      // EPIPE still lands on the stdin 'error' handler and fails the next sendInput.
+      const graceTimer = setTimeout(() => settle(), 50);
+      stdin.write(input, settle);
+    });
     session.lastActivity = new Date();
   }
 
@@ -163,16 +182,20 @@ export class InteractiveSessionManager {
       throw new Error(`Session ${sessionId} not found`);
     }
 
-    if (session.status === 'running') {
+    // Check liveness, not status: a stdin EPIPE flips status to 'error' while the child is
+    // still alive, and keying off status would leak that process.
+    const isAlive = () => session.process.exitCode === null && session.process.signalCode === null;
+
+    if (isAlive()) {
       // Try graceful termination first
       session.process.kill('SIGTERM');
-      
+
       // Force kill after 5 seconds if still running
       setTimeout(() => {
-        if (session.status === 'running') {
+        if (isAlive()) {
           session.process.kill('SIGKILL');
         }
-      }, 5000);
+      }, 5000).unref();
     }
 
     // Remove from active sessions
@@ -222,11 +245,22 @@ export class InteractiveSessionManager {
       }
     });
 
-    // Handle process exit
-    childProcess.on('close', (code: number | null) => {
-      session.status = code === 0 ? 'finished' : 'error';
+    // Handle stdin errors (EPIPE when the child closed its stdin or already exited).
+    // Without a listener Node rethrows these as uncaught exceptions, which crashes the server.
+    childProcess.stdin?.on('error', (error: Error) => {
+      session.status = 'error';
+      session.errorBuffer.push(`stdin error: ${error.message}`);
       session.lastActivity = new Date();
     });
+
+    // Handle process exit ('exit' fires as soon as the process is gone, 'close' once its
+    // stdio is drained - flag both so status is never stale between the two).
+    const markExited = (code: number | null) => {
+      session.status = code === 0 ? 'finished' : 'error';
+      session.lastActivity = new Date();
+    };
+    childProcess.on('exit', markExited);
+    childProcess.on('close', markExited);
 
     // Handle process errors
     childProcess.on('error', (error: Error) => {
