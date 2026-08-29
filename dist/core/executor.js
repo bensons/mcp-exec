@@ -25,11 +25,11 @@ class ShellExecutor {
         this.config = config;
         this.outputProcessor = new output_processor_1.OutputProcessor(config.output);
         this.intentTracker = new intent_tracker_1.IntentTracker();
-        this.sessionManager = new interactive_session_manager_1.InteractiveSessionManager(config.sessions, (command) => (0, command_policy_1.assertCommandAllowed)(this.securityManager, command, this.auditLogger, {
+        this.sessionManager = new interactive_session_manager_1.InteractiveSessionManager(config.sessions, (command, guardOptions) => (0, command_policy_1.assertCommandAllowed)(this.securityManager, command, this.auditLogger, {
             source: 'interactive-session',
-        }));
+        }, guardOptions));
     }
-    async executeCommand(options) {
+    async executeCommand(options, policyOptions = {}) {
         const commandId = (0, uuid_1.v4)();
         const startTime = Date.now();
         // Debug logging through audit logger to avoid JSON-RPC interference
@@ -53,7 +53,10 @@ class ShellExecutor {
                 fullCommand
             }, 'security-validator');
             const securityCheck = await this.securityManager.validateCommand(fullCommand);
-            if (!securityCheck.allowed) {
+            // A confirmed command (via confirm_command) bypasses only the
+            // confirmation gate; hard blocks still stop it here.
+            const confirmationBypassed = Boolean(securityCheck.requiresConfirmation && policyOptions.skipConfirmation);
+            if (!securityCheck.allowed && !confirmationBypassed) {
                 await this.auditLogger.warning('Command blocked by security policy', {
                     commandId,
                     fullCommand,
@@ -252,7 +255,7 @@ class ShellExecutor {
     }
     // Public method to start a new interactive session
     async startInteractiveSession(options) {
-        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, this.buildFullCommand(options), this.auditLogger, { source: 'start_interactive_session' });
+        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, this.buildFullCommand(options), this.auditLogger, { source: 'start_interactive_session' }, { skipConfirmation: options.skipConfirmation });
         return await this.sessionManager.startSession(options);
     }
     // Public method to send input to a session

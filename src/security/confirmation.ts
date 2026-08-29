@@ -7,6 +7,8 @@ import { ValidationResult } from '../types/index';
 /** Runs the confirmed command and returns the text to hand back to the caller. */
 export type PendingCommandRunner = () => Promise<string>;
 
+export const DEFAULT_MAX_PENDING_CONFIRMATIONS = 100;
+
 export interface PendingConfirmation {
   id: string;
   command: string;
@@ -23,12 +25,20 @@ export interface PendingConfirmation {
 export class ConfirmationManager {
   private pendingConfirmations: Map<string, PendingConfirmation> = new Map();
   private confirmationTimeout: number = 300000; // 5 minutes
+  private readonly maxPendingConfirmations: number;
   private cleanupInterval: NodeJS.Timeout;
 
-  constructor(confirmationTimeout?: number) {
+  constructor(
+    confirmationTimeout?: number,
+    maxPendingConfirmations: number = DEFAULT_MAX_PENDING_CONFIRMATIONS
+  ) {
     if (confirmationTimeout) {
       this.confirmationTimeout = confirmationTimeout;
     }
+    if (!Number.isInteger(maxPendingConfirmations) || maxPendingConfirmations <= 0) {
+      throw new Error('Maximum pending confirmations must be a positive integer');
+    }
+    this.maxPendingConfirmations = maxPendingConfirmations;
 
     // Clean up expired confirmations every minute
     this.cleanupInterval = setInterval(() => {
@@ -49,6 +59,11 @@ export class ConfirmationManager {
     run?: PendingCommandRunner,
     source?: string
   ): string {
+    this.cleanupExpiredConfirmations();
+    if (this.pendingConfirmations.size >= this.maxPendingConfirmations) {
+      throw new Error(`Maximum pending confirmations (${this.maxPendingConfirmations}) reached`);
+    }
+
     const confirmationId = this.generateConfirmationId();
     const now = new Date();
     const expiresAt = new Date(now.getTime() + this.confirmationTimeout);
@@ -123,6 +138,10 @@ export class ConfirmationManager {
 
   getConfirmationTimeout(): number {
     return this.confirmationTimeout;
+  }
+
+  getMaxPendingConfirmations(): number {
+    return this.maxPendingConfirmations;
   }
 
   setConfirmationTimeout(timeout: number): void {

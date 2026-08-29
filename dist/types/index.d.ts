@@ -62,6 +62,7 @@ export interface ValidationResult {
     reason?: string;
     suggestions?: string[];
     riskLevel: 'low' | 'medium' | 'high';
+    requiresConfirmation?: boolean;
 }
 export interface SecurityProvider {
     securityLevel: 'strict' | 'moderate' | 'permissive';

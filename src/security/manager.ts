@@ -342,6 +342,7 @@ export class SecurityManager {
 
   async validateCommand(command: string): Promise<ValidationResult> {
     const normalizedCommand = command.trim().toLowerCase();
+    let confirmationRequired: ValidationResult | undefined;
 
     this.auditLogger?.debug('Starting command validation', {
       command: command.substring(0, 100), // Truncate for logging
@@ -394,19 +395,17 @@ export class SecurityManager {
         }
 
         if (this.config.confirmDangerous && riskLevel !== 'low') {
-          this.auditLogger?.notice('Dangerous command requires confirmation', {
-            command: command.substring(0, 100),
-            riskLevel,
-            confirmDangerous: this.config.confirmDangerous
-          }, 'security-validator');
-
-          return {
+          // Do not return yet. Confirmation is a user-consent gate, not a
+          // substitute for the directory, privilege, resource, or sandbox
+          // checks below. Defer this result until every hard policy passes.
+          confirmationRequired = {
             allowed: false,
             requiresConfirmation: true,
             reason: 'Dangerous command requires confirmation',
             riskLevel,
             suggestions: ['Review command carefully before proceeding'],
           };
+          break;
         }
       }
     }
@@ -433,6 +432,16 @@ export class SecurityManager {
     const sandboxCheck = this.validateSandboxing(command);
     if (!sandboxCheck.allowed) {
       return sandboxCheck;
+    }
+
+    if (confirmationRequired) {
+      this.auditLogger?.notice('Dangerous command requires confirmation', {
+        command: command.substring(0, 100),
+        riskLevel: confirmationRequired.riskLevel,
+        confirmDangerous: this.config.confirmDangerous
+      }, 'security-validator');
+
+      return confirmationRequired;
     }
 
     const finalRiskLevel = this.assessRiskLevel(command);

@@ -26,6 +26,12 @@ declare class MCPShellServer {
     constructor(config?: Partial<ServerConfig>);
     private getDefaultShell;
     private assertCommandAllowed;
+    /**
+     * Runs the command policy for an entry point. Returns undefined when the
+     * caller may proceed, or the text to return when the command is parked
+     * pending confirm_command. Hard blocks still throw.
+     */
+    private gateCommand;
     private setupHandlers;
     start(): Promise<void>;
     private setupConnectionMonitoring;

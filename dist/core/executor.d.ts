@@ -3,6 +3,7 @@
  */
 import { CommandOutput, ServerConfig, SessionOutput } from '../types/index';
 import { SecurityManager } from '../security/manager';
+import { CommandPolicyOptions } from '../security/command-policy';
 import { ContextManager } from '../context/manager';
 import { AuditLogger } from '../audit/logger';
 import { StartSessionOptions, SendInputOptions } from './interactive-session-manager';
@@ -24,7 +25,7 @@ export declare class ShellExecutor {
     private sessionManager;
     private config;
     constructor(securityManager: SecurityManager, contextManager: ContextManager, auditLogger: AuditLogger, config: ServerConfig);
-    executeCommand(options: ExecuteCommandOptions): Promise<CommandOutput>;
+    executeCommand(options: ExecuteCommandOptions, policyOptions?: CommandPolicyOptions): Promise<CommandOutput>;
     getIntentSummary(): {
         categories: Record<string, number>;
         totalCommands: number;

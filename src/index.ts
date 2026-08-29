@@ -23,7 +23,7 @@ import { LogLevel, LegacyLogLevel } from './types/index';
 
 import { ShellExecutor } from './core/executor';
 import { SecurityManager } from './security/manager';
-import { assertCommandAllowed, buildFullCommand, ConfirmationRequiredError } from './security/command-policy';
+import { assertCommandAllowed, buildFullCommand, CommandPolicyOptions, ConfirmationRequiredError } from './security/command-policy';
 import { ContextManager } from './context/manager';
 import { AuditLogger } from './audit/logger';
 import { ConfirmationManager, PendingCommandRunner } from './security/confirmation';
@@ -466,7 +466,7 @@ class MCPShellServer {
     this.terminalSessionManager = new TerminalSessionManager(
       this.config.sessions,
       this.config.terminalViewer,
-      (command) => this.assertCommandAllowed(command, 'terminal-session')
+      (command, options) => this.assertCommandAllowed(command, 'terminal-session', {}, options)
     );
 
     // Auto-start terminal viewer service if enabled in config
@@ -521,12 +521,13 @@ class MCPShellServer {
   private async assertCommandAllowed(
     command: string,
     source: string,
-    extraContext: Record<string, unknown> = {}
+    extraContext: Record<string, unknown> = {},
+    options: CommandPolicyOptions = {}
   ): Promise<void> {
     await assertCommandAllowed(this.securityManager, command, this.auditLogger, {
       source,
       ...extraContext,
-    });
+    }, options);
   }
 
   /**
@@ -1707,6 +1708,12 @@ class MCPShellServer {
                   // If terminal viewer service is available and has this session, use it for input
                   // This ensures proper WebSocket broadcasting
                   if (this.terminalViewerService && this.terminalViewerService.hasSession(parsed.sessionId)) {
+                    // Viewer-backed writes bypass TerminalSessionManager, so
+                    // explicitly re-check current hard policy at execution
+                    // time. The confirmation prompt alone is bypassed.
+                    await this.assertCommandAllowed(parsed.input, 'send_to_session', {
+                      sessionId: parsed.sessionId,
+                    }, { skipConfirmation: true });
                     this.terminalViewerService.sendInput(parsed.sessionId, parsed.input, parsed.addNewline);
                   } else {
                     // Fallback to direct terminal session manager
@@ -2999,7 +3006,7 @@ class MCPShellServer {
             this.terminalSessionManager = new TerminalSessionManager(
               this.config.sessions,
               this.config.terminalViewer,
-              (command) => this.assertCommandAllowed(command, 'terminal-session')
+              (command, options) => this.assertCommandAllowed(command, 'terminal-session', {}, options)
             );
 
             return {
@@ -3053,7 +3060,7 @@ class MCPShellServer {
             this.terminalSessionManager = new TerminalSessionManager(
               this.config.sessions,
               this.config.terminalViewer,
-              (command) => this.assertCommandAllowed(command, 'terminal-session')
+              (command, options) => this.assertCommandAllowed(command, 'terminal-session', {}, options)
             );
 
             // Restart terminal viewer service if enabled
@@ -3899,7 +3906,7 @@ Please start by enabling the terminal viewer service.`,
       this.terminalSessionManager = new TerminalSessionManager(
         this.config.sessions,
         this.config.terminalViewer,
-        (command) => this.assertCommandAllowed(command, 'terminal-session')
+        (command, options) => this.assertCommandAllowed(command, 'terminal-session', {}, options)
       );
     }
     if (!section || section === 'output') {
