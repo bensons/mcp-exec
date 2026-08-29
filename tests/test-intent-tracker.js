@@ -142,7 +142,7 @@ async function testExecutorRecordsOnce() {
     sessions: {
       maxInteractiveSessions: 1,
       sessionTimeout: 60000,
-      outputBufferSize: 100,
+      outputBufferBytes: 100,
     },
     output: {
       formatStructured: true,

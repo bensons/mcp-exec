@@ -9,12 +9,15 @@ class OutputProcessor {
     constructor(config) {
         this.config = config;
     }
+    updateConfig(config) {
+        this.config = config;
+    }
     async process(rawOutput, command) {
         let { stdout, stderr, exitCode } = rawOutput;
         // Strip ANSI codes if configured
         if (this.config.stripAnsi) {
-            stdout = this.stripAnsiCodes(stdout);
-            stderr = this.stripAnsiCodes(stderr);
+            stdout = OutputProcessor.stripAnsiCodes(stdout);
+            stderr = OutputProcessor.stripAnsiCodes(stderr);
         }
         // Apply AI optimizations if enabled
         if (this.config.enableAiOptimizations) {
@@ -32,6 +35,11 @@ class OutputProcessor {
             : undefined;
         // Generate metadata
         const metadata = this.generateMetadata(stdout, stderr, exitCode, command);
+        if (rawOutput.timedOut) {
+            metadata.warnings.push(rawOutput.timeoutMs
+                ? `Command timed out after ${rawOutput.timeoutMs}ms and was terminated`
+                : 'Command timed out and was terminated');
+        }
         // Surface output the executor had to drop to stay within its memory cap
         const droppedBytes = (rawOutput.truncated?.stdout ?? 0) + (rawOutput.truncated?.stderr ?? 0);
         const truncationWarning = `[Output truncated: ${droppedBytes} bytes dropped]`;
@@ -39,7 +47,7 @@ class OutputProcessor {
             metadata.warnings.push(truncationWarning);
         }
         // Generate AI-friendly summary
-        const summary = this.generateSummary(stdout, stderr, exitCode, metadata);
+        const summary = this.generateSummary(stdout, stderr, exitCode, metadata, rawOutput);
         if (droppedBytes > 0) {
             summary.mainResult = `${summary.mainResult} ${truncationWarning}`;
         }
@@ -52,7 +60,7 @@ class OutputProcessor {
             summary,
         };
     }
-    stripAnsiCodes(text) {
+    static stripAnsiCodes(text) {
         // Remove ANSI escape sequences
         return text.replace(/\x1b\[[0-9;]*m/g, '');
     }
@@ -421,13 +429,24 @@ class OutputProcessor {
         }
         return suggestions;
     }
-    generateSummary(stdout, stderr, exitCode, metadata) {
-        const success = exitCode === 0;
+    generateSummary(stdout, stderr, exitCode, metadata, status = {}) {
+        // A signal-killed or timed-out command never succeeded, whatever the exit code says
+        const success = exitCode === 0 && !status.signal && !status.timedOut;
         const hasOutput = stdout.trim().length > 0;
         const hasErrors = stderr.trim().length > 0;
         let mainResult;
         if (!success) {
-            mainResult = `Command failed with exit code ${exitCode}`;
+            if (status.timedOut) {
+                mainResult = status.timeoutMs
+                    ? `Command timed out after ${status.timeoutMs}ms and was terminated (exit code ${exitCode})`
+                    : `Command timed out and was terminated (exit code ${exitCode})`;
+            }
+            else if (status.signal) {
+                mainResult = `Command terminated by signal ${status.signal} (exit code ${exitCode})`;
+            }
+            else {
+                mainResult = `Command failed with exit code ${exitCode}`;
+            }
             if (hasErrors) {
                 const firstErrorLine = stderr.split('\n')[0].trim();
                 mainResult += `: ${firstErrorLine}`;
@@ -459,7 +478,10 @@ class OutputProcessor {
             sideEffects.push(`Generated ${metadata.warnings.length} warning(s)`);
         }
         const nextSteps = [];
-        if (!success) {
+        if (status.timedOut) {
+            nextSteps.push('Increase the timeout or run the command in an interactive session');
+        }
+        else if (!success) {
             nextSteps.push('Review error message and correct the command');
         }
         if (metadata.suggestions.length > 0) {

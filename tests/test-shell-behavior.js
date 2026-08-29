@@ -1,203 +1,260 @@
 #!/usr/bin/env node
 
 /**
- * Test to understand shell behavior - nested vs direct shell
+ * Cross-platform regression tests for the shell option (issue #39).
  */
 
+const assert = require('assert');
 const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
-function testShellBehavior() {
-  return new Promise((resolve, reject) => {
-    const serverPath = path.resolve(__dirname, '..', 'dist', 'index.js');
-    
-    console.log('🔍 Testing shell behavior...');
-    console.log(`Server path: ${serverPath}`);
-    
-    const server = spawn('node', [serverPath], {
-      stdio: ['pipe', 'pipe', 'pipe']
+const SERVER_PATH = path.resolve(__dirname, '..', 'dist', 'index.js');
+const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-shell-'));
+const SHELL_DIR = path.join(TMP_DIR, 'shell path (test)');
+const BLOCKED_SHELL = path.join(TMP_DIR, process.platform === 'win32' ? 'blocked-shell.exe' : 'blocked-shell');
+
+function copyExecutable(source, destination) {
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.copyFileSync(source, destination);
+  if (process.platform !== 'win32') {
+    fs.chmodSync(destination, 0o755);
+  }
+}
+
+function createTestShell() {
+  const shellName = process.platform === 'win32' ? 'cmd.exe' : 'test-shell';
+  const shellPath = path.join(SHELL_DIR, shellName);
+  const systemShell = process.platform === 'win32'
+    ? process.env.ComSpec || process.env.COMSPEC || 'C:\\Windows\\System32\\cmd.exe'
+    : '/bin/sh';
+
+  if (process.platform === 'win32') {
+    copyExecutable(systemShell, shellPath);
+  } else {
+    fs.mkdirSync(path.dirname(shellPath), { recursive: true });
+    fs.symlinkSync(systemShell, shellPath);
+  }
+  copyExecutable(process.execPath, BLOCKED_SHELL);
+  return { shellName, shellPath };
+}
+
+function startServer() {
+  const allowedRoot = path.parse(process.execPath).root;
+  const server = spawn(process.execPath, [SERVER_PATH], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: TMP_DIR,
+    env: {
+      ...process.env,
+      MCP_EXEC_ALLOWED_DIRECTORIES: [allowedRoot, TMP_DIR].join(','),
+      MCP_EXEC_BLOCKED_COMMANDS: BLOCKED_SHELL,
+      MCP_EXEC_DESKTOP_NOTIFICATIONS_ENABLED: 'false',
+      MCP_EXEC_LOG_DIR: TMP_DIR,
+      MCP_EXEC_SESSION_PERSISTENCE: 'false',
+      MCP_EXEC_TERMINAL_VIEWER_PORT: '0',
+    },
+  });
+
+  let nextId = 1;
+  let buffer = '';
+  let stderr = '';
+  const pending = new Map();
+
+  server.stdout.on('data', (chunk) => {
+    buffer += chunk.toString();
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim().startsWith('{')) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const handler = pending.get(message.id);
+      if (handler) {
+        pending.delete(message.id);
+        handler.resolve(message);
+      }
+    }
+  });
+
+  server.stderr.on('data', (chunk) => {
+    stderr += chunk.toString();
+  });
+
+  server.on('close', (code) => {
+    for (const { reject } of pending.values()) {
+      reject(new Error(`Server exited with code ${code}: ${stderr.slice(-1000)}`));
+    }
+    pending.clear();
+  });
+
+  const request = (method, params) => new Promise((resolve, reject) => {
+    const id = nextId++;
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`Timed out waiting for response to ${method}: ${stderr.slice(-1000)}`));
+    }, 20000);
+    pending.set(id, {
+      resolve: (message) => {
+        clearTimeout(timer);
+        resolve(message);
+      },
+      reject: (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
     });
-    
-    let stdout = '';
-    let stderr = '';
-    let sessionId = null;
-    
-    // Send MCP initialization message
-    const initMessage = JSON.stringify({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2024-11-05',
-        capabilities: {
-          roots: {
-            listChanged: false
-          }
-        },
-        clientInfo: {
-          name: 'test-client',
-          version: '1.0.0'
-        }
-      }
-    }) + '\n';
-    
-    server.stdin.write(initMessage);
-    
-    // Test 1: Create a session with NO initial command (just the default shell)
-    setTimeout(() => {
-      console.log('📝 Creating session with NO initial command...');
-      const executeMessage = JSON.stringify({
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: {
-          name: 'execute_command',
-          arguments: {
-            enableTerminalViewer: true
-            // No command specified - should just start the default shell
-          }
-        }
-      }) + '\n';
-      
-      server.stdin.write(executeMessage);
-    }, 500);
-    
-    // Test 2: Send exit command to the shell
-    setTimeout(() => {
-      if (sessionId) {
-        console.log('📝 Sending exit command to default shell...');
-        const sendInputMessage = JSON.stringify({
-          jsonrpc: '2.0',
-          id: 3,
-          method: 'tools/call',
-          params: {
-            name: 'send_to_session',
-            arguments: {
-              sessionId: sessionId,
-              input: 'exit'
-            }
-          }
-        }) + '\n';
-        
-        server.stdin.write(sendInputMessage);
-      } else {
-        console.log('❌ No session ID found');
-      }
-    }, 2000);
-    
-    // Test 3: Check status
-    setTimeout(() => {
-      if (sessionId) {
-        console.log('📝 Checking session status...');
-        const statusMessage = JSON.stringify({
-          jsonrpc: '2.0',
-          id: 4,
-          method: 'tools/call',
-          params: {
-            name: 'get_session_info',
-            arguments: {
-              sessionId: sessionId
-            }
-          }
-        }) + '\n';
-        
-        server.stdin.write(statusMessage);
-      }
-    }, 4000);
-    
-    // Cleanup
-    setTimeout(() => {
-      console.log('📝 Cleaning up...');
-      server.kill();
+    server.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+  });
+
+  const callTool = async (name, args) => {
+    const response = await request('tools/call', { name, arguments: args });
+    if (response.error) {
+      throw new Error(response.error.message || JSON.stringify(response.error));
+    }
+    return response.result.content.map((part) => part.text).join('\n');
+  };
+
+  const close = () => new Promise((resolve) => {
+    if (server.exitCode !== null || server.signalCode !== null) {
       resolve();
-    }, 6000);
-    
-    server.stdout.on('data', (data) => {
-      stdout += data.toString();
-      const output = data.toString();
-      
-      // Extract session ID
-      if (output.includes('Session ID:') && !sessionId) {
-        const match = output.match(/Session ID.*`([^`]+)`/);
-        if (match) {
-          sessionId = match[1];
-          console.log(`✅ Session ID: ${sessionId}`);
-        }
-      }
-      
-      // Check responses
-      if (output.includes('"id":2')) {
-        console.log('📋 Session creation response received');
-      }
-      
-      if (output.includes('"id":3')) {
-        console.log('📋 Send input response received');
-      }
-      
-      if (output.includes('"id":4') && sessionId) {
-        try {
-          const lines = output.split('\n');
-          for (const line of lines) {
-            if (line.trim().startsWith('{') && line.includes('"id":4')) {
-              const response = JSON.parse(line);
-              if (response.result && response.result.content) {
-                const content = JSON.parse(response.result.content[0].text);
-                console.log(`📊 FINAL STATUS: ${content.status}`);
-                console.log(`📊 Command: ${content.command}`);
-              }
-            }
-          }
-        } catch (e) {
-          // Ignore parse errors
-        }
-      }
+      return;
+    }
+    const timer = setTimeout(resolve, 2000);
+    server.once('close', () => {
+      clearTimeout(timer);
+      resolve();
     });
-    
-    server.stderr.on('data', (data) => {
-      stderr += data.toString();
-      const output = data.toString();
-      
-      // Look for PTY exit events
-      if (output.includes('PTY process exited')) {
-        console.log('🚨 PTY EXIT EVENT:', output.trim());
-      }
-      
-      if (output.includes('exitCode:') || output.includes('signal:')) {
-        console.log('🚨 EXIT DETAILS:', output.trim());
-      }
-      
-      if (output.includes('Setting status to')) {
-        console.log('🚨 STATUS CHANGE:', output.trim());
-      }
-      
-      // Also log debug info about session creation
-      if (output.includes('Creating terminal session')) {
-        console.log('🔍 SESSION CREATION:', output.trim());
-      }
+    server.kill();
+  });
+
+  return { request, callTool, close };
+}
+
+function extractSessionId(text) {
+  const match = text.match(/Session ID:\*\* `([^`]+)`/);
+  assert.ok(match, `Expected a session ID in:\n${text}`);
+  return match[1];
+}
+
+async function waitForSessionOutput(client, sessionId, expected) {
+  const deadline = Date.now() + 10000;
+  let output = '';
+  while (Date.now() < deadline) {
+    output = await client.callTool('read_session_output', { sessionId });
+    if (output.includes(expected)) {
+      return output;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for ${expected} in session output:\n${output}`);
+}
+
+async function testShellOption() {
+  console.log('🧪 Testing shell option behavior...');
+  const { shellName, shellPath } = createTestShell();
+
+  // Unit-level resolution covers paths that cannot necessarily serve as a shell
+  // on every host (notably copied executables on native Windows).
+  const { resolveShellOption } = require('../dist/core/shell-option');
+  assert.strictEqual(resolveShellOption(shellPath), shellPath);
+  assert.strictEqual(
+    resolveShellOption(shellName, {
+      cwd: TMP_DIR,
+      env: { PATH: path.relative(TMP_DIR, SHELL_DIR), PATHEXT: process.env.PATHEXT },
+    }),
+    shellPath
+  );
+  assert.throws(() => resolveShellOption('rm -rf /'), /Invalid shell/);
+  console.log('✅ absolute whitespace paths and child cwd/PATH resolution');
+
+  const client = startServer();
+  try {
+    await client.request('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'shell-option-test', version: '1.0.0' },
     });
-    
-    server.on('close', (code) => {
-      console.log(`Server closed with code: ${code}`);
+
+    const directMarker = 'DIRECT_ARGS:';
+    const direct = await client.callTool('execute_command', {
+      command: process.execPath,
+      args: [
+        '-e',
+        `process.stdout.write(${JSON.stringify(directMarker)} + JSON.stringify(process.argv.slice(1)))`,
+        'a b',
+        '$NOT_EXPANDED',
+      ],
+      shell: false,
     });
-    
-    server.on('error', (error) => {
-      console.error('❌ Error:', error);
-      reject(error);
+    assert.ok(
+      direct.includes(`${directMarker}["a b","$NOT_EXPANDED"]`),
+      `shell:false did not preserve arguments:\n${direct}`
+    );
+    console.log('✅ execute_command shell:false preserves arguments with process.execPath');
+
+    const namedShell = await client.callTool('start_interactive_session', {
+      command: process.platform === 'win32' ? 'echo CHILD_PATH_OK' : 'printf CHILD_PATH_OK',
+      cwd: TMP_DIR,
+      env: {
+        PATH: path.relative(TMP_DIR, SHELL_DIR),
+        ...(process.env.PATHEXT ? { PATHEXT: process.env.PATHEXT } : {}),
+      },
+      shell: shellName,
     });
+    const namedSessionId = extractSessionId(namedShell);
+    await waitForSessionOutput(client, namedSessionId, 'CHILD_PATH_OK');
+    console.log('✅ bare custom shell uses the child environment PATH and cwd');
+
+    const blocked = await client.callTool('start_interactive_session', {
+      command: process.execPath,
+      args: ['-e', 'process.stdout.write("SHOULD_NOT_RUN")'],
+      shell: BLOCKED_SHELL,
+    });
+    assert.match(blocked, /blocked by security policy/, blocked);
+    assert.ok(!blocked.includes('Session ID:**'), blocked);
+    console.log('✅ custom shell executable is checked by command policy');
+
+    const viewerMarker = 'VIEWER_ARGS:';
+    const viewed = await client.callTool('execute_command', {
+      command: process.execPath,
+      args: [
+        '-e',
+        `process.stdout.write(${JSON.stringify(viewerMarker)} + JSON.stringify(process.argv.slice(1)))`,
+        'a b',
+        '$NOT_EXPANDED',
+      ],
+      shell: false,
+      enableTerminalViewer: true,
+    });
+    const viewerSessionId = extractSessionId(viewed);
+    const viewerOutput = await waitForSessionOutput(client, viewerSessionId, viewerMarker);
+    const viewerData = JSON.parse(viewerOutput);
+    assert.strictEqual(
+      viewerData.recentOutput,
+      `${viewerMarker}["a b","$NOT_EXPANDED"]`,
+      `terminal-viewer shell:false did not preserve arguments:\n${viewerOutput}`
+    );
+    console.log('✅ terminal-viewer shell:false directly spawns the command');
+
+    await client.callTool('kill_session', { sessionId: namedSessionId }).catch(() => {});
+    await client.callTool('kill_session', { sessionId: viewerSessionId }).catch(() => {});
+  } finally {
+    await client.close();
+  }
+
+  console.log('🎉 Shell option regression tests passed');
+}
+
+if (require.main === module) {
+  testShellOption().catch((error) => {
+    console.error('💥 Shell option tests failed:', error);
+    process.exit(1);
   });
 }
 
-// Run the test
-if (require.main === module) {
-  testShellBehavior()
-    .then(() => {
-      console.log('🎉 Shell behavior test completed!');
-      process.exit(0);
-    })
-    .catch((error) => {
-      console.error('💥 Shell behavior test failed:', error.message);
-      process.exit(1);
-    });
-}
-
-module.exports = { testShellBehavior };
+module.exports = { testShellBehavior: testShellOption, testShellOption };

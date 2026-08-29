@@ -2,8 +2,12 @@
  * Monitoring and alerting system for audit events
  */
 
-import { LogEntry } from '../types/index';
+import { LogEntry, SecurityCategory } from '../types/index';
 import notifier from 'node-notifier';
+
+function hasSecurityCategory(log: LogEntry, category: SecurityCategory): boolean {
+  return log.securityCheck.category === category || log.securityCheck.categories?.includes(category) === true;
+}
 
 export interface AlertRule {
   id: string;
@@ -15,6 +19,20 @@ export interface AlertRule {
   cooldownMinutes: number;
 }
 
+/**
+ * Identifying fields of the triggering entry. Alerts deliberately do not hold
+ * the whole LogEntry: they are retained for days and shipped to webhooks.
+ */
+export interface AlertLogEntry {
+  id: string;
+  timestamp: Date;
+  sessionId: string;
+  userId?: string;
+  command: string;
+  exitCode: number;
+  riskLevel: 'low' | 'medium' | 'high';
+}
+
 export interface Alert {
   id: string;
   ruleId: string;
@@ -22,7 +40,7 @@ export interface Alert {
   severity: 'low' | 'medium' | 'high' | 'critical';
   message: string;
   timestamp: Date;
-  logEntry: LogEntry;
+  logEntry: AlertLogEntry;
   acknowledged: boolean;
   acknowledgedBy?: string;
   acknowledgedAt?: Date;
@@ -50,8 +68,31 @@ export class MonitoringSystem {
   private lastAlertTime: Map<string, Date> = new Map();
 
   constructor(config: MonitoringConfig) {
-    this.config = config;
+    this.config = this.cloneConfig(config);
     this.initializeDefaultRules();
+  }
+
+  updateConfig(config: MonitoringConfig): void {
+    this.config = this.cloneConfig(config);
+    this.cleanup();
+  }
+
+  private cloneConfig(config: MonitoringConfig): MonitoringConfig {
+    return {
+      ...config,
+      emailNotifications: config.emailNotifications
+        ? {
+            ...config.emailNotifications,
+            recipients: [...config.emailNotifications.recipients],
+            smtpConfig: config.emailNotifications.smtpConfig
+              ? { ...config.emailNotifications.smtpConfig }
+              : config.emailNotifications.smtpConfig,
+          }
+        : undefined,
+      desktopNotifications: config.desktopNotifications
+        ? { ...config.desktopNotifications }
+        : undefined,
+    };
   }
 
   addAlertRule(rule: AlertRule): void {
@@ -106,7 +147,15 @@ export class MonitoringSystem {
       severity: rule.severity,
       message: this.generateAlertMessage(rule, logEntry),
       timestamp: new Date(),
-      logEntry,
+      logEntry: {
+        id: logEntry.id,
+        timestamp: logEntry.timestamp,
+        sessionId: logEntry.sessionId,
+        userId: logEntry.userId,
+        command: logEntry.command,
+        exitCode: logEntry.result.exitCode,
+        riskLevel: logEntry.securityCheck.riskLevel,
+      },
       acknowledged: false,
     };
 
@@ -267,7 +316,7 @@ export class MonitoringSystem {
       id: 'privileged-command',
       name: 'Privileged Command Executed',
       description: 'Command executed with elevated privileges',
-      condition: (log) => log.command.toLowerCase().includes('sudo') || log.command.toLowerCase().includes('su '),
+      condition: (log) => hasSecurityCategory(log, 'privilege-escalation'),
       severity: 'medium',
       enabled: true,
       cooldownMinutes: 10,
@@ -289,10 +338,8 @@ export class MonitoringSystem {
       id: 'suspicious-file-ops',
       name: 'Suspicious File Operations',
       description: 'Potentially dangerous file operations detected',
-      condition: (log) => {
-        const cmd = log.command.toLowerCase();
-        return cmd.includes('rm -rf') || cmd.includes('del /f /s') || cmd.includes('format');
-      },
+      condition: (log) =>
+        hasSecurityCategory(log, 'destructive') && log.securityCheck.riskLevel === 'high',
       severity: 'critical',
       enabled: true,
       cooldownMinutes: 1,

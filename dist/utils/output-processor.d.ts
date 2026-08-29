@@ -9,20 +9,28 @@ export interface OutputConfig {
     enableAiOptimizations: boolean;
     maxOutputLength: number;
 }
+/** Raw result of a spawned command, before AI-friendly processing. */
+export interface RawCommandResult {
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+    /** Bytes dropped per stream by the executor's in-memory collection cap. */
+    truncated?: {
+        stdout: number;
+        stderr: number;
+    };
+    /** Set when the process was terminated by a signal (e.g. 'SIGTERM'). */
+    signal?: string;
+    /** Set when the process was killed because it exceeded its timeout. */
+    timedOut?: boolean;
+    timeoutMs?: number;
+}
 export declare class OutputProcessor {
     private config;
     constructor(config: OutputConfig);
-    process(rawOutput: {
-        stdout: string;
-        stderr: string;
-        exitCode: number;
-        /** Bytes dropped per stream by the executor's in-memory cap (see ServerConfig.output.maxCollectedBytes). */
-        truncated?: {
-            stdout: number;
-            stderr: number;
-        };
-    }, command?: string): Promise<CommandOutput>;
-    private stripAnsiCodes;
+    updateConfig(config: OutputConfig): void;
+    process(rawOutput: RawCommandResult, command?: string): Promise<CommandOutput>;
+    static stripAnsiCodes(text: string): string;
     private optimizeForAI;
     private enhanceCommandSpecificOutput;
     private enhanceDirectoryListing;
