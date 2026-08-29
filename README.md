@@ -64,7 +64,7 @@ The server implements the Model Context Protocol specification with STDIO transp
 - **Real-time Monitoring**: Live monitoring with configurable alerts
 - **Multiple Export Formats**: JSON, CSV, XML export capabilities
 - **Compliance Reporting**: Detailed audit reports for security compliance
-- **Privacy Controls**: Configurable sensitive data redaction
+- **Privacy Controls**: Audit entries record a slim context (session, working directory, last five commands, AI intent) — never the process environment, command history, or output cache. Values stored under secret-looking keys (`secret`, `token`, `password`, `api_key`, `auth`, `credential`, `private`, plus any pattern you add via `MCP_EXEC_AUDIT_REDACT_PATTERNS`) are replaced with `[REDACTED]` before anything is written to the log or returned by `export_logs`. Command output in audit entries is truncated to `MCP_EXEC_AUDIT_MAX_OUTPUT_BYTES` (4 KB by default); the full output remains available in the in-memory context cache. Note that command *output* itself is logged as-is up to that limit, so a command that prints a secret still records it.
 
 ## Quick Start
 
@@ -156,6 +156,18 @@ The server provides comprehensive MCP tools organized into categories:
 
 - **`execute_command`** - Execute one-shot shell commands with full security validation and enhanced output formatting
 - **`confirm_command`** - Interactive confirmation system for dangerous operations
+
+Both `execute_command` and `start_interactive_session` accept a `shell` option:
+
+| Value | Behavior |
+| --- | --- |
+| `true` (default) | Run the command through the platform shell (`/bin/sh`, `cmd.exe`) |
+| `false` | Spawn the command directly - no shell, so `args` are passed verbatim and entries containing spaces stay a single argument |
+| a string, e.g. `"/bin/zsh"` | Run the command through that shell. Absolute executable paths may contain spaces; bare names must contain no whitespace or shell metacharacters and are resolved using the command's `env.PATH` and `cwd`. The resolved executable is checked by the command security policy |
+
+When `execute_command` combines `shell: false` with `enableTerminalViewer: true`,
+the command is spawned directly under the PTY. Its arguments remain discrete and
+the terminal session ends when that process exits.
 
 ### Interactive Session Tools
 
@@ -256,7 +268,12 @@ The server supports comprehensive configuration through environment variables wi
 ```bash
 MCP_EXEC_SECURITY_LEVEL=permissive          # strict|moderate|permissive
 MCP_EXEC_CONFIRM_DANGEROUS=false            # Require confirmation for dangerous commands
-MCP_EXEC_ALLOWED_DIRECTORIES="cwd,/tmp"     # Comma-separated allowed directories
+MCP_EXEC_ALLOWED_DIRECTORIES="/home/user,/tmp" # Comma-separated allowed directories.
+                                            # Unset = no directory restriction. A path is allowed
+                                            # only if it is one of these directories or inside it;
+                                            # `/home/user` does not allow `/home/user-other`.
+                                            # Relative and `~` paths are resolved against the
+                                            # session's working directory before the check.
 MCP_EXEC_BLOCKED_COMMANDS="rm -rf /,format" # Comma-separated blocked commands
 MCP_EXEC_TIMEOUT=300000                     # Command timeout in milliseconds
 MCP_EXEC_MAX_MEMORY=1024                    # Maximum memory usage in MB
@@ -267,6 +284,31 @@ MCP_EXEC_NETWORK_ACCESS=true                # Allow network access
 MCP_EXEC_FILESYSTEM_ACCESS=full             # read-only|restricted|full
 ```
 
+#### Blocked Commands
+
+Entries in `blockedCommands` (via `MCP_EXEC_BLOCKED_COMMANDS` or `manage_blocked_commands`) are matched
+as **commands, not substrings**. The command line is tokenized into sub-commands (split on `;`, `&&`,
+`||`, `|`, `$(...)` and backticks, honoring quotes), and each entry is matched against the command
+actually being run:
+
+- A single-word entry (`format`, `mkfs`, `fdisk`) matches only when it is the command being executed,
+  after stripping wrappers such as `sudo`/`env` and comparing the basename. So `mkfs` blocks
+  `mkfs.ext4 /dev/sda1` and `/sbin/mkfs`, but no longer blocks `npm run format` or `ls src/formatters`.
+- A multi-word entry (`rm -rf /`) matches when the same command runs with at least those flags and
+  operands. Flag order and clustering are irrelevant (`rm -fr /`, `rm -r -f /`, `rm -vrf /` all match),
+  attached long-option values remain significant, and positional operand order is preserved. Path
+  operands are compared by resolved path, so `rm -rf /` blocks `rm -rf //` and `rm -rf /*` but not
+  `rm -rf /tmp/build-cache`.
+- An entry prefixed with `re:` is treated as a raw case-insensitive regex against the whole command
+  line, e.g. `re:^git\s+push\s+--force` — the escape hatch for patterns the matcher above cannot express.
+  In `MCP_EXEC_BLOCKED_COMMANDS`, commas inside regex quantifiers and character classes are preserved;
+  escape any other literal comma as `\,`.
+
+Shell interpreter payloads, grouped/control commands, and transparent wrappers are inspected before
+matching. POSIX and `cmd.exe` quoting rules are handled separately. If policy parsing cannot safely
+identify an executable (for example, because of an unterminated quote or an unknown wrapper option),
+the command is rejected rather than allowed without a complete block-list check.
+
 #### Logging Configuration
 
 ```bash
@@ -274,6 +316,9 @@ MCP_EXEC_FILESYSTEM_ACCESS=full             # read-only|restricted|full
 MCP_EXEC_AUDIT_ENABLED=true                 # Enable audit logging
 MCP_EXEC_AUDIT_LOG_LEVEL=debug              # emergency|alert|critical|error|warning|notice|info|debug
 MCP_EXEC_AUDIT_RETENTION=30                 # Days to retain logs
+MCP_EXEC_AUDIT_MAX_OUTPUT_BYTES=4096        # Max stdout/stderr bytes stored per audit entry
+MCP_EXEC_AUDIT_MAX_IN_MEMORY_ENTRIES=1000   # Hot-cache entries; reports/exports still read full log history
+MCP_EXEC_AUDIT_REDACT_PATTERNS=             # Extra comma-separated regexes for secret-bearing keys
 
 # MCP Client Logging
 MCP_EXEC_MCP_LOGGING_ENABLED=true           # Enable MCP client notifications
@@ -289,7 +334,7 @@ MCP_EXEC_MCP_INCLUDE_CONTEXT=true           # Include context data
 # Interactive Sessions
 MCP_EXEC_MAX_SESSIONS=10                    # Maximum concurrent sessions
 MCP_EXEC_SESSION_TIMEOUT=1800000            # Session timeout (30 minutes)
-MCP_EXEC_SESSION_BUFFER_SIZE=1000           # Session output buffer size
+MCP_EXEC_SESSION_BUFFER_BYTES=262144        # Session output buffer size in bytes (256 KB)
 
 # Server Lifecycle
 MCP_EXEC_INACTIVITY_TIMEOUT=0               # Inactivity timeout in ms (0 = disabled, recommended for MCP)
@@ -302,8 +347,65 @@ MCP_EXEC_STRIP_ANSI=true                    # Strip ANSI escape codes
 MCP_EXEC_SUMMARIZE_VERBOSE=true             # Summarize verbose output
 MCP_EXEC_ENABLE_AI_OPTIMIZATIONS=true       # Enable AI-powered optimizations
 MCP_EXEC_MAX_OUTPUT_LENGTH=10000            # Maximum output length in bytes
+MCP_EXEC_MAX_COLLECTED_BYTES=1048576        # Max bytes buffered in memory per stream while a
+                                            # command runs (0 = unlimited). Defaults to
+                                            # max(4 x MCP_EXEC_MAX_OUTPUT_LENGTH, 1 MB).
 MCP_EXEC_USE_MARKDOWN=true                  # Use Markdown formatting
 ```
+
+### Terminal Viewer
+
+The terminal viewer serves live PTY output over HTTP and WebSocket, so anyone who can reach
+`host:port` can read everything that scrolls past in a terminal session — including secrets.
+
+```bash
+MCP_EXEC_TERMINAL_VIEWER_ENABLED=false      # Enable the browser-based terminal viewer
+MCP_EXEC_TERMINAL_VIEWER_PORT=3000          # Listen port
+MCP_EXEC_TERMINAL_VIEWER_HOST=127.0.0.1     # Bind address (loopback by default)
+MCP_EXEC_TERMINAL_VIEWER_MAX_SESSIONS=10    # Maximum viewable terminal sessions
+MCP_EXEC_TERMINAL_VIEWER_SESSION_TIMEOUT=1800000
+MCP_EXEC_TERMINAL_VIEWER_BUFFER_SIZE=10000  # Scrollback lines retained per session
+MCP_EXEC_TERMINAL_VIEWER_ENABLE_AUTH=false  # Require a token on every request
+MCP_EXEC_TERMINAL_VIEWER_AUTH_TOKEN=        # Token to require (auto-generated when empty)
+```
+
+#### Authentication
+
+When `enableAuth` is true, **every** HTTP route (including `/health` and `/static/*`) and every
+WebSocket upgrade requires the token. Requests without a valid token get `401`; WebSocket
+connections without one are closed with code `1008`. Repeated failed authentication attempts
+from one client are limited to 20 per minute (`429` for HTTP and close code `1013` for
+WebSockets). Tokens are compared in constant time.
+
+Supply the token either way:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/api/sessions
+curl "http://127.0.0.1:3000/api/sessions?token=$TOKEN"
+```
+
+If `enableAuth` is true and no `authToken` is configured, the service generates one at startup
+and logs it to stderr:
+
+```
+Terminal viewer auth token (generated): 5WFHL59l49GRN9S3iHuLgRMf5Ozydqvd
+```
+
+Session URLs returned by `getStatus`, `/api/sessions`, `start_terminal_session`, and
+`execute_command` already carry `?token=...`, so opening the URL in a browser just works —
+the viewer page forwards the token to the WebSocket automatically. A viewer page fetched with
+an `Authorization: Bearer ...` header works as well: the authenticated response injects the
+configured token into its WebSocket initialization because browser WebSocket APIs cannot set
+custom authorization headers. Treat viewer URLs and authenticated page content as secrets:
+anyone holding either can read the terminal.
+
+#### Binding to a non-loopback address
+
+Binding to anything other than loopback (for example `MCP_EXEC_TERMINAL_VIEWER_HOST=0.0.0.0`)
+with authentication disabled is **refused** — the service fails to start with an explanatory
+error. Runtime configuration updates and rollbacks that would make this transition are rejected
+before the active configuration changes. Enable authentication, or keep the viewer on
+`127.0.0.1`.
 
 ### Dynamic Configuration System
 
@@ -429,7 +531,7 @@ The dynamic configuration system supports the following configuration sections:
   "arguments": {
     "maxInteractiveSessions": 20,
     "sessionTimeout": 3600000,
-    "outputBufferSize": 2000
+    "outputBufferBytes": 524288
   }
 }
 
@@ -459,6 +561,7 @@ The dynamic configuration system supports the following configuration sections:
     "stripAnsi": false,
     "enableAiOptimizations": false,
     "maxOutputLength": 20000,
+    "maxCollectedBytes": 1048576,
     "summarizeVerbose": false
   }
 }
@@ -699,8 +802,11 @@ MCP_EXEC_MAX_SESSIONS=10
 # Session timeout in milliseconds (default: 30 minutes)
 MCP_EXEC_SESSION_TIMEOUT=1800000
 
-# Output buffer size per session (default: 1000 lines)
-MCP_EXEC_SESSION_BUFFER_SIZE=1000
+# Output buffer size per session, in bytes (default: 262144 = 256 KB).
+# Renamed from MCP_EXEC_SESSION_BUFFER_SIZE, which counted lines. Session output is
+# now buffered verbatim; when the cap is exceeded the oldest bytes are dropped and
+# read_session_output reports how many via `droppedBytes`.
+MCP_EXEC_SESSION_BUFFER_BYTES=262144
 ```
 
 ## Development
@@ -738,6 +844,7 @@ node tests/test-execute-command-no-session.js # One-shot command execution
 node tests/test-session-separation.js   # Session functionality separation
 node tests/test-mcp-annotations.js      # MCP tool annotations structure compliance
 node tests/test-dynamic-configuration.js # Dynamic configuration system
+node tests/test-terminal-viewer-auth.js  # Terminal viewer authentication
 ```
 
 #### Dynamic Configuration Test Coverage

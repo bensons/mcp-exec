@@ -11,6 +11,19 @@ export interface AlertRule {
     enabled: boolean;
     cooldownMinutes: number;
 }
+/**
+ * Identifying fields of the triggering entry. Alerts deliberately do not hold
+ * the whole LogEntry: they are retained for days and shipped to webhooks.
+ */
+export interface AlertLogEntry {
+    id: string;
+    timestamp: Date;
+    sessionId: string;
+    userId?: string;
+    command: string;
+    exitCode: number;
+    riskLevel: 'low' | 'medium' | 'high';
+}
 export interface Alert {
     id: string;
     ruleId: string;
@@ -18,7 +31,7 @@ export interface Alert {
     severity: 'low' | 'medium' | 'high' | 'critical';
     message: string;
     timestamp: Date;
-    logEntry: LogEntry;
+    logEntry: AlertLogEntry;
     acknowledged: boolean;
     acknowledgedBy?: string;
     acknowledgedAt?: Date;
@@ -56,6 +69,8 @@ export declare class MonitoringSystem {
     private readonly desktopNotificationTimeoutMs;
     private desktopNotificationInFlight?;
     constructor(config: MonitoringConfig, desktopNotifier?: DesktopNotifier, desktopNotificationTimeoutMs?: number);
+    updateConfig(config: MonitoringConfig): void;
+    private cloneConfig;
     addAlertRule(rule: AlertRule): void;
     removeAlertRule(ruleId: string): boolean;
     updateAlertRule(ruleId: string, updates: Partial<AlertRule>): boolean;

@@ -12,6 +12,20 @@ export interface OutputConfig {
   maxOutputLength: number;
 }
 
+/** Raw result of a spawned command, before AI-friendly processing. */
+export interface RawCommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  /** Bytes dropped per stream by the executor's in-memory collection cap. */
+  truncated?: { stdout: number; stderr: number };
+  /** Set when the process was terminated by a signal (e.g. 'SIGTERM'). */
+  signal?: string;
+  /** Set when the process was killed because it exceeded its timeout. */
+  timedOut?: boolean;
+  timeoutMs?: number;
+}
+
 export class OutputProcessor {
   private config: OutputConfig;
 
@@ -19,13 +33,17 @@ export class OutputProcessor {
     this.config = config;
   }
 
-  async process(rawOutput: { stdout: string; stderr: string; exitCode: number }, command?: string): Promise<CommandOutput> {
+  updateConfig(config: OutputConfig): void {
+    this.config = config;
+  }
+
+  async process(rawOutput: RawCommandResult, command?: string): Promise<CommandOutput> {
     let { stdout, stderr, exitCode } = rawOutput;
 
     // Strip ANSI codes if configured
     if (this.config.stripAnsi) {
-      stdout = this.stripAnsiCodes(stdout);
-      stderr = this.stripAnsiCodes(stderr);
+      stdout = OutputProcessor.stripAnsiCodes(stdout);
+      stderr = OutputProcessor.stripAnsiCodes(stderr);
     }
 
     // Apply AI optimizations if enabled
@@ -47,9 +65,26 @@ export class OutputProcessor {
 
     // Generate metadata
     const metadata = this.generateMetadata(stdout, stderr, exitCode, command);
+    if (rawOutput.timedOut) {
+      metadata.warnings.push(
+        rawOutput.timeoutMs
+          ? `Command timed out after ${rawOutput.timeoutMs}ms and was terminated`
+          : 'Command timed out and was terminated'
+      );
+    }
+
+    // Surface output the executor had to drop to stay within its memory cap
+    const droppedBytes = (rawOutput.truncated?.stdout ?? 0) + (rawOutput.truncated?.stderr ?? 0);
+    const truncationWarning = `[Output truncated: ${droppedBytes} bytes dropped]`;
+    if (droppedBytes > 0) {
+      metadata.warnings.push(truncationWarning);
+    }
 
     // Generate AI-friendly summary
-    const summary = this.generateSummary(stdout, stderr, exitCode, metadata);
+    const summary = this.generateSummary(stdout, stderr, exitCode, metadata, rawOutput);
+    if (droppedBytes > 0) {
+      summary.mainResult = `${summary.mainResult} ${truncationWarning}`;
+    }
 
     return {
       stdout,
@@ -61,7 +96,7 @@ export class OutputProcessor {
     };
   }
 
-  private stripAnsiCodes(text: string): string {
+  static stripAnsiCodes(text: string): string {
     // Remove ANSI escape sequences
     return text.replace(/\x1b\[[0-9;]*m/g, '');
   }
@@ -148,15 +183,29 @@ export class OutputProcessor {
   private truncateOutput(text: string, maxLength: number): string {
     if (text.length <= maxLength) return text;
 
-    const truncated = text.substring(0, maxLength - 100);
-    const lastNewline = truncated.lastIndexOf('\n');
+    // Keep both ends: the prefix provides command context, while the suffix commonly
+    // contains the final error or summary. This also preserves the rolling tail retained
+    // by ShellExecutor after its in-memory collection cap is reached.
+    let omittedCharacters = text.length;
+    let marker = '';
+    let contentLength = 0;
 
-    if (lastNewline > maxLength * 0.8) {
-      return truncated.substring(0, lastNewline) +
-        `\n\n... [Output truncated - ${text.length - lastNewline} more characters]`;
+    // The marker length depends on the omitted count. Iterate to a stable allocation.
+    for (let iteration = 0; iteration < 4; iteration++) {
+      marker = `\n\n... [Output truncated - ${omittedCharacters} characters omitted] ...\n\n`;
+      contentLength = Math.max(0, maxLength - marker.length);
+      const nextOmittedCharacters = text.length - contentLength;
+      if (nextOmittedCharacters === omittedCharacters) break;
+      omittedCharacters = nextOmittedCharacters;
     }
 
-    return truncated + `\n\n... [Output truncated - ${text.length - maxLength + 100} more characters]`;
+    if (contentLength === 0) {
+      return text.slice(-maxLength);
+    }
+
+    const headLength = Math.ceil(contentLength / 2);
+    const tailLength = Math.floor(contentLength / 2);
+    return text.slice(0, headLength) + marker + text.slice(text.length - tailLength);
   }
 
   private detectStructuredOutput(stdout: string): CommandOutput['structuredOutput'] {
@@ -476,18 +525,28 @@ export class OutputProcessor {
   }
 
   private generateSummary(
-    stdout: string, 
-    stderr: string, 
-    exitCode: number, 
-    metadata: CommandOutput['metadata']
+    stdout: string,
+    stderr: string,
+    exitCode: number,
+    metadata: CommandOutput['metadata'],
+    status: { signal?: string; timedOut?: boolean; timeoutMs?: number } = {}
   ): CommandOutput['summary'] {
-    const success = exitCode === 0;
+    // A signal-killed or timed-out command never succeeded, whatever the exit code says
+    const success = exitCode === 0 && !status.signal && !status.timedOut;
     const hasOutput = stdout.trim().length > 0;
     const hasErrors = stderr.trim().length > 0;
 
     let mainResult: string;
     if (!success) {
-      mainResult = `Command failed with exit code ${exitCode}`;
+      if (status.timedOut) {
+        mainResult = status.timeoutMs
+          ? `Command timed out after ${status.timeoutMs}ms and was terminated (exit code ${exitCode})`
+          : `Command timed out and was terminated (exit code ${exitCode})`;
+      } else if (status.signal) {
+        mainResult = `Command terminated by signal ${status.signal} (exit code ${exitCode})`;
+      } else {
+        mainResult = `Command failed with exit code ${exitCode}`;
+      }
       if (hasErrors) {
         const firstErrorLine = stderr.split('\n')[0].trim();
         mainResult += `: ${firstErrorLine}`;
@@ -517,7 +576,9 @@ export class OutputProcessor {
     }
 
     const nextSteps: string[] = [];
-    if (!success) {
+    if (status.timedOut) {
+      nextSteps.push('Increase the timeout or run the command in an interactive session');
+    } else if (!success) {
       nextSteps.push('Review error message and correct the command');
     }
     if (metadata.suggestions.length > 0) {

@@ -8,6 +8,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MonitoringSystem = void 0;
 const node_notifier_1 = __importDefault(require("node-notifier"));
+function hasSecurityCategory(log, category) {
+    return log.securityCheck.category === category || log.securityCheck.categories?.includes(category) === true;
+}
 const DESKTOP_NOTIFICATION_TIMEOUT_MS = 5000;
 class MonitoringSystem {
     config;
@@ -22,10 +25,31 @@ class MonitoringSystem {
     desktopNotificationTimeoutMs;
     desktopNotificationInFlight;
     constructor(config, desktopNotifier = node_notifier_1.default, desktopNotificationTimeoutMs = DESKTOP_NOTIFICATION_TIMEOUT_MS) {
-        this.config = config;
+        this.config = this.cloneConfig(config);
         this.desktopNotifier = desktopNotifier;
         this.desktopNotificationTimeoutMs = desktopNotificationTimeoutMs;
         this.initializeDefaultRules();
+    }
+    updateConfig(config) {
+        this.config = this.cloneConfig(config);
+        this.cleanup();
+    }
+    cloneConfig(config) {
+        return {
+            ...config,
+            emailNotifications: config.emailNotifications
+                ? {
+                    ...config.emailNotifications,
+                    recipients: [...config.emailNotifications.recipients],
+                    smtpConfig: config.emailNotifications.smtpConfig
+                        ? { ...config.emailNotifications.smtpConfig }
+                        : config.emailNotifications.smtpConfig,
+                }
+                : undefined,
+            desktopNotifications: config.desktopNotifications
+                ? { ...config.desktopNotifications }
+                : undefined,
+        };
     }
     addAlertRule(rule) {
         this.alertRules.set(rule.id, rule);
@@ -85,7 +109,15 @@ class MonitoringSystem {
             severity: rule.severity,
             message: this.generateAlertMessage(rule, logEntry),
             timestamp: new Date(),
-            logEntry,
+            logEntry: {
+                id: logEntry.id,
+                timestamp: logEntry.timestamp,
+                sessionId: logEntry.sessionId,
+                userId: logEntry.userId,
+                command: logEntry.command,
+                exitCode: logEntry.result.exitCode,
+                riskLevel: logEntry.securityCheck.riskLevel,
+            },
             acknowledged: false,
         };
         this.alerts.push(alert);
@@ -270,7 +302,7 @@ class MonitoringSystem {
             id: 'privileged-command',
             name: 'Privileged Command Executed',
             description: 'Command executed with elevated privileges',
-            condition: (log) => log.command.toLowerCase().includes('sudo') || log.command.toLowerCase().includes('su '),
+            condition: (log) => hasSecurityCategory(log, 'privilege-escalation'),
             severity: 'medium',
             enabled: true,
             cooldownMinutes: 10,
@@ -290,10 +322,7 @@ class MonitoringSystem {
             id: 'suspicious-file-ops',
             name: 'Suspicious File Operations',
             description: 'Potentially dangerous file operations detected',
-            condition: (log) => {
-                const cmd = log.command.toLowerCase();
-                return cmd.includes('rm -rf') || cmd.includes('del /f /s') || cmd.includes('format');
-            },
+            condition: (log) => hasSecurityCategory(log, 'destructive') && log.securityCheck.riskLevel === 'high',
             severity: 'critical',
             enabled: true,
             cooldownMinutes: 1,

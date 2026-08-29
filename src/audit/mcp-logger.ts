@@ -30,6 +30,18 @@ export class MCPLogger {
   }
 
   /**
+   * Apply configuration changes in place rather than recreating the logger,
+   * which would drop the notification callback and any queued messages.
+   */
+  updateConfig(config: Partial<MCPLoggerConfig>): void {
+    Object.assign(this.config, config);
+
+    if (this.messageQueue.length > this.config.maxQueueSize) {
+      this.messageQueue = this.messageQueue.slice(-this.config.maxQueueSize);
+    }
+  }
+
+  /**
    * Set the callback function for sending notifications to MCP clients
    */
   setNotificationCallback(callback: LogNotificationCallback): void {
