@@ -44,6 +44,8 @@ class ContextManager {
     config;
     sessionId;
     currentDirectory;
+    previousDirectory;
+    directoryStack = [];
     environmentVariables;
     commandHistory;
     outputCache;
@@ -87,20 +89,31 @@ class ContextManager {
         };
     }
     async updateAfterCommand(options) {
-        const { id, command, workingDirectory, environment, output, aiContext, sessionId, sessionType } = options;
+        const { id, command, workingDirectory, environment, envOverrides, resultingEnvironment, resultingWorkingDirectory, output, aiContext, sessionId, sessionType, } = options;
         this.auditLogger?.debug('Updating context after command execution', {
             commandId: id,
             command: command.substring(0, 50),
             workingDirectory,
+            envOverrides: envOverrides ? Object.keys(envOverrides) : undefined,
             sessionId,
             sessionType
         }, 'context-manager');
-        // Update working directory if command changed it
-        if (this.config.preserveWorkingDirectory) {
-            await this.updateWorkingDirectory(command, workingDirectory, output);
+        // Use the state reported by the shell itself. This preserves expansions and
+        // shell control-flow semantics without attempting to re-interpret the command.
+        let persistedWorkingDirectory = false;
+        const commandUsedScopedWorkingDirectory = path.resolve(workingDirectory) !== this.currentDirectory;
+        if (this.config.preserveWorkingDirectory && output.exitCode === 0 && resultingWorkingDirectory) {
+            persistedWorkingDirectory = await this.updateWorkingDirectory(workingDirectory, resultingWorkingDirectory, resultingEnvironment);
         }
-        // Update environment variables
-        this.updateEnvironmentVariables(environment);
+        if (output.exitCode === 0 && resultingEnvironment) {
+            this.updateEnvironmentVariables(resultingEnvironment, envOverrides, commandUsedScopedWorkingDirectory && !persistedWorkingDirectory);
+            if (persistedWorkingDirectory) {
+                this.environmentVariables.set('PWD', this.currentDirectory);
+                if (this.previousDirectory) {
+                    this.environmentVariables.set('OLDPWD', this.previousDirectory);
+                }
+            }
+        }
         // Track file system changes
         await this.trackFileSystemChanges(command, workingDirectory, id);
         // Add to command history
@@ -159,6 +172,7 @@ class ContextManager {
             const resolvedDir = path.resolve(directory);
             const stats = await fs.stat(resolvedDir);
             if (stats.isDirectory()) {
+                this.previousDirectory = this.currentDirectory;
                 this.currentDirectory = resolvedDir;
                 return true;
             }
@@ -179,111 +193,83 @@ class ContextManager {
             await this.persistSession();
         }
     }
-    async updateWorkingDirectory(command, currentWorkingDir, output) {
-        // Check if command was a directory change
-        const cdMatch = command.match(/^cd\s+(.+)$/i);
-        if (cdMatch && output.exitCode === 0) {
-            const targetDir = cdMatch[1].trim().replace(/['"]/g, '');
-            try {
-                let newDir;
-                // Handle special directory shortcuts
-                if (targetDir === '~') {
-                    newDir = process.env.HOME || process.env.USERPROFILE || currentWorkingDir;
-                }
-                else if (targetDir === '-') {
-                    // Previous directory - for now, just keep current
-                    return;
-                }
-                else if (targetDir === '..') {
-                    newDir = path.dirname(currentWorkingDir);
-                }
-                else if (targetDir === '.') {
-                    newDir = currentWorkingDir;
-                }
-                else if (path.isAbsolute(targetDir)) {
-                    newDir = targetDir;
+    /** Apply the final directory observed inside the shell. */
+    async updateWorkingDirectory(commandWorkingDirectory, resultingWorkingDirectory, resultingEnvironment) {
+        const resolvedDirectory = await this.canonicalDirectory(resultingWorkingDirectory);
+        const commandCwd = await this.canonicalDirectory(commandWorkingDirectory);
+        const currentCwd = await this.canonicalDirectory(this.currentDirectory);
+        if (!resolvedDirectory || !commandCwd || !currentCwd) {
+            return false;
+        }
+        // An explicit per-command cwd is scoped like a per-command env override. Only
+        // retain it if the command actually moved away from that starting directory.
+        const shouldPersist = commandCwd === currentCwd || resolvedDirectory !== commandCwd;
+        if (!shouldPersist) {
+            return false;
+        }
+        const oldPwd = resultingEnvironment?.OLDPWD;
+        this.previousDirectory = oldPwd && path.isAbsolute(oldPwd)
+            ? path.resolve(oldPwd)
+            : this.currentDirectory;
+        this.currentDirectory = resolvedDirectory;
+        return true;
+    }
+    async isDirectory(dir) {
+        try {
+            return (await fs.stat(dir)).isDirectory();
+        }
+        catch {
+            return false;
+        }
+    }
+    async canonicalDirectory(dir) {
+        try {
+            const canonical = await fs.realpath(path.resolve(dir));
+            return await this.isDirectory(canonical) ? canonical : undefined;
+        }
+        catch {
+            return undefined;
+        }
+    }
+    /**
+     * Replace persistent environment state with the shell's exported environment.
+     * Per-command overrides and shell-maintained bookkeeping remain scoped.
+     */
+    updateEnvironmentVariables(resultingEnvironment, envOverrides, restoreWorkingDirectoryState = false) {
+        const previousEnvironment = this.environmentVariables;
+        const nextEnvironment = new Map(Object.entries(resultingEnvironment));
+        // These values describe the short-lived shell process rather than user state.
+        for (const name of ['_', 'SHLVL']) {
+            const previousValue = previousEnvironment.get(name);
+            if (previousValue === undefined) {
+                nextEnvironment.delete(name);
+            }
+            else {
+                nextEnvironment.set(name, previousValue);
+            }
+        }
+        // API-level env overrides apply only to the command that received them.
+        for (const name of Object.keys(envOverrides || {})) {
+            const previousValue = previousEnvironment.get(name);
+            if (previousValue === undefined) {
+                nextEnvironment.delete(name);
+            }
+            else {
+                nextEnvironment.set(name, previousValue);
+            }
+        }
+        if (restoreWorkingDirectoryState) {
+            for (const name of ['PWD', 'OLDPWD']) {
+                const previousValue = previousEnvironment.get(name);
+                if (previousValue === undefined) {
+                    nextEnvironment.delete(name);
                 }
                 else {
-                    newDir = path.resolve(currentWorkingDir, targetDir);
-                }
-                // Verify directory exists
-                const stats = await fs.stat(newDir);
-                if (stats.isDirectory()) {
-                    this.currentDirectory = newDir;
+                    nextEnvironment.set(name, previousValue);
                 }
             }
-            catch (error) {
-                // Directory doesn't exist or not accessible, keep current directory
-            }
         }
-        // Also check for pushd/popd commands
-        const pushdMatch = command.match(/^pushd\s+(.+)$/i);
-        if (pushdMatch && output.exitCode === 0) {
-            const targetDir = pushdMatch[1].trim().replace(/['"]/g, '');
-            await this.setWorkingDirectory(path.resolve(currentWorkingDir, targetDir));
-        }
-    }
-    updateEnvironmentVariables(environment) {
-        // Update environment variables that may have changed
-        Object.entries(environment).forEach(([key, value]) => {
-            this.environmentVariables.set(key, value);
-        });
-        // Look for export/set commands in recent history to track variable changes
-        const recentCommands = this.commandHistory.slice(-5);
-        for (const entry of recentCommands) {
-            this.extractEnvironmentChanges(entry.command);
-        }
-    }
-    extractEnvironmentChangesFromCommand(command) {
-        const changes = {};
-        // Extract environment variables from the current command
-        this.extractEnvironmentChanges(command);
-        // Return the changes that were made
-        return changes;
-    }
-    extractEnvironmentChanges(command) {
-        // Unix-style export with value
-        const exportMatch = command.match(/export\s+(\w+)=(.+)/i);
-        if (exportMatch) {
-            const [, key, value] = exportMatch;
-            this.environmentVariables.set(key, value.replace(/['"]/g, ''));
-            return;
-        }
-        // Unix-style export without value (exports existing variable)
-        const exportOnlyMatch = command.match(/export\s+(\w+)$/i);
-        if (exportOnlyMatch) {
-            const [, key] = exportOnlyMatch;
-            // Keep existing value if it exists
-            if (!this.environmentVariables.has(key) && process.env[key]) {
-                this.environmentVariables.set(key, process.env[key]);
-            }
-            return;
-        }
-        // Windows-style set
-        const setMatch = command.match(/set\s+(\w+)=(.+)/i);
-        if (setMatch) {
-            const [, key, value] = setMatch;
-            this.environmentVariables.set(key, value.replace(/['"]/g, ''));
-            return;
-        }
-        // Inline variable assignment (VAR=value command)
-        const inlineMatch = command.match(/^(\w+)=(.+?)\s+/);
-        if (inlineMatch) {
-            const [, key, value] = inlineMatch;
-            this.environmentVariables.set(key, value.replace(/['"]/g, ''));
-            return;
-        }
-        // Multiple inline assignments
-        const multipleInlineMatches = command.match(/^((?:\w+=\S+\s+)+)/);
-        if (multipleInlineMatches) {
-            const assignments = multipleInlineMatches[1];
-            const assignmentPattern = /(\w+)=(\S+)/g;
-            let match;
-            while ((match = assignmentPattern.exec(assignments)) !== null) {
-                const [, key, value] = match;
-                this.environmentVariables.set(key, value.replace(/['"]/g, ''));
-            }
-        }
+        this.environmentVariables = nextEnvironment;
     }
     async trackFileSystemChanges(command, workingDirectory, commandId) {
         // Simple heuristic-based file system change tracking
@@ -337,6 +323,8 @@ class ContextManager {
             const sessionData = {
                 sessionId: this.sessionId,
                 currentDirectory: this.currentDirectory,
+                previousDirectory: this.previousDirectory,
+                directoryStack: this.directoryStack,
                 environmentVariables: Object.fromEntries(this.environmentVariables),
                 commandHistory: this.commandHistory,
                 fileSystemChanges: this.fileSystemChanges,
@@ -359,6 +347,12 @@ class ContextManager {
             const sessionData = JSON.parse(await fs.readFile(sessionFile, 'utf-8'));
             this.sessionId = sessionData.sessionId || this.sessionId;
             this.currentDirectory = sessionData.currentDirectory || this.currentDirectory;
+            this.previousDirectory = typeof sessionData.previousDirectory === 'string'
+                ? sessionData.previousDirectory
+                : undefined;
+            this.directoryStack = Array.isArray(sessionData.directoryStack)
+                ? sessionData.directoryStack.filter((entry) => typeof entry === 'string')
+                : [];
             if (sessionData.environmentVariables) {
                 this.environmentVariables = new Map(Object.entries(sessionData.environmentVariables));
             }

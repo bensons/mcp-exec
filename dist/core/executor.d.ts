@@ -37,6 +37,11 @@ export declare class ShellExecutor {
     }[];
     private buildFullCommand;
     private executeWithTimeout;
+    private supportsShellStateCapture;
+    private wrapPosixCommand;
+    private extractPosixShellState;
+    private wrapWindowsCommand;
+    private extractWindowsShellState;
     listSessions(): Promise<import("../types/index").SessionInfo[]>;
     killSession(sessionId: string): Promise<void>;
     startInteractiveSession(options: StartSessionOptions): Promise<string>;

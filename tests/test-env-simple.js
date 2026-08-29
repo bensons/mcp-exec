@@ -36,7 +36,7 @@ async function testContextEnvSimple() {
     }
     console.log('✅ Per-command env stays scoped, echoed export ignored, cd tracked');
   } finally {
-    client.stop();
+    await client.stop();
   }
 }
 

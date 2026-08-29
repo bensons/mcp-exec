@@ -12,7 +12,17 @@ export interface UpdateCommandOptions {
     id: string;
     command: string;
     workingDirectory: string;
+    /** Environment the command actually ran with (recorded in history). */
     environment: Record<string, string>;
+    /**
+     * Per-command `env` overrides supplied by the caller. Recorded for the audit trail
+     * but never merged into the persistent session environment.
+     */
+    envOverrides?: Record<string, string>;
+    /** Exported environment observed in the shell after the command completed. */
+    resultingEnvironment?: Record<string, string>;
+    /** Working directory observed in the shell after the command completed. */
+    resultingWorkingDirectory?: string;
     output: CommandOutput;
     aiContext?: string;
     sessionId?: string;
@@ -22,6 +32,8 @@ export declare class ContextManager {
     private config;
     private sessionId;
     private currentDirectory;
+    private previousDirectory?;
+    private directoryStack;
     private environmentVariables;
     private commandHistory;
     private outputCache;
@@ -36,10 +48,15 @@ export declare class ContextManager {
     setWorkingDirectory(directory: string): Promise<boolean>;
     getSessionId(): string;
     clearHistory(): Promise<void>;
+    /** Apply the final directory observed inside the shell. */
     private updateWorkingDirectory;
+    private isDirectory;
+    private canonicalDirectory;
+    /**
+     * Replace persistent environment state with the shell's exported environment.
+     * Per-command overrides and shell-maintained bookkeeping remain scoped.
+     */
     private updateEnvironmentVariables;
-    private extractEnvironmentChangesFromCommand;
-    private extractEnvironmentChanges;
     private trackFileSystemChanges;
     private findRelatedCommands;
     private persistSession;

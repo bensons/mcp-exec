@@ -32,6 +32,10 @@ export interface UpdateCommandOptions {
    * but never merged into the persistent session environment.
    */
   envOverrides?: Record<string, string>;
+  /** Exported environment observed in the shell after the command completed. */
+  resultingEnvironment?: Record<string, string>;
+  /** Working directory observed in the shell after the command completed. */
+  resultingWorkingDirectory?: string;
   output: CommandOutput;
   aiContext?: string;
   sessionId?: string;
@@ -92,7 +96,19 @@ export class ContextManager {
   }
 
   async updateAfterCommand(options: UpdateCommandOptions): Promise<void> {
-    const { id, command, workingDirectory, environment, envOverrides, output, aiContext, sessionId, sessionType } = options;
+    const {
+      id,
+      command,
+      workingDirectory,
+      environment,
+      envOverrides,
+      resultingEnvironment,
+      resultingWorkingDirectory,
+      output,
+      aiContext,
+      sessionId,
+      sessionType,
+    } = options;
 
     this.auditLogger?.debug('Updating context after command execution', {
       commandId: id,
@@ -103,14 +119,30 @@ export class ContextManager {
       sessionType
     }, 'context-manager');
 
-    // Update working directory if command changed it
-    if (this.config.preserveWorkingDirectory) {
-      await this.updateWorkingDirectory(command, workingDirectory, output);
+    // Use the state reported by the shell itself. This preserves expansions and
+    // shell control-flow semantics without attempting to re-interpret the command.
+    let persistedWorkingDirectory = false;
+    const commandUsedScopedWorkingDirectory = path.resolve(workingDirectory) !== this.currentDirectory;
+    if (this.config.preserveWorkingDirectory && output.exitCode === 0 && resultingWorkingDirectory) {
+      persistedWorkingDirectory = await this.updateWorkingDirectory(
+        workingDirectory,
+        resultingWorkingDirectory,
+        resultingEnvironment
+      );
     }
-
-    // Apply only the environment changes the command itself made; per-command
-    // `envOverrides` stay scoped to that command.
-    this.updateEnvironmentVariables(command, output);
+    if (output.exitCode === 0 && resultingEnvironment) {
+      this.updateEnvironmentVariables(
+        resultingEnvironment,
+        envOverrides,
+        commandUsedScopedWorkingDirectory && !persistedWorkingDirectory
+      );
+      if (persistedWorkingDirectory) {
+        this.environmentVariables.set('PWD', this.currentDirectory);
+        if (this.previousDirectory) {
+          this.environmentVariables.set('OLDPWD', this.previousDirectory);
+        }
+      }
+    }
 
     // Track file system changes
     await this.trackFileSystemChanges(command, workingDirectory, id);
@@ -208,85 +240,32 @@ export class ContextManager {
     }
   }
 
-  /**
-   * Track `cd`/`pushd`/`popd` in the executed command.
-   *
-   * Heuristic: the command already ran in its own shell, so its final cwd is not
-   * observable here. We re-evaluate the directory-changing sub-commands instead,
-   * and only when the command as a whole succeeded. Known ceiling: `cd /a || cd /b`
-   * applies both (the `||` short-circuit is not modelled) -- upgrade path is to have
-   * the executor append `printf '\0%s' "$PWD"` and read the real cwd back from stdout.
-   */
+  /** Apply the final directory observed inside the shell. */
   private async updateWorkingDirectory(
-    command: string,
-    currentWorkingDir: string,
-    output: CommandOutput
-  ): Promise<void> {
-    if (output.exitCode !== 0) {
-      return;
+    commandWorkingDirectory: string,
+    resultingWorkingDirectory: string,
+    resultingEnvironment?: Record<string, string>
+  ): Promise<boolean> {
+    const resolvedDirectory = await this.canonicalDirectory(resultingWorkingDirectory);
+    const commandCwd = await this.canonicalDirectory(commandWorkingDirectory);
+    const currentCwd = await this.canonicalDirectory(this.currentDirectory);
+    if (!resolvedDirectory || !commandCwd || !currentCwd) {
+      return false;
     }
 
-    let cwd = currentWorkingDir;
-    let changed = false;
-
-    for (const subCommand of ContextManager.splitSubCommands(command)) {
-      const tokens = ContextManager.tokenize(subCommand);
-      const verb = tokens[0]?.toLowerCase();
-
-      if (verb === 'popd') {
-        const popped = this.directoryStack.pop();
-        if (popped && await this.isDirectory(popped)) {
-          this.previousDirectory = cwd;
-          cwd = popped;
-          changed = true;
-        }
-        continue;
-      }
-
-      if (verb !== 'cd' && verb !== 'pushd') {
-        continue;
-      }
-
-      // Ignore option flags (`cd -P foo`); `cd -` is handled by expandDirectory.
-      const target = tokens.slice(1).find(t => t === '-' || !t.startsWith('-'));
-      const resolved = this.expandDirectory(target, cwd);
-      if (!resolved || !(await this.isDirectory(resolved))) {
-        continue;
-      }
-
-      if (verb === 'pushd') {
-        this.directoryStack.push(cwd);
-      }
-      this.previousDirectory = cwd;
-      cwd = resolved;
-      changed = true;
+    // An explicit per-command cwd is scoped like a per-command env override. Only
+    // retain it if the command actually moved away from that starting directory.
+    const shouldPersist = commandCwd === currentCwd || resolvedDirectory !== commandCwd;
+    if (!shouldPersist) {
+      return false;
     }
 
-    if (changed) {
-      this.currentDirectory = cwd;
-    }
-  }
-
-  /** Resolve a `cd` argument (undefined/`~`/`$HOME`/`-`/relative/absolute) to an absolute path. */
-  private expandDirectory(target: string | undefined, base: string): string | undefined {
-    const home = process.env.HOME || process.env.USERPROFILE;
-
-    if (target === undefined || target === '~' || target === '$HOME' || target === '${HOME}') {
-      return home;
-    }
-    if (target === '-') {
-      return this.previousDirectory;
-    }
-    for (const prefix of ['~/', '$HOME/', '${HOME}/']) {
-      if (target.startsWith(prefix)) {
-        return home ? path.resolve(home, target.slice(prefix.length)) : undefined;
-      }
-    }
-    if (target.startsWith('$') || target.includes('$(') || target.includes('`')) {
-      // Unresolvable without running a shell; leave the tracked directory alone.
-      return undefined;
-    }
-    return path.resolve(base, target);
+    const oldPwd = resultingEnvironment?.OLDPWD;
+    this.previousDirectory = oldPwd && path.isAbsolute(oldPwd)
+      ? path.resolve(oldPwd)
+      : this.currentDirectory;
+    this.currentDirectory = resolvedDirectory;
+    return true;
   }
 
   private async isDirectory(dir: string): Promise<boolean> {
@@ -297,153 +276,59 @@ export class ContextManager {
     }
   }
 
+  private async canonicalDirectory(dir: string): Promise<string | undefined> {
+    try {
+      const canonical = await fs.realpath(path.resolve(dir));
+      return await this.isDirectory(canonical) ? canonical : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
-   * Apply persistent environment changes made by the executed command.
-   *
-   * Per-command `env` overrides are deliberately NOT applied: they are scoped to the
-   * single command that requested them. Only `export`/`set`/`unset` parsed out of the
-   * command itself persist, and only when the command succeeded.
+   * Replace persistent environment state with the shell's exported environment.
+   * Per-command overrides and shell-maintained bookkeeping remain scoped.
    */
-  private updateEnvironmentVariables(command: string, output: CommandOutput): void {
-    if (output.exitCode !== 0) {
-      return;
-    }
+  private updateEnvironmentVariables(
+    resultingEnvironment: Record<string, string>,
+    envOverrides?: Record<string, string>,
+    restoreWorkingDirectoryState = false
+  ): void {
+    const previousEnvironment = this.environmentVariables;
+    const nextEnvironment = new Map(Object.entries(resultingEnvironment));
 
-    for (const subCommand of ContextManager.splitSubCommands(command)) {
-      const tokens = ContextManager.tokenize(subCommand);
-      if (tokens.length === 0) {
-        continue;
-      }
-      const verb = tokens[0].toLowerCase();
-
-      if (verb === 'unset') {
-        for (const name of tokens.slice(1)) {
-          if (/^\w+$/.test(name)) {
-            this.environmentVariables.delete(name);
-          }
-        }
-        continue;
-      }
-
-      // `export A=1 B=2 C` / `set NAME=value` (cmd.exe). Bash's `set -e`/`set -o ...`
-      // takes no NAME=value argument, so it simply matches nothing here.
-      if (verb === 'export' || verb === 'set') {
-        for (const token of tokens.slice(1)) {
-          const assignment = ContextManager.parseAssignment(token);
-          if (assignment) {
-            this.environmentVariables.set(assignment.name, assignment.value);
-          } else if (
-            verb === 'export' &&
-            /^\w+$/.test(token) &&
-            !this.environmentVariables.has(token) &&
-            process.env[token]
-          ) {
-            this.environmentVariables.set(token, process.env[token]!);
-          }
-        }
-        continue;
-      }
-
-      // A bare `FOO=bar` assignment (no command word after it) persists in a shell.
-      // `FOO=bar make` does not -- it is scoped to that one command.
-      const bare = ContextManager.parseAssignment(tokens[0]);
-      if (bare && tokens.length === 1) {
-        this.environmentVariables.set(bare.name, bare.value);
+    // These values describe the short-lived shell process rather than user state.
+    for (const name of ['_', 'SHLVL']) {
+      const previousValue = previousEnvironment.get(name);
+      if (previousValue === undefined) {
+        nextEnvironment.delete(name);
+      } else {
+        nextEnvironment.set(name, previousValue);
       }
     }
-  }
 
-  private static parseAssignment(token: string): { name: string; value: string } | undefined {
-    const match = token.match(/^(\w+)=([\s\S]*)$/);
-    return match ? { name: match[1], value: match[2] } : undefined;
-  }
-
-  /** Split a command line into sub-commands on unquoted `;` `&&` `||` `|` `&` and newlines. */
-  private static splitSubCommands(command: string): string[] {
-    const parts: string[] = [];
-    let current = '';
-    let quote: string | undefined;
-
-    for (let i = 0; i < command.length; i++) {
-      const ch = command[i];
-      if (quote) {
-        current += ch;
-        if (ch === '\\' && quote === '"' && i + 1 < command.length) {
-          current += command[++i];
-        } else if (ch === quote) {
-          quote = undefined;
-        }
-        continue;
+    // API-level env overrides apply only to the command that received them.
+    for (const name of Object.keys(envOverrides || {})) {
+      const previousValue = previousEnvironment.get(name);
+      if (previousValue === undefined) {
+        nextEnvironment.delete(name);
+      } else {
+        nextEnvironment.set(name, previousValue);
       }
-      if (ch === '\\' && i + 1 < command.length) {
-        current += ch + command[++i];
-        continue;
-      }
-      if (ch === '"' || ch === "'") {
-        quote = ch;
-        current += ch;
-        continue;
-      }
-      if (ch === ';' || ch === '\n' || ch === '|' || ch === '&') {
-        if ((ch === '|' || ch === '&') && command[i + 1] === ch) {
-          i++;
-        }
-        parts.push(current);
-        current = '';
-        continue;
-      }
-      current += ch;
     }
-    parts.push(current);
 
-    return parts.map(part => part.trim()).filter(part => part.length > 0);
-  }
-
-  /** Split on unquoted whitespace, removing one level of quoting/escaping. */
-  private static tokenize(input: string): string[] {
-    const tokens: string[] = [];
-    let current = '';
-    let started = false;
-    let quote: string | undefined;
-
-    for (let i = 0; i < input.length; i++) {
-      const ch = input[i];
-      if (quote) {
-        if (ch === '\\' && quote === '"' && i + 1 < input.length) {
-          current += input[++i];
-        } else if (ch === quote) {
-          quote = undefined;
+    if (restoreWorkingDirectoryState) {
+      for (const name of ['PWD', 'OLDPWD']) {
+        const previousValue = previousEnvironment.get(name);
+        if (previousValue === undefined) {
+          nextEnvironment.delete(name);
         } else {
-          current += ch;
+          nextEnvironment.set(name, previousValue);
         }
-        continue;
       }
-      if (ch === '\\' && i + 1 < input.length) {
-        current += input[++i];
-        started = true;
-        continue;
-      }
-      if (ch === '"' || ch === "'") {
-        quote = ch;
-        started = true;
-        continue;
-      }
-      if (/\s/.test(ch)) {
-        if (started) {
-          tokens.push(current);
-          current = '';
-          started = false;
-        }
-        continue;
-      }
-      current += ch;
-      started = true;
-    }
-    if (started) {
-      tokens.push(current);
     }
 
-    return tokens;
+    this.environmentVariables = nextEnvironment;
   }
 
   private async trackFileSystemChanges(
@@ -513,6 +398,8 @@ export class ContextManager {
       const sessionData = {
         sessionId: this.sessionId,
         currentDirectory: this.currentDirectory,
+        previousDirectory: this.previousDirectory,
+        directoryStack: this.directoryStack,
         environmentVariables: Object.fromEntries(this.environmentVariables),
         commandHistory: this.commandHistory,
         fileSystemChanges: this.fileSystemChanges,
@@ -538,6 +425,12 @@ export class ContextManager {
 
       this.sessionId = sessionData.sessionId || this.sessionId;
       this.currentDirectory = sessionData.currentDirectory || this.currentDirectory;
+      this.previousDirectory = typeof sessionData.previousDirectory === 'string'
+        ? sessionData.previousDirectory
+        : undefined;
+      this.directoryStack = Array.isArray(sessionData.directoryStack)
+        ? sessionData.directoryStack.filter((entry: unknown): entry is string => typeof entry === 'string')
+        : [];
       
       if (sessionData.environmentVariables) {
         this.environmentVariables = new Map(Object.entries(sessionData.environmentVariables));

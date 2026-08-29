@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { ShellExecutor } = require('../dist/core/executor');
 
 const SERVER_PATH = path.resolve(__dirname, '..', 'dist', 'index.js');
 
@@ -16,8 +17,8 @@ const SERVER_PATH = path.resolve(__dirname, '..', 'dist', 'index.js');
  * Everything the server writes (audit log, session file) is confined to that
  * directory so concurrent test runs never collide.
  */
-function startServer(extraEnv = {}) {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-test-'));
+function startServer(extraEnv = {}, options = {}) {
+  const tmpDir = options.tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-test-'));
   const server = spawn('node', [SERVER_PATH], {
     stdio: ['pipe', 'pipe', 'pipe'],
     cwd: tmpDir,
@@ -76,10 +77,18 @@ function startServer(extraEnv = {}) {
       if (response.error) throw new Error(`${name} failed: ${JSON.stringify(response.error)}`);
       return response.result.content[0].text;
     },
-    stop: () => {
+    stop: (cleanup = true) => new Promise((resolve) => {
+      const finish = () => {
+        if (cleanup) fs.rmSync(tmpDir, { recursive: true, force: true });
+        resolve();
+      };
+      if (server.exitCode !== null || server.signalCode !== null) {
+        finish();
+        return;
+      }
+      server.once('close', finish);
       server.kill();
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    },
+    }),
   };
 }
 
@@ -90,7 +99,15 @@ function startServer(extraEnv = {}) {
  */
 async function testContextTracking() {
   console.log('🧪 Testing context env/cwd tracking (issue #38)...');
-  const client = startServer({ MCP_EXEC_SECURITY_LEVEL: 'permissive' });
+  const client = startServer({
+    MCP_EXEC_SECURITY_LEVEL: 'permissive',
+    MCP_TEST_INHERITED: 'inherited-value',
+    MCP_TEST_OVERRIDE_BASE: 'base-value',
+  });
+  const initialDirectory = fs.realpathSync(client.tmpDir);
+  const trackedHomePath = path.join(client.tmpDir, 'tracked-home');
+  fs.mkdirSync(trackedHomePath);
+  const trackedHome = fs.realpathSync(trackedHomePath);
   const failures = [];
   const check = (name, condition, detail) => {
     if (condition) {
@@ -120,13 +137,112 @@ async function testContextTracking() {
       'MCP_TEST_CI was still set'
     );
 
+    await client.call('execute_command', {
+      command: "printf '%s' \"$MCP_TEST_OVERRIDE_BASE\"",
+      env: { MCP_TEST_OVERRIDE_BASE: 'temporary-value' },
+    });
+    const restoredOverride = await client.call('execute_command', {
+      command: "printf 'OVERRIDE=%s' \"$MCP_TEST_OVERRIDE_BASE\"",
+    });
+    check(
+      'override restores a pre-existing tracked value',
+      restoredOverride.includes('OVERRIDE=base-value'),
+      restoredOverride
+    );
+
     // 2. An `export` that is only printed must not mutate the context.
     await client.call('execute_command', { command: "echo 'export MCP_TEST_FOO=bar'" });
 
-    // 3. `cd` combined with another command still updates the tracked directory.
-    await client.call('execute_command', { command: 'cd /tmp && ls' });
+    // 3. Persist values after the shell has expanded them, not their source text.
+    await client.call('execute_command', {
+      command: 'export MCP_TEST_EXPANDED="$PATH:/opt/mcp-test" MCP_TEST_ROOT="$(pwd)"',
+    });
+    const expanded = await client.call('execute_command', {
+      command: "printf 'EXPANDED=%s\\nROOT=%s' \"$MCP_TEST_EXPANDED\" \"$MCP_TEST_ROOT\"",
+    });
+    check(
+      'exported shell expressions persist their evaluated values',
+      expanded.includes(':/opt/mcp-test') &&
+        !expanded.includes('$PATH') &&
+        expanded.includes(`ROOT=${initialDirectory}`),
+      expanded
+    );
 
-    // 4. A failed export is not applied.
+    // 4. Unsets must remove variables inherited from the server process.
+    await client.call('execute_command', { command: 'unset MCP_TEST_INHERITED' });
+
+    // 5. POSIX `set`, bare assignments, and pipeline subshells do not export state.
+    await client.call('execute_command', { command: 'set MCP_TEST_POSIX_SET=bad' });
+    await client.call('execute_command', { command: 'MCP_TEST_BARE=bad' });
+    await client.call('execute_command', { command: 'export MCP_TEST_PIPELINE=bad | cat' });
+
+    // 6. Only the branch actually selected by the shell contributes state.
+    await client.call('execute_command', { command: 'true || export MCP_TEST_SKIPPED=bad' });
+    await client.call('execute_command', { command: 'false || export MCP_TEST_SELECTED=good' });
+    const variables = await client.call('execute_command', {
+      command: "printf 'inherited=%s set=%s bare=%s pipeline=%s skipped=%s selected=%s' " +
+        '"${MCP_TEST_INHERITED-absent}" "${MCP_TEST_POSIX_SET-absent}" ' +
+        '"${MCP_TEST_BARE-absent}" "${MCP_TEST_PIPELINE-absent}" ' +
+        '"${MCP_TEST_SKIPPED-absent}" "${MCP_TEST_SELECTED-absent}"',
+    });
+    check(
+      'shell export semantics are preserved across commands',
+      variables.includes('inherited=absent') &&
+        variables.includes('set=absent') &&
+        variables.includes('bare=absent') &&
+        variables.includes('pipeline=absent') &&
+        variables.includes('skipped=absent') &&
+        variables.includes('selected=good'),
+      variables
+    );
+
+    await client.call('execute_command', {
+      command: 'export MCP_TEST_BASH=from-bash',
+      shell: '/bin/bash',
+    });
+    await client.call('execute_command', {
+      command: 'export MCP_TEST_MANUAL_SH=from-manual-sh',
+      shell: false,
+    });
+    const crossShell = await client.call('execute_command', {
+      command: "printf 'bash=%s manual=%s' \"$MCP_TEST_BASH\" \"$MCP_TEST_MANUAL_SH\"",
+    });
+    check(
+      'state capture works with explicit Bash and manual /bin/sh execution',
+      crossShell.includes('bash=from-bash manual=from-manual-sh'),
+      crossShell
+    );
+
+    // 7. HOME, conditionals, pipelines, cd -, and per-command cwd use actual shell state.
+    await client.call('execute_command', {
+      command: `export HOME='${trackedHome}' && cd ~`,
+    });
+    const homePwd = await client.call('execute_command', { command: "printf 'PWD=%s' \"$PWD\"" });
+    check('cd ~ uses the tracked HOME', homePwd.includes(`PWD=${trackedHome}`), homePwd);
+
+    await client.call('execute_command', { command: 'cd /tmp | cat' });
+    await client.call('execute_command', { command: 'false && cd /tmp' });
+    const afterIgnoredCd = await client.call('execute_command', { command: "printf 'PWD=%s' \"$PWD\"" });
+    check(
+      'pipeline and skipped conditional cd do not change the tracked cwd',
+      afterIgnoredCd.includes(`PWD=${trackedHome}`),
+      afterIgnoredCd
+    );
+
+    await client.call('execute_command', { command: 'cd /tmp && true' });
+    const cdDash = await client.call('execute_command', { command: 'cd - >/dev/null' });
+    const afterCdDash = await client.call('execute_command', { command: "printf 'PWD=%s' \"$PWD\"" });
+    check(
+      'cd - navigation persists across executions',
+      afterCdDash.includes(`PWD=${trackedHome}`),
+      `${cdDash}\n${afterCdDash}`
+    );
+
+    await client.call('execute_command', { command: 'pwd', cwd: '/tmp' });
+    const afterScopedCwd = await client.call('execute_command', { command: "printf 'PWD=%s' \"$PWD\"" });
+    check('per-command cwd remains scoped', afterScopedCwd.includes(`PWD=${trackedHome}`), afterScopedCwd);
+
+    // 8. A failed compound command is not applied.
     await client.call('execute_command', { command: 'export MCP_TEST_FAIL=1 && false' });
 
     const context = await client.call('get_context', {});
@@ -145,19 +261,77 @@ async function testContextTracking() {
       !context.includes('MCP_TEST_FAIL'),
       'MCP_TEST_FAIL appeared in the context'
     );
-    check(
-      '`cd /tmp && ls` updates the tracked working directory',
-      /\*\*Working Directory:\*\* `(\/private)?\/tmp`/.test(context),
-      context.split('\n').find((line) => line.includes('Working Directory'))
-    );
+    check('tracked working directory remains at HOME', context.includes(`**Working Directory:** \`${trackedHome}\``));
   } finally {
-    client.stop();
+    await client.stop();
   }
 
   if (failures.length > 0) {
     throw new Error(`Context tracking checks failed: ${failures.join(', ')}`);
   }
   console.log('✅ Context env/cwd tracking behaves correctly');
+}
+
+function testWindowsStateProtocol() {
+  const executor = Object.create(ShellExecutor.prototype);
+  const marker = '__MCP_EXEC_STATE_TEST';
+  const stderr = `user error\r\n${marker}\r\nC:\\work\r\nFOO=bar\r\n` +
+    `Path=C:\\bin\r\n__mcp_exec_status=0\r\n${marker}_END\r\n`;
+  const state = executor.extractWindowsShellState(stderr, marker);
+  if (
+    state.stderr !== 'user error\r\n' ||
+    state.workingDirectory !== 'C:\\work' ||
+    state.environment.FOO !== 'bar' ||
+    state.environment.Path !== 'C:\\bin' ||
+    '__mcp_exec_status' in state.environment
+  ) {
+    throw new Error(`Windows shell-state protocol failed: ${JSON.stringify(state)}`);
+  }
+  console.log('✅ Windows cmd.exe shell-state protocol parses cwd and environment');
+}
+
+async function testNavigationPersistence() {
+  console.log('🧪 Testing persisted directory navigation state...');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-persistence-test-'));
+  const initialDirectory = fs.realpathSync(tmpDir);
+  const environment = {
+    MCP_EXEC_SECURITY_LEVEL: 'permissive',
+    MCP_EXEC_SESSION_PERSISTENCE: 'true',
+  };
+
+  const first = startServer(environment, { tmpDir });
+  try {
+    await first.initialize();
+    await first.call('execute_command', { command: 'cd /tmp' });
+  } finally {
+    await first.stop(false);
+  }
+
+  const sessionFile = path.join(tmpDir, '.mcp-exec-session.json');
+  const saved = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+  saved.previousDirectory = initialDirectory;
+  saved.directoryStack = [initialDirectory];
+  fs.writeFileSync(sessionFile, JSON.stringify(saved, null, 2));
+
+  const second = startServer(environment, { tmpDir });
+  try {
+    await second.initialize();
+    await second.call('execute_command', { command: 'echo persistence-check' });
+  } finally {
+    await second.stop(false);
+  }
+
+  const reSaved = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+  const failures = [];
+  if (reSaved.previousDirectory !== initialDirectory) failures.push('previousDirectory');
+  if (JSON.stringify(reSaved.directoryStack) !== JSON.stringify([initialDirectory])) {
+    failures.push('directoryStack');
+  }
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  if (failures.length > 0) {
+    throw new Error(`Navigation persistence checks failed: ${failures.join(', ')}`);
+  }
+  console.log('✅ Previous directory and directory stack survive load/save');
 }
 
 function testEnvironmentVariables() {
@@ -406,7 +580,9 @@ function testEnvironmentVariables() {
 // Run the test
 if (require.main === module) {
   testEnvironmentVariables()
+    .then(testWindowsStateProtocol)
     .then(testContextTracking)
+    .then(testNavigationPersistence)
     .then(() => {
       console.log('🎉 Environment variables test completed successfully!');
       process.exit(0);
@@ -417,4 +593,10 @@ if (require.main === module) {
     });
 }
 
-module.exports = { testEnvironmentVariables, testContextTracking, startServer };
+module.exports = {
+  testEnvironmentVariables,
+  testContextTracking,
+  testNavigationPersistence,
+  testWindowsStateProtocol,
+  startServer,
+};

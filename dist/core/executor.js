@@ -2,9 +2,43 @@
 /**
  * Core shell command executor with cross-platform support
  */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ShellExecutor = void 0;
 const child_process_1 = require("child_process");
+const path = __importStar(require("path"));
 const uuid_1 = require("uuid");
 const command_policy_1 = require("../security/command-policy");
 const output_processor_1 = require("../utils/output-processor");
@@ -74,7 +108,6 @@ class ShellExecutor {
             const workingDirectory = options.cwd || context.currentDirectory || process.cwd();
             // Merge environment variables
             const environment = {
-                ...process.env,
                 ...context.environmentVariables,
                 ...options.env,
             };
@@ -109,6 +142,11 @@ class ShellExecutor {
                 command: fullCommand,
                 workingDirectory,
                 environment: environment,
+                // Per-command overrides are reported separately so they are not mistaken for
+                // persistent session state.
+                envOverrides: options.env,
+                resultingEnvironment: result.environment,
+                resultingWorkingDirectory: result.workingDirectory,
                 output: processedOutput,
                 aiContext: options.aiContext,
             });
@@ -182,28 +220,44 @@ class ShellExecutor {
     async executeWithTimeout(command, args, options) {
         return new Promise((resolve, reject) => {
             const { timeout, ...spawnOptions } = options;
+            const stateMarker = `__MCP_EXEC_STATE_${(0, uuid_1.v4)().replace(/-/g, '')}`;
+            const fullCommand = args.length > 0 ? `${command} ${args.join(' ')}` : command;
+            const captureShellState = this.supportsShellStateCapture(spawnOptions.shell);
+            const wrappedCommand = captureShellState
+                ? process.platform === 'win32'
+                    ? this.wrapWindowsCommand(fullCommand, stateMarker)
+                    : this.wrapPosixCommand(fullCommand, stateMarker)
+                : fullCommand;
+            const childEnvironment = { ...spawnOptions.env };
+            if (captureShellState && process.platform !== 'win32' && childEnvironment.OLDPWD !== undefined) {
+                // Some /bin/sh implementations discard inherited OLDPWD during startup.
+                // Carry it under an internal name, restore it before the user command, and
+                // immediately remove the internal names from the command's environment.
+                childEnvironment.__MCP_EXEC_OLDPWD_PRESENT = '1';
+                childEnvironment.__MCP_EXEC_OLDPWD_VALUE = childEnvironment.OLDPWD;
+            }
             // Determine execution method based on shell option
             let execCommand;
             let execArgs;
             if (spawnOptions.shell) {
                 // When shell=true, let Node.js handle the shell execution
-                execCommand = command;
-                execArgs = args;
+                execCommand = captureShellState ? wrappedCommand : command;
+                execArgs = captureShellState ? [] : args;
             }
             else {
                 // When shell=false, manually construct shell command
                 if (process.platform === 'win32') {
                     execCommand = 'cmd.exe';
-                    execArgs = ['/c', command, ...args];
+                    execArgs = ['/d', '/s', '/c', wrappedCommand];
                 }
                 else {
                     execCommand = '/bin/sh';
-                    const fullCommand = args.length > 0 ? `${command} ${args.join(' ')}` : command;
-                    execArgs = ['-c', fullCommand];
+                    execArgs = ['-c', wrappedCommand];
                 }
             }
             const child = (0, child_process_1.spawn)(execCommand, execArgs, {
                 ...spawnOptions,
+                env: childEnvironment,
                 stdio: ['pipe', 'pipe', 'pipe'],
             });
             let stdout = '';
@@ -228,10 +282,17 @@ class ShellExecutor {
                 if (timeoutId) {
                     clearTimeout(timeoutId);
                 }
+                const shellState = !captureShellState
+                    ? { stderr }
+                    : process.platform === 'win32'
+                        ? this.extractWindowsShellState(stderr, stateMarker)
+                        : this.extractPosixShellState(stderr, stateMarker);
                 resolve({
                     stdout,
-                    stderr,
+                    stderr: shellState.stderr,
                     exitCode: code || 0,
+                    environment: shellState.environment,
+                    workingDirectory: shellState.workingDirectory,
                 });
             });
             // Handle errors
@@ -242,6 +303,95 @@ class ShellExecutor {
                 reject(error);
             });
         });
+    }
+    supportsShellStateCapture(shell) {
+        if (typeof shell !== 'string') {
+            return true;
+        }
+        const shellName = path.basename(shell).toLowerCase().replace(/\.exe$/, '');
+        return process.platform === 'win32'
+            ? shellName === 'cmd'
+            : ['sh', 'bash', 'dash', 'zsh', 'ksh'].includes(shellName);
+    }
+    wrapPosixCommand(command, marker) {
+        return 'if [ "${__MCP_EXEC_OLDPWD_PRESENT-}" = 1 ]; then ' +
+            'OLDPWD=$__MCP_EXEC_OLDPWD_VALUE; export OLDPWD; fi\n' +
+            'unset __MCP_EXEC_OLDPWD_PRESENT __MCP_EXEC_OLDPWD_VALUE\n' +
+            `${command}\n` +
+            '__mcp_exec_status=$?\n' +
+            `printf '\\000%s\\000%s\\000' '${marker}' "$PWD" >&2\n` +
+            'command -p env -0 >&2\n' +
+            `printf '\\000%s\\000' '${marker}_END' >&2\n` +
+            'exit "$__mcp_exec_status"';
+    }
+    extractPosixShellState(stderr, marker) {
+        const startMarker = `\0${marker}\0`;
+        const endMarker = `\0${marker}_END\0`;
+        const start = stderr.lastIndexOf(startMarker);
+        if (start < 0) {
+            return { stderr };
+        }
+        const end = stderr.indexOf(endMarker, start + startMarker.length);
+        if (end < 0) {
+            return { stderr };
+        }
+        const state = stderr.slice(start + startMarker.length, end).split('\0');
+        const workingDirectory = state.shift();
+        const environment = {};
+        for (const entry of state) {
+            const separator = entry.indexOf('=');
+            if (separator > 0) {
+                environment[entry.slice(0, separator)] = entry.slice(separator + 1);
+            }
+        }
+        return {
+            stderr: stderr.slice(0, start) + stderr.slice(end + endMarker.length),
+            environment,
+            workingDirectory,
+        };
+    }
+    wrapWindowsCommand(command, marker) {
+        return `${command}\r\n` +
+            'set "__mcp_exec_status=%ERRORLEVEL%"\r\n' +
+            `>&2 echo ${marker}\r\n` +
+            '>&2 cd\r\n' +
+            '>&2 set\r\n' +
+            `>&2 echo ${marker}_END\r\n` +
+            'exit /b %__mcp_exec_status%';
+    }
+    extractWindowsShellState(stderr, marker) {
+        const crlfMarker = `${marker}\r\n`;
+        const lfMarker = `${marker}\n`;
+        const crlfStart = stderr.lastIndexOf(crlfMarker);
+        const lfStart = stderr.lastIndexOf(lfMarker);
+        const start = Math.max(crlfStart, lfStart);
+        if (start < 0) {
+            return { stderr };
+        }
+        const payloadStart = start + (start === crlfStart ? crlfMarker.length : lfMarker.length);
+        const end = stderr.indexOf(`${marker}_END`, payloadStart);
+        if (end < 0) {
+            return { stderr };
+        }
+        const lines = stderr.slice(payloadStart, end).split(/\r?\n/);
+        const workingDirectory = lines.shift()?.trim();
+        const environment = {};
+        for (const line of lines) {
+            const separator = line.indexOf('=');
+            if (separator > 0) {
+                const name = line.slice(0, separator);
+                if (name.toLowerCase() !== '__mcp_exec_status') {
+                    environment[name] = line.slice(separator + 1);
+                }
+            }
+        }
+        const afterEnd = end + `${marker}_END`.length;
+        const trailingNewline = stderr.slice(afterEnd).match(/^\r?\n/)?.[0].length || 0;
+        return {
+            stderr: stderr.slice(0, start) + stderr.slice(afterEnd + trailingNewline),
+            environment,
+            workingDirectory,
+        };
     }
     // Session management API
     async listSessions() {
