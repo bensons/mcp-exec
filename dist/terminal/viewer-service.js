@@ -533,10 +533,19 @@ class TerminalViewerService {
             console.error(`[DEBUG] Session ${sessionId} not found or has no PTY. Available sessions: ${Array.from(this.sessions.keys()).join(', ')}`);
             throw new Error(`Session ${sessionId} not found or has no PTY`);
         }
+        if (session.status !== 'running') {
+            throw new Error(`Session ${sessionId} is not running (status: ${session.status})`);
+        }
         console.error(`[DEBUG] Session found, sending input to PTY: "${input}"`);
-        // Send input to PTY
+        // Send input to PTY - writing to a PTY whose child already exited throws (EIO/EPIPE),
+        // so translate it into a normal tool error instead of letting it escape.
         const inputToSend = addNewline ? input + '\r' : input;
-        session.pty.write(inputToSend);
+        try {
+            session.pty.write(inputToSend);
+        }
+        catch (error) {
+            throw new Error(`Failed to write to session ${sessionId} PTY: ${error instanceof Error ? error.message : String(error)}`);
+        }
         console.error(`[DEBUG] Input sent to PTY: "${inputToSend}"`);
         // Don't manually add to buffer or broadcast - let PTY echo handle display to avoid duplication
         session.lastActivity = new Date();

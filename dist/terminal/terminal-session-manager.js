@@ -257,9 +257,15 @@ class TerminalSessionManager {
         if (!session.pty) {
             throw new Error(`Session ${options.sessionId} does not have a PTY`);
         }
-        // Send input to PTY
+        // Send input to PTY - writing to a PTY whose child already exited throws (EIO/EPIPE),
+        // so translate it into a normal tool error instead of letting it escape.
         const input = options.addNewline !== false ? options.input + '\r' : options.input;
-        session.pty.write(input);
+        try {
+            session.pty.write(input);
+        }
+        catch (error) {
+            throw new Error(`Failed to write to session ${options.sessionId} PTY: ${error instanceof Error ? error.message : String(error)}`);
+        }
         // Don't manually add to buffer - let PTY echo handle display to avoid duplication
         session.lastActivity = new Date();
     }
