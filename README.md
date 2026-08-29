@@ -305,6 +305,60 @@ MCP_EXEC_MAX_OUTPUT_LENGTH=10000            # Maximum output length in bytes
 MCP_EXEC_USE_MARKDOWN=true                  # Use Markdown formatting
 ```
 
+### Terminal Viewer
+
+The terminal viewer serves live PTY output over HTTP and WebSocket, so anyone who can reach
+`host:port` can read everything that scrolls past in a terminal session — including secrets.
+
+```bash
+MCP_EXEC_TERMINAL_VIEWER_ENABLED=false      # Enable the browser-based terminal viewer
+MCP_EXEC_TERMINAL_VIEWER_PORT=3000          # Listen port
+MCP_EXEC_TERMINAL_VIEWER_HOST=127.0.0.1     # Bind address (loopback by default)
+MCP_EXEC_TERMINAL_VIEWER_MAX_SESSIONS=10    # Maximum viewable terminal sessions
+MCP_EXEC_TERMINAL_VIEWER_SESSION_TIMEOUT=1800000
+MCP_EXEC_TERMINAL_VIEWER_BUFFER_SIZE=10000  # Scrollback lines retained per session
+MCP_EXEC_TERMINAL_VIEWER_ENABLE_AUTH=false  # Require a token on every request
+MCP_EXEC_TERMINAL_VIEWER_AUTH_TOKEN=        # Token to require (auto-generated when empty)
+```
+
+#### Authentication
+
+When `enableAuth` is true, **every** HTTP route (including `/health` and `/static/*`) and every
+WebSocket upgrade requires the token. Requests without a valid token get `401`; WebSocket
+connections without one are closed with code `1008`. Repeated failed authentication attempts
+from one client are limited to 20 per minute (`429` for HTTP and close code `1013` for
+WebSockets). Tokens are compared in constant time.
+
+Supply the token either way:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/api/sessions
+curl "http://127.0.0.1:3000/api/sessions?token=$TOKEN"
+```
+
+If `enableAuth` is true and no `authToken` is configured, the service generates one at startup
+and logs it to stderr:
+
+```
+Terminal viewer auth token (generated): 5WFHL59l49GRN9S3iHuLgRMf5Ozydqvd
+```
+
+Session URLs returned by `getStatus`, `/api/sessions`, `start_terminal_session`, and
+`execute_command` already carry `?token=...`, so opening the URL in a browser just works —
+the viewer page forwards the token to the WebSocket automatically. A viewer page fetched with
+an `Authorization: Bearer ...` header works as well: the authenticated response injects the
+configured token into its WebSocket initialization because browser WebSocket APIs cannot set
+custom authorization headers. Treat viewer URLs and authenticated page content as secrets:
+anyone holding either can read the terminal.
+
+#### Binding to a non-loopback address
+
+Binding to anything other than loopback (for example `MCP_EXEC_TERMINAL_VIEWER_HOST=0.0.0.0`)
+with authentication disabled is **refused** — the service fails to start with an explanatory
+error. Runtime configuration updates and rollbacks that would make this transition are rejected
+before the active configuration changes. Enable authentication, or keep the viewer on
+`127.0.0.1`.
+
 ### Dynamic Configuration System
 
 The server provides comprehensive runtime configuration management through MCP tools, allowing you to modify settings without restarting the server. This system supports configuration history tracking, automatic component reinitialization, and rollback capabilities.
@@ -738,6 +792,7 @@ node tests/test-execute-command-no-session.js # One-shot command execution
 node tests/test-session-separation.js   # Session functionality separation
 node tests/test-mcp-annotations.js      # MCP tool annotations structure compliance
 node tests/test-dynamic-configuration.js # Dynamic configuration system
+node tests/test-terminal-viewer-auth.js  # Terminal viewer authentication
 ```
 
 #### Dynamic Configuration Test Coverage

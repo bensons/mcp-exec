@@ -37,9 +37,25 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ContextManager = void 0;
+const os = __importStar(require("os"));
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs/promises"));
+const crypto_1 = require("crypto");
 const uuid_1 = require("uuid");
+/** Persisted-session limits (issue #31): keep the file small and cheap to write. */
+const PERSIST_DEBOUNCE_MS = 1000;
+const PERSIST_MAX_HISTORY = 50;
+const PERSIST_MAX_OUTPUT_CHARS = 1024;
+const PERSIST_MAX_FS_CHANGES = 100;
+// ponytail: local copy of the redaction helper; dedupe against src/audit/redact.ts from #30 once it lands.
+const SECRET_KEY_PATTERN = /(pass|pwd|secret|token|key|credential|auth|session)/i;
+function redactValue(key, value) {
+    return SECRET_KEY_PATTERN.test(key) ? '[REDACTED]' : value;
+}
+/** Redact `NAME=value` assignments with secret-looking names inside a command string. */
+function redactCommand(command) {
+    return command.replace(/([A-Za-z_][A-Za-z0-9_]*)=(\S+)/g, (match, key) => SECRET_KEY_PATTERN.test(key) ? `${key}=[REDACTED]` : match);
+}
 class ContextManager {
     config;
     sessionId;
@@ -49,8 +65,16 @@ class ContextManager {
     outputCache;
     fileSystemChanges;
     auditLogger;
-    constructor(config, auditLogger) {
-        this.config = config;
+    sessionFile;
+    legacySessionFiles;
+    workspaceDirectory;
+    onSessionPersisted;
+    persistTimer;
+    persistQueue = Promise.resolve();
+    persistenceDirty = false;
+    disposed = false;
+    constructor(config, auditLogger, options = {}) {
+        this.config = { ...config };
         this.auditLogger = auditLogger;
         this.sessionId = (0, uuid_1.v4)();
         this.currentDirectory = process.cwd();
@@ -58,6 +82,14 @@ class ContextManager {
         this.commandHistory = [];
         this.outputCache = new Map();
         this.fileSystemChanges = [];
+        this.workspaceDirectory = path.resolve(options.workspaceDirectory || process.env.MCP_EXEC_WORKSPACE_DIR || process.cwd());
+        const sessionLocation = ContextManager.resolveSessionLocation(auditLogger, {
+            ...options,
+            workspaceDirectory: this.workspaceDirectory,
+        });
+        this.sessionFile = sessionLocation.sessionFile;
+        this.legacySessionFiles = sessionLocation.legacySessionFiles;
+        this.onSessionPersisted = options.onSessionPersisted;
         // Initialize with current environment
         Object.entries(process.env).forEach(([key, value]) => {
             if (value !== undefined) {
@@ -126,10 +158,8 @@ class ContextManager {
         }
         // Cache output for reference
         this.outputCache.set(id, output);
-        // Persist session if configured
-        if (this.config.sessionPersistence) {
-            await this.persistSession();
-        }
+        // Persist session if configured (debounced; see flushSession)
+        this.schedulePersist();
     }
     async getHistory(limit, filter) {
         let history = [...this.commandHistory];
@@ -176,7 +206,8 @@ class ContextManager {
         this.outputCache.clear();
         this.fileSystemChanges = [];
         if (this.config.sessionPersistence) {
-            await this.persistSession();
+            this.persistenceDirty = true;
+            await this.flushSession();
         }
     }
     async updateWorkingDirectory(command, currentWorkingDir, output) {
@@ -332,52 +363,284 @@ class ContextManager {
         }
         return related;
     }
+    /** Resolve an isolated, stable session path and the safely scoped legacy paths. */
+    static resolveSessionLocation(auditLogger, options) {
+        const logFile = auditLogger?.getLogFilePath?.();
+        const sessionDirectory = logFile
+            ? path.dirname(logFile)
+            : process.env.MCP_EXEC_LOG_DIR
+                ? path.resolve(process.env.MCP_EXEC_LOG_DIR)
+                : (process.env.HOME || process.env.USERPROFILE)
+                    ? path.join((process.env.HOME || process.env.USERPROFILE), '.mcp-exec')
+                    : os.tmpdir();
+        const explicitScope = options.sessionScope || process.env.MCP_EXEC_SESSION_SCOPE;
+        const scopeIdentity = explicitScope
+            ? `server:${explicitScope}`
+            : `workspace:${options.workspaceDirectory}\naudit:${logFile || ''}`;
+        const scopeHash = (0, crypto_1.createHash)('sha256').update(scopeIdentity).digest('hex').slice(0, 16);
+        return {
+            sessionFile: path.join(sessionDirectory, `session-${scopeHash}.json`),
+            legacySessionFiles: [
+                path.join(options.workspaceDirectory, '.mcp-exec-session.json'),
+                path.join(sessionDirectory, 'session.json'),
+            ],
+        };
+    }
+    /**
+     * Environment variables that differ from the inherited process environment.
+     * Only these are persisted -- the full process env holds the caller's secrets.
+     */
+    getEnvironmentOverrides() {
+        const overrides = {};
+        for (const [key, value] of this.environmentVariables) {
+            if (process.env[key] !== value) {
+                overrides[key] = redactValue(key, value);
+            }
+        }
+        return overrides;
+    }
+    /** Queue a trailing, unref'd write so a burst of commands costs one file write. */
+    schedulePersist() {
+        if (this.disposed || !this.config.sessionPersistence) {
+            return;
+        }
+        this.persistenceDirty = true;
+        if (this.persistTimer) {
+            return;
+        }
+        this.persistTimer = setTimeout(() => {
+            this.persistTimer = undefined;
+            void this.enqueuePersist();
+        }, PERSIST_DEBOUNCE_MS);
+        this.persistTimer.unref?.();
+    }
+    /** Write any dirty session state now, after all earlier publications finish. */
+    async flushSession() {
+        if (this.persistTimer) {
+            clearTimeout(this.persistTimer);
+            this.persistTimer = undefined;
+        }
+        if (this.config.sessionPersistence && !this.disposed && this.persistenceDirty) {
+            await this.enqueuePersist();
+        }
+        else {
+            await this.persistQueue;
+        }
+    }
+    /** Update persistence settings without orphaning timers or losing live context. */
+    async updateConfig(config) {
+        const wasPersistent = this.config.sessionPersistence;
+        this.config = { ...config };
+        while (this.commandHistory.length > this.config.maxHistorySize) {
+            const removed = this.commandHistory.shift();
+            if (removed) {
+                this.outputCache.delete(removed.id);
+            }
+        }
+        if (!this.config.sessionPersistence) {
+            await this.cancelPendingPersistence();
+        }
+        else if (!wasPersistent) {
+            this.persistenceDirty = true;
+            await this.flushSession();
+        }
+    }
+    /** Stop this manager from publishing after it has been replaced. */
+    async dispose() {
+        this.disposed = true;
+        await this.cancelPendingPersistence();
+    }
+    async cancelPendingPersistence() {
+        if (this.persistTimer) {
+            clearTimeout(this.persistTimer);
+            this.persistTimer = undefined;
+        }
+        this.persistenceDirty = false;
+        await this.persistQueue;
+    }
+    /** Serialize every publication and build its snapshot only when it reaches the queue. */
+    enqueuePersist() {
+        const write = this.persistQueue.then(async () => {
+            // Configuration may have changed while this publication waited in the queue.
+            if (this.disposed || !this.config.sessionPersistence || !this.persistenceDirty) {
+                return;
+            }
+            this.persistenceDirty = false;
+            await this.persistSession();
+        });
+        this.persistQueue = write.catch(() => undefined);
+        return write;
+    }
+    createSessionData() {
+        return {
+            schemaVersion: 2,
+            workspaceDirectory: this.workspaceDirectory,
+            sessionId: this.sessionId,
+            currentDirectory: this.currentDirectory,
+            environmentOverrides: this.getEnvironmentOverrides(),
+            commandHistory: this.commandHistory
+                .slice(-PERSIST_MAX_HISTORY)
+                .map(entry => ({
+                id: entry.id,
+                command: redactCommand(entry.command),
+                timestamp: entry.timestamp,
+                workingDirectory: entry.workingDirectory,
+                output: {
+                    stdout: (entry.output.stdout || '').slice(0, PERSIST_MAX_OUTPUT_CHARS),
+                    stderr: (entry.output.stderr || '').slice(0, PERSIST_MAX_OUTPUT_CHARS),
+                    exitCode: entry.output.exitCode,
+                    summary: {
+                        success: entry.output.summary?.success ?? entry.output.exitCode === 0,
+                        mainResult: (entry.output.summary?.mainResult || '').slice(0, PERSIST_MAX_OUTPUT_CHARS),
+                        sideEffects: [],
+                    },
+                    metadata: {
+                        executionTime: entry.output.metadata?.executionTime || 0,
+                        commandType: entry.output.metadata?.commandType || 'restored',
+                        affectedResources: [],
+                        warnings: [],
+                        suggestions: [],
+                    },
+                },
+                aiContext: entry.aiContext,
+                sessionId: entry.sessionId,
+                sessionType: entry.sessionType,
+            })),
+            fileSystemChanges: this.fileSystemChanges.slice(-PERSIST_MAX_FS_CHANGES),
+            timestamp: new Date(),
+        };
+    }
     async persistSession() {
         try {
-            const sessionData = {
-                sessionId: this.sessionId,
-                currentDirectory: this.currentDirectory,
-                environmentVariables: Object.fromEntries(this.environmentVariables),
-                commandHistory: this.commandHistory,
-                fileSystemChanges: this.fileSystemChanges,
-                timestamp: new Date(),
-            };
-            const sessionFile = path.join(process.cwd(), '.mcp-exec-session.json');
-            await fs.writeFile(sessionFile, JSON.stringify(sessionData, null, 2));
+            const tmpFile = `${this.sessionFile}.${process.pid}.${(0, uuid_1.v4)()}.tmp`;
+            await fs.mkdir(path.dirname(this.sessionFile), { recursive: true });
+            await fs.writeFile(tmpFile, JSON.stringify(this.createSessionData(), null, 2));
+            await fs.rename(tmpFile, this.sessionFile);
+            await this.onSessionPersisted?.(this.sessionFile);
         }
         catch (error) {
-            // Silently fail session persistence to avoid disrupting command execution
-            console.warn('Failed to persist session:', error);
+            // Never disrupt (or spam stderr during) command execution because of persistence.
+            this.auditLogger?.debug('Failed to persist session', {
+                sessionFile: this.sessionFile,
+                error: error instanceof Error ? error.message : String(error),
+            }, 'context-manager');
         }
     }
     async loadSession() {
-        if (!this.config.sessionPersistence) {
+        if (!this.config.sessionPersistence || this.disposed) {
             return;
         }
         try {
-            const sessionFile = path.join(process.cwd(), '.mcp-exec-session.json');
-            const sessionData = JSON.parse(await fs.readFile(sessionFile, 'utf-8'));
+            let sessionData;
+            let migratedFrom;
+            try {
+                sessionData = JSON.parse(await fs.readFile(this.sessionFile, 'utf-8'));
+            }
+            catch {
+                for (const legacyFile of this.legacySessionFiles) {
+                    try {
+                        const candidate = JSON.parse(await fs.readFile(legacyFile, 'utf-8'));
+                        if (this.isLegacySessionForWorkspace(legacyFile, candidate)) {
+                            sessionData = candidate;
+                            migratedFrom = legacyFile;
+                            break;
+                        }
+                    }
+                    catch {
+                        // Try the next legacy location.
+                    }
+                }
+            }
+            if (!sessionData) {
+                return;
+            }
             this.sessionId = sessionData.sessionId || this.sessionId;
             this.currentDirectory = sessionData.currentDirectory || this.currentDirectory;
-            if (sessionData.environmentVariables) {
-                this.environmentVariables = new Map(Object.entries(sessionData.environmentVariables));
+            // Merge only the recorded overrides on top of the live process environment;
+            // never restore a wholesale environment snapshot (issue #31).
+            if (sessionData.environmentOverrides) {
+                for (const [key, value] of Object.entries(sessionData.environmentOverrides)) {
+                    if (typeof value === 'string' && value !== '[REDACTED]') {
+                        this.environmentVariables.set(key, value);
+                    }
+                }
             }
-            if (sessionData.commandHistory) {
-                this.commandHistory = sessionData.commandHistory.map((entry) => ({
-                    ...entry,
-                    timestamp: new Date(entry.timestamp),
-                }));
+            else if (sessionData.environmentVariables) {
+                // Legacy snapshots stored the whole environment. Restore only non-secret
+                // values that actually differed from this process, then rewrite the slim form.
+                for (const [key, value] of Object.entries(sessionData.environmentVariables)) {
+                    if (typeof value === 'string' && !SECRET_KEY_PATTERN.test(key) && process.env[key] !== value) {
+                        this.environmentVariables.set(key, value);
+                    }
+                }
             }
-            if (sessionData.fileSystemChanges) {
+            if (Array.isArray(sessionData.commandHistory)) {
+                this.commandHistory = sessionData.commandHistory.map((entry) => {
+                    const output = entry.output || {};
+                    const exitCode = typeof output.exitCode === 'number' ? output.exitCode : 1;
+                    return {
+                        ...entry,
+                        timestamp: new Date(entry.timestamp),
+                        environment: entry.environment || {},
+                        relatedCommands: entry.relatedCommands || [],
+                        output: {
+                            stdout: output.stdout || '',
+                            stderr: output.stderr || '',
+                            exitCode,
+                            metadata: {
+                                executionTime: output.metadata?.executionTime || 0,
+                                commandType: output.metadata?.commandType || 'restored',
+                                affectedResources: output.metadata?.affectedResources || [],
+                                warnings: output.metadata?.warnings || [],
+                                suggestions: output.metadata?.suggestions || [],
+                            },
+                            summary: {
+                                success: output.summary?.success ?? exitCode === 0,
+                                mainResult: output.summary?.mainResult || (output.stdout || '').trim(),
+                                sideEffects: output.summary?.sideEffects || [],
+                                nextSteps: output.summary?.nextSteps,
+                            },
+                        },
+                    };
+                });
+                // Rebuild the output cache so get_output works for restored entries.
+                this.outputCache.clear();
+                for (const entry of this.commandHistory) {
+                    if (entry.output) {
+                        this.outputCache.set(entry.id, entry.output);
+                    }
+                }
+            }
+            if (Array.isArray(sessionData.fileSystemChanges)) {
                 this.fileSystemChanges = sessionData.fileSystemChanges.map((change) => ({
                     ...change,
                     timestamp: new Date(change.timestamp),
                 }));
             }
+            if (migratedFrom) {
+                this.persistenceDirty = true;
+                await this.flushSession();
+                await fs.unlink(migratedFrom).catch(() => undefined);
+            }
         }
         catch (error) {
             // Silently fail session loading - start with fresh session
         }
+    }
+    isLegacySessionForWorkspace(legacyFile, sessionData) {
+        if (legacyFile === path.join(this.workspaceDirectory, '.mcp-exec-session.json')) {
+            return true;
+        }
+        const recordedWorkspace = sessionData.workspaceDirectory;
+        if (typeof recordedWorkspace === 'string') {
+            return path.resolve(recordedWorkspace) === this.workspaceDirectory;
+        }
+        const recordedDirectory = sessionData.currentDirectory;
+        if (typeof recordedDirectory !== 'string') {
+            return false;
+        }
+        const relative = path.relative(this.workspaceDirectory, path.resolve(recordedDirectory));
+        return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
     }
 }
 exports.ContextManager = ContextManager;
