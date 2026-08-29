@@ -11,6 +11,11 @@ const path = require('path');
 
 const EXIT_TIMEOUT_MS = 15000;
 const INITIALIZE_TIMEOUT_MS = 10000;
+const REQUIRED_BUILD_ARTIFACTS = [
+  'dist/index.js',
+  'dist/audit/mcp-logger.js',
+  'dist/utils/display-formatter.js',
+];
 
 class LifecycleTest {
   constructor() {
@@ -21,9 +26,13 @@ class LifecycleTest {
   }
 
   async runTests() {
-    if (!fs.existsSync(this.serverPath)) {
+    const repositoryRoot = path.join(__dirname, '..');
+    const missingArtifacts = REQUIRED_BUILD_ARTIFACTS.filter(
+      artifact => !fs.existsSync(path.join(repositoryRoot, artifact))
+    );
+    if (missingArtifacts.length > 0) {
       throw new Error(
-        `Built server not found at ${this.serverPath}; run \`npm run build\` first.`
+        `Built server is missing ${missingArtifacts.join(', ')}; run \`npm run build\` first.`
       );
     }
 
@@ -54,17 +63,28 @@ class LifecycleTest {
       testName.toLowerCase().replace(/[^a-z0-9]+/g, '-')
     );
     fs.mkdirSync(testDirectory, { recursive: true });
+    const inheritedEnvironment = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.startsWith('MCP_EXEC_'))
+    );
 
     const child = spawn(process.execPath, [this.serverPath], {
       cwd: testDirectory,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
-        ...process.env,
+        ...inheritedEnvironment,
         HOME: testDirectory,
         USERPROFILE: testDirectory,
         NODE_ENV: 'test',
+        MCP_EXEC_AUDIT_LOG: path.join(testDirectory, 'audit.log'),
         MCP_EXEC_LOG_DIR: testDirectory,
         MCP_EXEC_WORKSPACE_DIR: testDirectory,
+        MCP_EXEC_SESSION_SCOPE: testName,
+        MCP_EXEC_SESSION_PERSISTENCE: 'true',
+        MCP_EXEC_INACTIVITY_TIMEOUT: '0',
+        MCP_EXEC_SHUTDOWN_TIMEOUT: '5000',
+        MCP_EXEC_ENABLE_HEARTBEAT: 'true',
+        MCP_EXEC_TERMINAL_VIEWER_ENABLED: 'false',
+        MCP_EXEC_TERMINAL_VIEWER_PORT: '0',
         MCP_EXEC_DESKTOP_NOTIFICATIONS_ENABLED: 'false',
         ...extraEnv,
       },
@@ -186,9 +206,13 @@ class LifecycleTest {
 
   recordResult(test, success, duration, details = {}) {
     console.log(`   Exit code: ${details.code}, Signal: ${details.signal}, Duration: ${duration}ms`);
-    console.log(`   Result: ${success ? '✅ PASS' : '❌ FAIL'}`);
-    if (!success && details.stderr) {
-      console.log(`   Stderr: ${details.stderr}`);
+    const timeoutSuffix = details.timedOut ? ' (timeout)' : '';
+    console.log(`   Result: ${success ? '✅ PASS' : `❌ FAIL${timeoutSuffix}`}`);
+    if (!success) {
+      if (details.error) {
+        console.log(`   Error: ${details.error}`);
+      }
+      console.log(`   Stderr: ${details.stderr || '(empty)'}`);
     }
     console.log('');
     this.results.push({ test, success, duration, details });
@@ -198,10 +222,11 @@ class LifecycleTest {
     const testName = `Graceful shutdown (${signal})`;
     console.log(`📡 Test: ${testName}`);
     const { child, getStderr } = this.spawnServer(testName);
-    const startedAt = Date.now();
+    let startedAt = Date.now();
 
     try {
       await this.initialize(child);
+      startedAt = Date.now();
       const exit = this.waitForExit(child);
       child.kill(signal);
       const outcome = await exit;
@@ -225,10 +250,11 @@ class LifecycleTest {
     const testName = 'Client disconnection';
     console.log('📡 Test: Client disconnection (stdin close)');
     const { child, getStderr } = this.spawnServer(testName);
-    const startedAt = Date.now();
+    let startedAt = Date.now();
 
     try {
       await this.initialize(child);
+      startedAt = Date.now();
       const exit = this.waitForExit(child);
       child.stdin.end();
       const outcome = await exit;
@@ -253,11 +279,13 @@ class LifecycleTest {
     console.log('📡 Test: Inactivity timeout (shortened for testing)');
     const { child, getStderr } = this.spawnServer(testName, {
       MCP_EXEC_INACTIVITY_TIMEOUT: '1000',
+      MCP_EXEC_ENABLE_HEARTBEAT: 'true',
     });
-    const startedAt = Date.now();
+    let startedAt = Date.now();
 
     try {
       await this.initialize(child);
+      startedAt = Date.now();
       const outcome = await this.waitForExit(child);
       const duration = Date.now() - startedAt;
       this.recordResult(
@@ -279,10 +307,11 @@ class LifecycleTest {
     const testName = 'Broken pipe';
     console.log('📡 Test: Broken pipe handling');
     const { child, getStderr } = this.spawnServer(testName);
-    const startedAt = Date.now();
+    let startedAt = Date.now();
 
     try {
       await this.initialize(child);
+      startedAt = Date.now();
       const exit = this.waitForExit(child);
 
       // Close the reader and then force the server to write another MCP
@@ -301,7 +330,7 @@ class LifecycleTest {
       this.recordResult(
         testName,
         !outcome.timedOut && outcome.code === 0 && duration < 10000 &&
-          /Stdout error|EPIPE|broken pipe/i.test(stderr),
+          /Stdout error/i.test(stderr),
         duration,
         { ...outcome, stderr: stderr.slice(-1000) }
       );
