@@ -371,6 +371,8 @@ class MCPShellServer {
     config;
     isShuttingDown = false;
     transport;
+    /** True only between `server.connect()` resolving and shutdown starting. */
+    connected = false;
     shutdownTimeout;
     heartbeatInterval;
     lastActivity = Date.now();
@@ -441,22 +443,9 @@ class MCPShellServer {
             }
         }
         this.shellExecutor = new executor_1.ShellExecutor(this.securityManager, this.contextManager, this.auditLogger, this.config);
-        // Set up MCP logger notification callback
-        this.mcpLogger.setNotificationCallback((message) => {
-            try {
-                // Only send notifications if server is connected
-                if (this.transport) {
-                    this.server.notification({
-                        method: 'notifications/message',
-                        params: message
-                    });
-                }
-            }
-            catch (error) {
-                // Silently ignore notification errors to avoid infinite loops
-                console.error('Failed to send MCP log notification:', error instanceof Error ? error.message : 'Unknown error');
-            }
-        });
+        // NOTE: the MCP logger notification callback is installed in start(), once
+        // the transport is actually connected. Until then MCPLogger queues messages
+        // and start() flushes them with processQueuedMessages().
         this.setupHandlers();
     }
     getDefaultShell() {
@@ -3122,13 +3111,29 @@ Please start by enabling the terminal viewer service.`,
             await this.contextManager.loadSession();
             this.mcpLogger.debug('Context manager session loaded', 'mcp-server');
             this.transport = new stdio_js_1.StdioServerTransport();
-            // Set up connection monitoring
-            this.setupConnectionMonitoring();
-            this.mcpLogger.debug('Connection monitoring configured', 'mcp-server');
             await this.server.connect(this.transport);
-            this.mcpLogger.info('MCP server transport connected', 'mcp-server');
+            this.connected = true;
+            // Only now can notifications be sent: server.notification() rejects with
+            // "Not connected" until connect() resolves.
+            this.mcpLogger.setNotificationCallback((message) => {
+                if (!this.connected) {
+                    return;
+                }
+                Promise.resolve(this.server.notification({
+                    method: 'notifications/message',
+                    params: message,
+                })).catch((error) => {
+                    // Never let this reject unhandled - it would trip the global handler.
+                    console.error('Failed to send MCP log notification:', error instanceof Error ? error.message : 'Unknown error');
+                });
+            });
             // Process any queued MCP log messages now that transport is ready
             this.mcpLogger.processQueuedMessages();
+            this.mcpLogger.info('MCP server transport connected', 'mcp-server');
+            // Set up connection monitoring (after connect, so the stdin listeners
+            // below never put stdin in flowing mode before the transport attaches)
+            this.setupConnectionMonitoring();
+            this.mcpLogger.debug('Connection monitoring configured', 'mcp-server');
             // Log server start with audit log location info
             await this.auditLogger.log({
                 level: 'info',
@@ -3293,6 +3298,7 @@ Please start by enabling the terminal viewer service.`,
             return; // Already shutting down
         }
         this.isShuttingDown = true;
+        this.connected = false; // stop emitting notifications on a closing transport
         console.error(`🔄 Initiating graceful shutdown: ${reason}`);
         try {
             // Stop heartbeat monitoring

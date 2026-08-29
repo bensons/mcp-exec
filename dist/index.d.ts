@@ -18,6 +18,8 @@ declare class MCPShellServer {
     private config;
     private isShuttingDown;
     private transport?;
+    /** True only between `server.connect()` resolving and shutdown starting. */
+    private connected;
     private shutdownTimeout?;
     private heartbeatInterval?;
     private lastActivity;

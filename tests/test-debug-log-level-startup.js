@@ -14,13 +14,15 @@ const os = require('os');
 const path = require('path');
 
 const SERVER_PATH = path.join(__dirname, '..', 'dist', 'index.js');
+const REJECT_NOTIFICATIONS_PRELOAD = path.join(__dirname, 'fixtures', 'reject-mcp-notifications.js');
+const UNHANDLED_REJECTION_PRELOAD = path.join(__dirname, 'fixtures', 'unhandled-rejection.js');
 const STDIN_OPEN_MS = 2000;
 const HARD_TIMEOUT_MS = 20000;
 
-function startServer(tempDir) {
+function startServer(tempDir, { nodeArgs = [], stdinOpenMs = STDIN_OPEN_MS } = {}) {
   return new Promise((resolve, reject) => {
     // cwd + MCP_EXEC_LOG_DIR keep every file the server writes inside tempDir.
-    const child = spawn(process.execPath, [SERVER_PATH], {
+    const child = spawn(process.execPath, [...nodeArgs, SERVER_PATH], {
       cwd: tempDir,
       env: {
         ...process.env,
@@ -44,7 +46,7 @@ function startServer(tempDir) {
 
     // Keep stdin open so the server has to survive on its own for a while,
     // then close it to trigger the graceful shutdown path.
-    const closeStdin = setTimeout(() => child.stdin.end(), STDIN_OPEN_MS);
+    const closeStdin = setTimeout(() => child.stdin.end(), stdinOpenMs);
 
     child.on('error', (error) => {
       clearTimeout(hardTimeout);
@@ -60,18 +62,21 @@ function startServer(tempDir) {
   });
 }
 
+async function withTempDir(callback) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-debug-startup-'));
+  try {
+    return await callback(tempDir);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function run() {
   console.log('🧪 Testing startup with MCP_EXEC_MCP_LOG_LEVEL=debug...\n');
 
   assert.ok(fs.existsSync(SERVER_PATH), `Build missing: ${SERVER_PATH} (run npm run build)`);
 
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-debug-startup-'));
-  let result;
-  try {
-    result = await startServer(tempDir);
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
+  const result = await withTempDir((tempDir) => startServer(tempDir));
 
   console.log('📝 server does not report unhandled rejections');
   assert.ok(
@@ -103,6 +108,46 @@ async function run() {
     `Expected at least one debug notification, got: ${JSON.stringify(notifications.map((m) => m.params.level))}`
   );
   console.log(`✅ ${notifications.length} notifications received`);
+
+  console.log('📝 rejected MCP notifications are handled locally');
+  const notificationFailure = await withTempDir((tempDir) => startServer(tempDir, {
+    nodeArgs: ['--require', REJECT_NOTIFICATIONS_PRELOAD],
+  }));
+  assert.ok(
+    notificationFailure.stderr.includes('Failed to send MCP log notification: Injected notification failure'),
+    `Expected a locally handled notification failure:\n${notificationFailure.stderr}`
+  );
+  assert.ok(
+    !notificationFailure.stderr.includes('Unhandled rejection at:'),
+    `Notification failure escaped to the process handler:\n${notificationFailure.stderr}`
+  );
+  assert.ok(
+    notificationFailure.stderr.includes('Client disconnection'),
+    `Notification failure terminated the server early:\n${notificationFailure.stderr}`
+  );
+  assert.strictEqual(notificationFailure.code, 0, `Expected exit code 0, got ${notificationFailure.code}`);
+  console.log('✅ notification failures do not escape their local catch');
+
+  console.log('📝 unrelated unhandled rejections still fail closed');
+  const unrelatedFailure = await withTempDir((tempDir) => startServer(tempDir, {
+    nodeArgs: ['--require', UNHANDLED_REJECTION_PRELOAD],
+    stdinOpenMs: 5000,
+  }));
+  assert.ok(
+    unrelatedFailure.stderr.includes('Unhandled rejection at:') &&
+      unrelatedFailure.stderr.includes('Injected unrelated rejection'),
+    `Expected the process-level handler to report the rejection:\n${unrelatedFailure.stderr}`
+  );
+  assert.ok(
+    unrelatedFailure.stderr.includes('Initiating graceful shutdown: Unhandled rejection'),
+    `Expected an unhandled rejection to shut down the server:\n${unrelatedFailure.stderr}`
+  );
+  assert.ok(
+    !unrelatedFailure.stderr.includes('Initiating graceful shutdown: Client disconnection'),
+    `Server waited for stdin instead of failing closed:\n${unrelatedFailure.stderr}`
+  );
+  assert.strictEqual(unrelatedFailure.code, 0, `Expected graceful exit code 0, got ${unrelatedFailure.code}`);
+  console.log('✅ unrelated unhandled rejections trigger graceful shutdown');
 
   console.log('\n🎉 Debug log level startup test passed');
 }

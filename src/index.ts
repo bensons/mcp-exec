@@ -3960,10 +3960,9 @@ if (require.main === module) {
     server.gracefulShutdown('Uncaught exception');
   });
 
-  // A stray rejection is not a reason to kill a working server: log and keep
-  // running. Fatal transport failures still arrive via the stdio error monitors.
-  process.on('unhandledRejection', (reason) => {
-    console.error('Unhandled rejection (continuing):', reason);
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled rejection at:', promise, 'reason:', reason);
+    server.gracefulShutdown('Unhandled rejection');
   });
 }
 
