@@ -83,6 +83,43 @@ When you finish, list per thread: fixed + resolved, or declined + left open with
 the reason. Do not claim a thread is resolved without having called the
 mutation.
 
+## Reviewing a pull request
+
+**Always post review feedback as comments on the PR.** A review that exists only
+in a chat transcript is not a review — the author cannot see it, act on it, or
+reply to it. This holds no matter who asked for the review or how informal it
+looks.
+
+Post findings as **inline review comments anchored to the line they concern**,
+in a single review:
+
+```bash
+gh api -X POST repos/<owner>/<repo>/pulls/<pr>/reviews --input review.json
+```
+
+where `review.json` carries `commit_id`, a summary `body`, and a `comments`
+array of `{path, line, side: "RIGHT", body}`. Use `"event": "COMMENT"` —
+GitHub rejects `APPROVE` / `REQUEST_CHANGES` on your own PR, which is the common
+case here.
+
+The same evidence standard as the section above applies, in both directions:
+
+- **Run the branch; do not review the diff alone.** Check the change out, build
+  it, execute it. Every finding you post should name the command you ran and
+  quote its actual output. The findings that matter most are usually the ones a
+  diff cannot show — a guard that looks correct but never fires, a test that
+  passes for the wrong reason.
+- **Verify an automated reviewer's findings before relaying them.** Codex and
+  similar tools are often right and sometimes wrong, and they occasionally cite
+  files or symbols that are not on the branch. Reproduce each finding yourself;
+  drop the ones that do not hold up, and say so.
+- **Triage instead of dumping.** Order findings by how much they matter, and
+  state briefly what you considered and deliberately set aside, so the author
+  can ask for those if they want them.
+- **Say what is right, too.** If the PR meets its issue's acceptance criteria,
+  confirm that explicitly with the evidence — the author should not have to
+  guess whether you checked.
+
 ## Working in parallel worktrees
 
 When several agents work in git worktrees of this repo at once, parts of the
