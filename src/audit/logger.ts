@@ -59,17 +59,17 @@ export class AuditLogger {
   private monitoringSystem?: MonitoringSystem;
 
   constructor(config: AuditConfig) {
-    this.config = config;
-    this.logFile = this.resolveLogFilePath(config);
+    this.config = this.cloneConfig(config);
+    this.logFile = this.resolveLogFilePath(this.config);
     this.logs = [];
 
-    if (config.enabled) {
+    if (this.config.enabled) {
       this.initializeLogging();
     }
 
     // Initialize monitoring if configured
-    if (config.monitoring) {
-      this.monitoringSystem = new MonitoringSystem(config.monitoring);
+    if (this.config.monitoring) {
+      this.monitoringSystem = new MonitoringSystem(this.config.monitoring);
     }
   }
 
@@ -84,15 +84,21 @@ export class AuditLogger {
    */
   updateConfig(config: Partial<AuditConfig>): void {
     const previousLogFile = this.logFile;
-    const previousMonitoring = this.config.monitoring;
     const wasEnabled = this.config.enabled;
+    const hasMonitoringUpdate = Object.prototype.hasOwnProperty.call(config, 'monitoring');
 
-    Object.assign(this.config, config);
+    this.config = this.cloneConfig({
+      ...this.config,
+      ...config,
+      monitoring: hasMonitoringUpdate ? config.monitoring : this.config.monitoring,
+    });
 
     if (!this.config.monitoring) {
       this.monitoringSystem = undefined;
-    } else if (!this.monitoringSystem || this.config.monitoring !== previousMonitoring) {
+    } else if (!this.monitoringSystem) {
       this.monitoringSystem = new MonitoringSystem(this.config.monitoring);
+    } else {
+      this.monitoringSystem.updateConfig(this.config.monitoring);
     }
 
     this.logFile = this.resolveLogFilePath(this.config);
@@ -101,6 +107,29 @@ export class AuditLogger {
       this.logs = [];
       void this.initializeLogging();
     }
+  }
+
+  private cloneConfig(config: AuditConfig): AuditConfig {
+    return {
+      ...config,
+      monitoring: config.monitoring
+        ? {
+            ...config.monitoring,
+            emailNotifications: config.monitoring.emailNotifications
+              ? {
+                  ...config.monitoring.emailNotifications,
+                  recipients: [...config.monitoring.emailNotifications.recipients],
+                  smtpConfig: config.monitoring.emailNotifications.smtpConfig
+                    ? { ...config.monitoring.emailNotifications.smtpConfig }
+                    : config.monitoring.emailNotifications.smtpConfig,
+                }
+              : undefined,
+            desktopNotifications: config.monitoring.desktopNotifications
+              ? { ...config.monitoring.desktopNotifications }
+              : undefined,
+          }
+        : undefined,
+    };
   }
 
   async logCommand(options: LogCommandOptions): Promise<void> {

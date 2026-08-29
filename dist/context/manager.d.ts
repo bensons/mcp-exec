@@ -28,6 +28,14 @@ export declare class ContextManager {
     private fileSystemChanges;
     private auditLogger?;
     constructor(config: ContextConfig, auditLogger?: AuditLogger);
+    /**
+     * Apply configuration changes while preserving this manager's history and
+     * working directory. Callers must use this instead of constructing a
+     * replacement manager, otherwise ShellExecutor keeps writing to the old
+     * instance.
+     */
+    updateConfig(config: Partial<ContextConfig>): void;
+    private validateMaxHistorySize;
     getCurrentContext(sessionId?: string): Promise<CommandContext>;
     updateAfterCommand(options: UpdateCommandOptions): Promise<void>;
     getHistory(limit?: number, filter?: string): Promise<CommandHistoryEntry[]>;

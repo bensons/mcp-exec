@@ -50,7 +50,8 @@ class ContextManager {
     fileSystemChanges;
     auditLogger;
     constructor(config, auditLogger) {
-        this.config = config;
+        this.validateMaxHistorySize(config.maxHistorySize);
+        this.config = { ...config };
         this.auditLogger = auditLogger;
         this.sessionId = (0, uuid_1.v4)();
         this.currentDirectory = process.cwd();
@@ -72,6 +73,29 @@ class ContextManager {
             sessionPersistence: config.sessionPersistence,
             maxHistorySize: config.maxHistorySize
         }, 'context-manager');
+    }
+    /**
+     * Apply configuration changes while preserving this manager's history and
+     * working directory. Callers must use this instead of constructing a
+     * replacement manager, otherwise ShellExecutor keeps writing to the old
+     * instance.
+     */
+    updateConfig(config) {
+        const nextConfig = { ...this.config, ...config };
+        this.validateMaxHistorySize(nextConfig.maxHistorySize);
+        this.config = nextConfig;
+        // Honour a shrunken history limit immediately.
+        while (this.commandHistory.length > this.config.maxHistorySize) {
+            const removed = this.commandHistory.shift();
+            if (removed) {
+                this.outputCache.delete(removed.id);
+            }
+        }
+    }
+    validateMaxHistorySize(maxHistorySize) {
+        if (!Number.isInteger(maxHistorySize) || maxHistorySize < 0) {
+            throw new Error('maxHistorySize must be a non-negative integer');
+        }
     }
     async getCurrentContext(sessionId) {
         return {

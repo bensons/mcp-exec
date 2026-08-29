@@ -17,9 +17,10 @@
     "test:lifecycle": "node tests/test-lifecycle.js",
     "test:annotations": "node tests/test-mcp-annotations.js",
     "test:dynamic-config": "node tests/test-dynamic-configuration.js",
+    "test:config-regressions": "node tests/test-configuration-regressions.js",
     "test:command-policy": "node tests/test-command-policy.js",
     "test:session-policy": "node tests/test-session-command-policy.js",
-    "test:all": "npm run test && npm run test:server && npm run test:ssh && npm run test:lifecycle && npm run test:annotations && npm run test:dynamic-config && npm run test:command-policy && npm run test:session-policy",
+    "test:all": "npm run test && npm run test:server && npm run test:ssh && npm run test:lifecycle && npm run test:annotations && npm run test:dynamic-config && npm run test:config-regressions && npm run test:command-policy && npm run test:session-policy",
     "clean": "rm -rf dist",
     "setup-claude": "node tests/setup-claude-desktop.js",
     "postbuild": "chmod +x dist/index.js"

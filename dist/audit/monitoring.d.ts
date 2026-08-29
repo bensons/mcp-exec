@@ -43,6 +43,8 @@ export declare class MonitoringSystem {
     private alerts;
     private lastAlertTime;
     constructor(config: MonitoringConfig);
+    updateConfig(config: MonitoringConfig): void;
+    private cloneConfig;
     addAlertRule(rule: AlertRule): void;
     removeAlertRule(ruleId: string): boolean;
     updateAlertRule(ruleId: string, updates: Partial<AlertRule>): boolean;

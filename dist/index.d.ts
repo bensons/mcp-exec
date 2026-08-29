@@ -39,7 +39,15 @@ declare class MCPShellServer {
     private formatContextDisplay;
     private formatHistoryDisplay;
     private recordConfigurationChange;
+    /**
+     * Restore a configuration section to its original values without replacing
+     * the canonical section object itself. Components are refreshed through
+     * reinitializeComponents after the mutation so they keep the new values
+     * without replacing the long-lived manager instances.
+     */
+    private resetSectionInPlace;
     private reinitializeComponents;
+    private restartTerminalViewerService;
     private formatSecurityStatusDisplay;
 }
 export { MCPShellServer };

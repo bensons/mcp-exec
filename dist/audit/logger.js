@@ -48,16 +48,71 @@ class AuditLogger {
     logs;
     monitoringSystem;
     constructor(config) {
-        this.config = config;
-        this.logFile = this.resolveLogFilePath(config);
+        this.config = this.cloneConfig(config);
+        this.logFile = this.resolveLogFilePath(this.config);
         this.logs = [];
-        if (config.enabled) {
+        if (this.config.enabled) {
             this.initializeLogging();
         }
         // Initialize monitoring if configured
-        if (config.monitoring) {
-            this.monitoringSystem = new monitoring_1.MonitoringSystem(config.monitoring);
+        if (this.config.monitoring) {
+            this.monitoringSystem = new monitoring_1.MonitoringSystem(this.config.monitoring);
         }
+    }
+    /**
+     * Apply configuration changes in place. Callers must use this instead of
+     * constructing a replacement logger, otherwise components that captured this
+     * instance (ShellExecutor, SecurityManager, ContextManager) keep writing to
+     * the old logger and its entries never reach the reporting tools.
+     *
+     * The log file is only reopened (and re-read) when logging is newly enabled
+     * or the resolved path actually changed.
+     */
+    updateConfig(config) {
+        const previousLogFile = this.logFile;
+        const wasEnabled = this.config.enabled;
+        const hasMonitoringUpdate = Object.prototype.hasOwnProperty.call(config, 'monitoring');
+        this.config = this.cloneConfig({
+            ...this.config,
+            ...config,
+            monitoring: hasMonitoringUpdate ? config.monitoring : this.config.monitoring,
+        });
+        if (!this.config.monitoring) {
+            this.monitoringSystem = undefined;
+        }
+        else if (!this.monitoringSystem) {
+            this.monitoringSystem = new monitoring_1.MonitoringSystem(this.config.monitoring);
+        }
+        else {
+            this.monitoringSystem.updateConfig(this.config.monitoring);
+        }
+        this.logFile = this.resolveLogFilePath(this.config);
+        if (this.config.enabled && (!wasEnabled || this.logFile !== previousLogFile)) {
+            this.logs = [];
+            void this.initializeLogging();
+        }
+    }
+    cloneConfig(config) {
+        return {
+            ...config,
+            monitoring: config.monitoring
+                ? {
+                    ...config.monitoring,
+                    emailNotifications: config.monitoring.emailNotifications
+                        ? {
+                            ...config.monitoring.emailNotifications,
+                            recipients: [...config.monitoring.emailNotifications.recipients],
+                            smtpConfig: config.monitoring.emailNotifications.smtpConfig
+                                ? { ...config.monitoring.emailNotifications.smtpConfig }
+                                : config.monitoring.emailNotifications.smtpConfig,
+                        }
+                        : undefined,
+                    desktopNotifications: config.monitoring.desktopNotifications
+                        ? { ...config.monitoring.desktopNotifications }
+                        : undefined,
+                }
+                : undefined,
+        };
     }
     async logCommand(options) {
         if (!this.config.enabled) {

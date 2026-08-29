@@ -362,7 +362,7 @@ const UpdateDisplayOptionsSchema = z.object({
 const UpdateContextConfigSchema = z.object({
   preserveWorkingDirectory: z.boolean().optional().describe('Preserve working directory between commands'),
   sessionPersistence: z.boolean().optional().describe('Enable session persistence'),
-  maxHistorySize: z.number().optional().describe('Maximum command history size'),
+  maxHistorySize: z.number().int().nonnegative().optional().describe('Maximum command history size'),
 });
 
 const UpdateLifecycleConfigSchema = z.object({
@@ -472,7 +472,7 @@ class MCPShellServer {
     // Auto-start terminal viewer service if enabled in config
     if (this.config.terminalViewer.enabled) {
       try {
-        this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
+        this.terminalViewerService = new TerminalViewerService({ ...this.config.terminalViewer });
         this.terminalViewerService.start().catch((error) => {
           console.error('Failed to auto-start terminal viewer service:', error);
           // Don't throw - let the server continue without terminal viewer
@@ -1413,7 +1413,7 @@ class MCPShellServer {
 
                 // Ensure terminal viewer service is available
                 if (!this.terminalViewerService) {
-                  this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
+                  this.terminalViewerService = new TerminalViewerService({ ...this.config.terminalViewer });
                 }
 
                 if (!this.terminalViewerService.isEnabled()) {
@@ -1574,7 +1574,7 @@ class MCPShellServer {
 
               // Ensure terminal viewer service is available
               if (!this.terminalViewerService) {
-                this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
+                this.terminalViewerService = new TerminalViewerService({ ...this.config.terminalViewer });
               }
 
               if (!this.terminalViewerService.isEnabled()) {
@@ -2124,8 +2124,7 @@ class MCPShellServer {
               this.config.audit.logDirectory = parsed.logDirectory;
             }
 
-            // Note: Log file location change requires server restart to take effect
-            const requiresRestart = parsed.logFile || parsed.logDirectory;
+            this.auditLogger.updateConfig(this.config.audit);
 
             return {
               content: [
@@ -2135,8 +2134,7 @@ class MCPShellServer {
                     success: true,
                     message: 'Audit configuration updated',
                     updatedConfig: this.config.audit,
-                    currentLogFile: this.auditLogger.getLogFilePath(),
-                    note: requiresRestart ? 'Log file location changes require server restart to take effect' : undefined
+                    currentLogFile: this.auditLogger.getLogFilePath()
                   }, null, 2),
                 },
               ],
@@ -2533,6 +2531,10 @@ class MCPShellServer {
             const parsed = UpdateConfigurationSchema.parse(args);
             const { section, settings } = parsed;
 
+            if (section === 'context' && settings.maxHistorySize !== undefined) {
+              z.number().int().nonnegative().parse(settings.maxHistorySize);
+            }
+
             // Record previous values for history
             const currentSection = this.config[section as keyof ServerConfig];
             const previousValues = currentSection ? JSON.parse(JSON.stringify(currentSection)) : {};
@@ -2579,27 +2581,29 @@ class MCPShellServer {
             const resetResults: Record<string, any> = {};
 
             for (const resetSection of resetSections) {
-              // 'logging' is accepted by the schema but is not a ServerConfig
-              // key; skip anything absent instead of throwing on JSON.parse(undefined).
-              if (this.config[resetSection as keyof ServerConfig] === undefined) {
-                resetResults[resetSection] = 'skipped (no such configuration section)';
-                continue;
+              const configSections: Array<keyof ServerConfig> = resetSection === 'logging'
+                ? ['audit', 'mcpLogging']
+                : [resetSection as keyof ServerConfig];
+
+              for (const configSection of configSections) {
+                const currentConfig = this.config[configSection];
+                if (currentConfig === undefined) {
+                  continue;
+                }
+
+                const previousValues = JSON.parse(JSON.stringify(currentConfig));
+                this.resetSectionInPlace(configSection);
+
+                const resetSectionConfig = this.config[configSection];
+                if (resetSectionConfig) {
+                  this.recordConfigurationChange(
+                    configSection,
+                    resetSectionConfig as Record<string, any>,
+                    previousValues
+                  );
+                }
               }
 
-              // Record previous values
-              const previousValues = JSON.parse(JSON.stringify(this.config[resetSection as keyof ServerConfig]));
-
-              // Reset in place: every component holds a reference to this
-              // section object, so replacing its identity would strand them
-              // on the pre-reset values.
-              this.resetSectionInPlace(resetSection as keyof ServerConfig);
-              
-              // Record the reset as a configuration change
-              const resetSectionConfig = this.config[resetSection as keyof ServerConfig];
-              if (resetSectionConfig) {
-                this.recordConfigurationChange(resetSection, resetSectionConfig as Record<string, any>, previousValues);
-              }
-              
               resetResults[resetSection] = 'reset';
             }
 
@@ -2985,12 +2989,7 @@ class MCPShellServer {
               (command) => this.assertCommandAllowed(command, 'terminal-session')
             );
 
-            // Restart terminal viewer service if enabled
-            if (this.config.terminalViewer.enabled && this.terminalViewerService) {
-              await this.terminalViewerService.stop();
-              this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
-              await this.terminalViewerService.start();
-            }
+            await this.restartTerminalViewerService(true);
 
             return {
               content: [
@@ -3226,6 +3225,10 @@ class MCPShellServer {
               throw new Error(`Configuration change with ID '${changeId}' not found`);
             }
 
+            const valuesBeforeRollback = JSON.parse(JSON.stringify(
+              this.config[changeEntry.section as keyof ServerConfig]
+            ));
+
             // Rollback to previous values
             const configSection = this.config[changeEntry.section as keyof ServerConfig];
             if (configSection && typeof configSection === 'object') {
@@ -3236,7 +3239,7 @@ class MCPShellServer {
             this.recordConfigurationChange(
               changeEntry.section,
               changeEntry.previousValues,
-              JSON.parse(JSON.stringify(this.config[changeEntry.section as keyof ServerConfig]))
+              valuesBeforeRollback
             );
 
             // Reinitialize components
@@ -3806,9 +3809,9 @@ Please start by enabling the terminal viewer service.`,
 
   /**
    * Restore a configuration section to its original values without replacing
-   * the section object itself. Components (SecurityManager, ContextManager,
-   * AuditLogger, MonitoringSystem) hold a live reference to these objects, so
-   * a reset that swapped in a fresh object would leave them on stale values.
+   * the canonical section object itself. Components are refreshed through
+   * reinitializeComponents after the mutation so they keep the new values
+   * without replacing the long-lived manager instances.
    */
   private resetSectionInPlace(section: keyof ServerConfig): void {
     const current = this.config[section];
@@ -3839,12 +3842,12 @@ Please start by enabling the terminal viewer service.`,
     if (!section || section === 'context') {
       this.contextManager.updateConfig(this.config.context);
     }
-    if (!section || section === 'mcpLogging') {
+    if (!section || section === 'mcpLogging' || section === 'logging') {
       if (this.config.mcpLogging) {
         this.mcpLogger.updateConfig(this.config.mcpLogging);
       }
     }
-    if (!section || section === 'audit') {
+    if (!section || section === 'audit' || section === 'logging') {
       this.auditLogger.updateConfig(this.config.audit);
     }
     if (!section || section === 'display') {
@@ -3857,6 +3860,9 @@ Please start by enabling the terminal viewer service.`,
         (command) => this.assertCommandAllowed(command, 'terminal-session')
       );
     }
+    if (!section || section === 'terminalViewer') {
+      await this.restartTerminalViewerService();
+    }
     if (!section || section === 'output') {
       this.shellExecutor = new ShellExecutor(
         this.securityManager,
@@ -3864,6 +3870,21 @@ Please start by enabling the terminal viewer service.`,
         this.auditLogger,
         this.config
       );
+    }
+  }
+
+  private async restartTerminalViewerService(preserveRunningState = false): Promise<void> {
+    const wasRunning = this.terminalViewerService?.isEnabled() || false;
+
+    if (this.terminalViewerService) {
+      await this.terminalViewerService.stop();
+      this.terminalViewerService = undefined;
+    }
+
+    if (this.config.terminalViewer.enabled || (preserveRunningState && wasRunning)) {
+      const viewerService = new TerminalViewerService({ ...this.config.terminalViewer });
+      await viewerService.start();
+      this.terminalViewerService = viewerService;
     }
   }
 
