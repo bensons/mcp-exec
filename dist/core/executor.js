@@ -2,15 +2,87 @@
 /**
  * Core shell command executor with cross-platform support
  */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ShellExecutor = void 0;
 const child_process_1 = require("child_process");
+const path = __importStar(require("path"));
+const os = __importStar(require("os"));
 const uuid_1 = require("uuid");
 const command_policy_1 = require("../security/command-policy");
 const output_processor_1 = require("../utils/output-processor");
 const intent_tracker_1 = require("../utils/intent-tracker");
 const interactive_session_manager_1 = require("./interactive-session-manager");
 const shell_option_1 = require("./shell-option");
+/** How long a timed-out process gets to handle SIGTERM before SIGKILL. */
+const SIGKILL_GRACE_MS = 2000;
+/** How long after SIGKILL we wait for 'close' before settling anyway. */
+const SIGKILL_SETTLE_MS = 500;
+/** How often to check whether a SIGKILLed process group has disappeared. */
+const PROCESS_GROUP_POLL_MS = 25;
+function signalNumber(signal) {
+    return os.constants.signals[signal] ?? 0;
+}
+function processGroupExists(pid) {
+    try {
+        process.kill(-pid, 0);
+        return true;
+    }
+    catch (error) {
+        return error.code !== 'ESRCH';
+    }
+}
+function terminateWindowsProcessTree(pid) {
+    return new Promise((resolve) => {
+        const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+        const taskkill = (0, child_process_1.spawn)(path.join(systemRoot, 'System32', 'taskkill.exe'), ['/pid', String(pid), '/t', '/f'], {
+            shell: false,
+            stdio: 'ignore',
+            windowsHide: true,
+        });
+        let completed = false;
+        const complete = () => {
+            if (completed)
+                return;
+            completed = true;
+            resolve();
+        };
+        taskkill.once('error', complete);
+        taskkill.once('close', complete);
+    });
+}
 class ShellExecutor {
     securityManager;
     contextManager;
@@ -26,11 +98,24 @@ class ShellExecutor {
         this.config = config;
         this.outputProcessor = new output_processor_1.OutputProcessor(config.output);
         this.intentTracker = new intent_tracker_1.IntentTracker();
-        this.sessionManager = new interactive_session_manager_1.InteractiveSessionManager(config.sessions, (command) => (0, command_policy_1.assertCommandAllowed)(this.securityManager, command, this.auditLogger, {
-            source: 'interactive-session',
+        this.sessionManager = new interactive_session_manager_1.InteractiveSessionManager(config.sessions, async (command, guardOptions = {}) => (0, command_policy_1.assertCommandAllowed)(this.securityManager, command, this.auditLogger, { source: 'interactive-session' }, {
+            ...guardOptions,
+            cwd: await this.getEffectiveCwd(guardOptions.cwd),
         }));
     }
-    async executeCommand(options) {
+    /**
+     * Effective working directory a command will run in: explicit cwd, else the
+     * session context directory, else the server's cwd. Relative and `~` paths in
+     * the command are validated against this, not against process.cwd().
+     */
+    async getEffectiveCwd(cwd) {
+        if (cwd) {
+            return path.resolve(cwd);
+        }
+        const context = await this.contextManager.getCurrentContext();
+        return path.resolve(context.currentDirectory || process.cwd());
+    }
+    async executeCommand(options, policyOptions = {}) {
         const commandId = (0, uuid_1.v4)();
         const startTime = Date.now();
         // Debug logging through audit logger to avoid JSON-RPC interference
@@ -53,8 +138,24 @@ class ShellExecutor {
                 commandId,
                 fullCommand
             }, 'security-validator');
-            const securityCheck = await this.securityManager.validateCommand(fullCommand);
-            if (!securityCheck.allowed) {
+            // Determine the working directory up front: directory checks resolve
+            // relative and `~` paths against it.
+            const context = await this.contextManager.getCurrentContext();
+            const workingDirectory = path.resolve(options.cwd || context.currentDirectory || process.cwd());
+            // Validate expansions against the same merged environment supplied to the shell.
+            const environment = {
+                ...process.env,
+                ...context.environmentVariables,
+                ...options.env,
+            };
+            const securityCheck = await this.securityManager.validateCommand(fullCommand, {
+                cwd: workingDirectory,
+                env: environment,
+            });
+            // A confirmed command (via confirm_command) bypasses only the
+            // confirmation gate; hard blocks still stop it here.
+            const confirmationBypassed = Boolean(securityCheck.requiresConfirmation && policyOptions.skipConfirmation);
+            if (!securityCheck.allowed && !confirmationBypassed) {
                 await this.auditLogger.warning('Command blocked by security policy', {
                     commandId,
                     fullCommand,
@@ -69,16 +170,6 @@ class ShellExecutor {
             }, 'security-validator');
             // Analyze command intent
             const intent = this.intentTracker.analyzeIntent(fullCommand, options.aiContext);
-            // Get current context
-            const context = await this.contextManager.getCurrentContext();
-            // Determine working directory
-            const workingDirectory = options.cwd || context.currentDirectory || process.cwd();
-            // Merge environment variables
-            const environment = {
-                ...process.env,
-                ...context.environmentVariables,
-                ...options.env,
-            };
             const shell = (0, shell_option_1.resolveShellOption)(options.shell, {
                 cwd: workingDirectory,
                 env: environment,
@@ -86,6 +177,10 @@ class ShellExecutor {
             if (typeof shell === 'string') {
                 await (0, command_policy_1.assertCommandAllowed)(this.securityManager, shell, this.auditLogger, {
                     source: 'execute_command_shell',
+                }, {
+                    skipConfirmation: policyOptions.skipConfirmation,
+                    cwd: workingDirectory,
+                    env: environment,
                 });
             }
             // Execute command
@@ -127,9 +222,9 @@ class ShellExecutor {
                 commandId,
                 command: fullCommand,
                 context: {
-                    ...context,
+                    sessionId: context.sessionId,
                     workingDirectory,
-                    environment: environment,
+                    previousCommands: context.previousCommands.slice(-5),
                     aiIntent: options.aiContext,
                 },
                 result: processedOutput,
@@ -169,7 +264,12 @@ class ShellExecutor {
                 commandId,
                 command: this.buildFullCommand(options),
                 error: error instanceof Error ? error : new Error('Unknown error'),
-                context: errorContext,
+                context: {
+                    sessionId: errorContext.sessionId,
+                    workingDirectory: options.cwd || errorContext.currentDirectory || process.cwd(),
+                    previousCommands: errorContext.previousCommands.slice(-5),
+                    aiIntent: options.aiContext,
+                },
             });
             return errorOutput;
         }
@@ -197,16 +297,87 @@ class ShellExecutor {
             const child = (0, child_process_1.spawn)(command, args, {
                 ...spawnOptions,
                 stdio: ['pipe', 'pipe', 'pipe'],
+                // Own process group so a timeout can kill the whole tree, not just the
+                // wrapping shell (`a; b` would otherwise leave `b` running as an orphan).
+                detached: process.platform !== 'win32',
             });
             let stdout = '';
             let stderr = '';
-            let timeoutId;
+            let settled = false;
+            let timedOut = false;
+            const timers = [];
+            const settle = (result) => {
+                if (settled)
+                    return;
+                settled = true;
+                timers.forEach(clearTimeout);
+                resolve(result);
+            };
+            const fail = (error) => {
+                if (settled)
+                    return;
+                settled = true;
+                timers.forEach(clearTimeout);
+                reject(error);
+            };
+            const timeoutResult = () => ({
+                stdout,
+                stderr,
+                exitCode: 124, // coreutils `timeout` convention
+                timedOut: true,
+                timeoutMs: timeout,
+            });
+            const killProcessGroup = (pid, signal) => {
+                try {
+                    process.kill(-pid, signal);
+                }
+                catch {
+                    // Process (group) already gone
+                }
+            };
+            const waitForProcessGroupExit = (pid, deadline) => {
+                if (!processGroupExists(pid) || Date.now() >= deadline) {
+                    settle(timeoutResult());
+                    return;
+                }
+                const poll = setTimeout(() => waitForProcessGroupExit(pid, deadline), PROCESS_GROUP_POLL_MS);
+                timers.push(poll);
+            };
             // Set up timeout
             if (timeout > 0) {
-                timeoutId = setTimeout(() => {
-                    child.kill('SIGTERM');
-                    reject(new Error(`Command timed out after ${timeout}ms`));
-                }, timeout);
+                timers.push(setTimeout(() => {
+                    timedOut = true;
+                    if (child.pid === undefined) {
+                        child.kill('SIGKILL');
+                        settle(timeoutResult());
+                        return;
+                    }
+                    const pid = child.pid;
+                    if (process.platform === 'win32') {
+                        // Use taskkill directly (without a shell) so the wrapping cmd.exe and
+                        // every descendant are terminated without interpolating user input.
+                        void terminateWindowsProcessTree(pid).then(() => settle(timeoutResult()));
+                        // Do not let a malfunctioning system utility leave execution pending.
+                        const giveUp = setTimeout(() => {
+                            child.kill('SIGKILL');
+                            settle(timeoutResult());
+                        }, SIGKILL_GRACE_MS + SIGKILL_SETTLE_MS);
+                        giveUp.unref();
+                        timers.push(giveUp);
+                        return;
+                    }
+                    killProcessGroup(pid, 'SIGTERM');
+                    const sigkill = setTimeout(() => {
+                        // The shell may already have emitted 'close', but descendants can
+                        // still be alive in its process group. Always preserve this
+                        // escalation until that group has gone away.
+                        if (processGroupExists(pid)) {
+                            killProcessGroup(pid, 'SIGKILL');
+                        }
+                        waitForProcessGroupExit(pid, Date.now() + SIGKILL_SETTLE_MS);
+                    }, SIGKILL_GRACE_MS);
+                    timers.push(sigkill);
+                }, timeout));
             }
             // Collect output
             child.stdout?.on('data', (data) => {
@@ -216,22 +387,28 @@ class ShellExecutor {
                 stderr += data.toString();
             });
             // Handle completion
-            child.on('close', (code) => {
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
+            child.on('close', (code, signal) => {
+                if (timedOut) {
+                    if (process.platform !== 'win32' &&
+                        child.pid !== undefined &&
+                        !processGroupExists(child.pid)) {
+                        // The whole process group exited during the SIGTERM grace period.
+                        settle(timeoutResult());
+                    }
+                    // Otherwise the timeout path remains responsible for tree cleanup.
+                    return;
                 }
-                resolve({
+                settle({
                     stdout,
                     stderr,
-                    exitCode: code || 0,
+                    // code is null when the process was terminated by a signal
+                    exitCode: code ?? (signal ? 128 + signalNumber(signal) : 1),
+                    signal: signal ?? undefined,
                 });
             });
             // Handle errors
             child.on('error', (error) => {
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
-                }
-                reject(error);
+                fail(error);
             });
         });
     }
@@ -239,13 +416,23 @@ class ShellExecutor {
     async listSessions() {
         return this.sessionManager.listSessions();
     }
+    getSession(sessionId) {
+        return this.sessionManager.getSession(sessionId);
+    }
     async killSession(sessionId) {
         await this.sessionManager.killSession(sessionId);
     }
     // Public method to start a new interactive session
     async startInteractiveSession(options) {
-        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, this.buildFullCommand(options), this.auditLogger, { source: 'start_interactive_session' });
-        return await this.sessionManager.startSession(options);
+        const context = await this.contextManager.getCurrentContext();
+        const cwd = await this.getEffectiveCwd(options.cwd);
+        const env = {
+            ...Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== undefined)),
+            ...context.environmentVariables,
+            ...options.env,
+        };
+        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, this.buildFullCommand(options), this.auditLogger, { source: 'start_interactive_session' }, { skipConfirmation: options.skipConfirmation, cwd, env });
+        return await this.sessionManager.startSession({ ...options, cwd, env });
     }
     // Public method to send input to a session
     async sendInputToSession(options) {
@@ -253,6 +440,24 @@ class ShellExecutor {
     }
     async readSessionOutput(sessionId) {
         return await this.sessionManager.readOutput(sessionId);
+    }
+    /**
+     * Apply a new config to the live components instead of recreating the
+     * executor, which would orphan every running interactive session.
+     */
+    updateConfig(config) {
+        this.config = config;
+        this.outputProcessor.updateConfig(config.output);
+        this.sessionManager.updateConfig(config.sessions);
+    }
+    /**
+     * Rebind services that can be recreated by dynamic configuration without
+     * replacing this executor (and orphaning its interactive sessions).
+     */
+    updateDependencies(securityManager, contextManager, auditLogger) {
+        this.securityManager = securityManager;
+        this.contextManager = contextManager;
+        this.auditLogger = auditLogger;
     }
     async shutdown() {
         await this.sessionManager.shutdown();

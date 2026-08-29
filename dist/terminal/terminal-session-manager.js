@@ -37,8 +37,10 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TerminalSessionManager = void 0;
+const path = __importStar(require("path"));
 const pty = __importStar(require("node-pty"));
 const uuid_1 = require("uuid");
+const buffer_1 = require("./buffer");
 const interactive_session_manager_1 = require("../core/interactive-session-manager");
 const command_policy_1 = require("../security/command-policy");
 const shell_option_1 = require("../core/shell-option");
@@ -49,6 +51,7 @@ class TerminalSessionManager {
     cleanupInterval;
     fallbackSessionManager;
     commandGuard;
+    sessionRemovedHandler;
     constructor(config, terminalViewerConfig, commandGuard) {
         this.sessions = new Map();
         this.config = config;
@@ -59,40 +62,69 @@ class TerminalSessionManager {
         this.cleanupInterval = setInterval(() => {
             this.cleanupExpiredSessions();
         }, 60000); // Check every minute
+        this.cleanupInterval.unref();
+    }
+    /**
+     * Swap in new config without recreating the manager (which would orphan every
+     * running PTY / child process). Limits/timeouts are read at call time.
+     */
+    updateConfig(config, terminalViewerConfig) {
+        this.config = config;
+        this.terminalViewerConfig = terminalViewerConfig;
+        this.fallbackSessionManager.updateConfig(config);
+        for (const session of this.sessions.values()) {
+            (0, buffer_1.resizeTerminalBuffer)(session.buffer, terminalViewerConfig.bufferSize);
+        }
+    }
+    /**
+     * Register a callback invoked whenever a terminal session is removed from this manager
+     * (kill, terminate or sweep). Used to keep the terminal viewer service in sync.
+     */
+    onSessionRemoved(handler) {
+        this.sessionRemovedHandler = handler;
     }
     async startSession(options) {
         console.error(`[DEBUG] TerminalSessionManager.startSession called with enableTerminalViewer: ${options.enableTerminalViewer}`);
-        if (this.commandGuard && options.command) {
-            await this.commandGuard((0, command_policy_1.buildFullCommand)(options.command, options.args));
-        }
-        // If terminal viewer is not requested, use fallback
-        if (!options.enableTerminalViewer) {
-            console.error(`[DEBUG] Terminal viewer not requested, using fallback session manager`);
-            // Ensure command is provided for fallback session manager
-            const fallbackOptions = {
-                ...options,
-                command: options.command || this.getShell()
-            };
-            return this.fallbackSessionManager.startSession(fallbackOptions);
-        }
-        console.error(`[DEBUG] Creating terminal session, current sessions: ${this.sessions.size}/${this.terminalViewerConfig.maxSessions}`);
-        // Check session limit
-        if (this.sessions.size >= this.terminalViewerConfig.maxSessions) {
-            throw new Error(`Maximum number of terminal sessions (${this.terminalViewerConfig.maxSessions}) reached`);
-        }
-        const workingDirectory = options.cwd || process.cwd();
+        const cwd = path.resolve(options.cwd || process.cwd());
         const environment = {
             ...Object.fromEntries(Object.entries(process.env).filter(([_, value]) => value !== undefined)),
             ...options.env,
             TERM: 'xterm-256color',
             COLORTERM: 'truecolor',
         };
+        const normalizedOptions = { ...options, cwd, env: environment };
+        if (this.commandGuard) {
+            await this.commandGuard((0, command_policy_1.buildFullCommand)(options.command, options.args), {
+                skipConfirmation: options.skipConfirmation,
+                cwd,
+                env: environment,
+            });
+        }
+        // If terminal viewer is not requested, use fallback
+        if (!options.enableTerminalViewer) {
+            console.error(`[DEBUG] Terminal viewer not requested, using fallback session manager`);
+            // Ensure command is provided for fallback session manager
+            const fallbackOptions = {
+                ...normalizedOptions,
+                command: options.command || this.getShell()
+            };
+            return this.fallbackSessionManager.startSession(fallbackOptions);
+        }
+        console.error(`[DEBUG] Creating terminal session, current sessions: ${this.sessions.size}/${this.terminalViewerConfig.maxSessions}`);
+        // Check session limit - only sessions that are still running occupy a slot
+        if (this.countRunningSessions() >= this.terminalViewerConfig.maxSessions) {
+            throw new Error(`Maximum number of terminal sessions (${this.terminalViewerConfig.maxSessions}) reached`);
+        }
         const shell = (0, shell_option_1.resolveShellOption)(options.shell, {
-            cwd: workingDirectory,
+            cwd,
             env: environment,
         });
         if (this.commandGuard && typeof shell === 'string') {
-            await this.commandGuard(shell);
+            await this.commandGuard(shell, {
+                skipConfirmation: options.skipConfirmation,
+                cwd,
+                env: environment,
+            });
         }
         if (shell === false && !options.command) {
             throw new Error('shell:false requires a command for terminal-viewer execution');
@@ -100,24 +132,19 @@ class TerminalSessionManager {
         const sessionId = (0, uuid_1.v4)();
         const startTime = new Date();
         // Create PTY process
-        const ptyProcess = this.createPtyProcess(options, shell, workingDirectory, environment);
+        const ptyProcess = this.createPtyProcess(normalizedOptions, shell, cwd, environment);
         // Create terminal session
         const session = {
             sessionId,
             command: options.command || 'system shell',
             args: options.args || [],
-            cwd: workingDirectory,
+            cwd,
             env: environment,
             startTime,
             lastActivity: startTime,
             status: 'running',
             pty: ptyProcess,
-            buffer: {
-                lines: [],
-                cursor: { x: 0, y: 0 },
-                scrollback: 0,
-                maxLines: this.terminalViewerConfig.bufferSize
-            },
+            buffer: (0, buffer_1.createTerminalBuffer)(this.terminalViewerConfig.bufferSize),
             viewers: new Set(),
             aiContext: options.aiContext,
         };
@@ -186,7 +213,7 @@ class TerminalSessionManager {
             return;
         // Handle data output
         session.pty.onData((data) => {
-            this.addToBuffer(session, data, 'output');
+            (0, buffer_1.appendToBuffer)(session.buffer, data);
             session.lastActivity = new Date();
         });
         // Handle process exit - PTY onExit receives (exitCode, signal) as separate parameters
@@ -224,39 +251,11 @@ class TerminalSessionManager {
             session.lastActivity = new Date();
             console.error(`[DEBUG] Session ${session.sessionId} status updated to: ${newStatus}`);
             // Add a final message to the buffer indicating the session has ended
-            this.addToBuffer(session, `\n[Session ended with exit code ${numericExitCode}${signal ? `, signal ${JSON.stringify(signal)}` : ''}]`, 'output');
+            (0, buffer_1.appendToBuffer)(session.buffer, `\r\n[Session ended with exit code ${numericExitCode}${signal ? `, signal ${JSON.stringify(signal)}` : ''}]\r\n`);
         });
-    }
-    addToBuffer(session, data, type) {
-        // Split data into lines, preserving ANSI sequences
-        const lines = data.split(/\r?\n/);
-        lines.forEach((line, index) => {
-            // Don't add empty lines except for the last one if it represents a newline
-            if (line.length > 0 || (index === lines.length - 1 && data.endsWith('\n'))) {
-                session.buffer.lines.push({
-                    text: line,
-                    timestamp: new Date(),
-                    type,
-                    ansiCodes: this.extractAnsiCodes(line)
-                });
-            }
-        });
-        // Limit buffer size
-        if (session.buffer.lines.length > session.buffer.maxLines) {
-            const excess = session.buffer.lines.length - session.buffer.maxLines;
-            session.buffer.lines = session.buffer.lines.slice(excess);
-            session.buffer.scrollback += excess;
-        }
-    }
-    extractAnsiCodes(text) {
-        const ansiRegex = /\x1b\[[0-9;]*m/g;
-        return text.match(ansiRegex) || [];
     }
     async sendInput(options) {
         console.error(`[DEBUG] TerminalSessionManager.sendInput called for session ${options.sessionId}`);
-        if (this.commandGuard) {
-            await this.commandGuard(options.input);
-        }
         const session = this.sessions.get(options.sessionId);
         if (!session) {
             console.error(`[DEBUG] Session ${options.sessionId} not found in terminal sessions, trying fallback manager`);
@@ -270,9 +269,26 @@ class TerminalSessionManager {
         if (!session.pty) {
             throw new Error(`Session ${options.sessionId} does not have a PTY`);
         }
-        // Send input to PTY
+        const resultingCwd = this.commandGuard
+            ? await this.commandGuard(options.input, {
+                skipConfirmation: options.skipConfirmation,
+                cwd: session.cwd,
+                env: session.env,
+            })
+            : undefined;
+        // Send input to PTY - writing to a PTY whose child already exited throws (EIO/EPIPE),
+        // so translate it into a normal tool error instead of letting it escape.
         const input = options.addNewline !== false ? options.input + '\r' : options.input;
-        session.pty.write(input);
+        try {
+            session.pty.write(input);
+        }
+        catch (error) {
+            throw new Error(`Failed to write to session ${options.sessionId} PTY: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (resultingCwd && options.addNewline !== false) {
+            session.cwd = resultingCwd;
+            session.env.PWD = resultingCwd;
+        }
         // Don't manually add to buffer - let PTY echo handle display to avoid duplication
         session.lastActivity = new Date();
     }
@@ -292,23 +308,37 @@ class TerminalSessionManager {
         }
         // Remove from active sessions
         this.sessions.delete(sessionId);
+        this.sessionRemovedHandler?.(sessionId);
+    }
+    countRunningSessions() {
+        let count = 0;
+        for (const session of this.sessions.values()) {
+            if (session.status === 'running') {
+                count++;
+            }
+        }
+        return count;
     }
     getSession(sessionId) {
         return this.sessions.get(sessionId);
+    }
+    getTerminalSessions() {
+        return Array.from(this.sessions.values());
     }
     getSessionInfo(sessionId) {
         const session = this.sessions.get(sessionId);
         if (!session) {
             return null;
         }
+        const lines = (0, buffer_1.bufferLines)(session.buffer);
         return {
             sessionId: session.sessionId,
             command: session.command,
             status: session.status,
             startTime: session.startTime,
             lastActivity: session.lastActivity,
-            bufferLines: session.buffer.lines.length,
-            recentOutput: session.buffer.lines.slice(-5).map(line => line.text).join('\n')
+            bufferLines: lines.length,
+            recentOutput: lines.slice(-5).join('\n')
         };
     }
     listSessions() {
@@ -333,13 +363,19 @@ class TerminalSessionManager {
         const expiredSessions = [];
         this.sessions.forEach((session, sessionId) => {
             const timeSinceLastActivity = now.getTime() - session.lastActivity.getTime();
-            if (timeSinceLastActivity > this.terminalViewerConfig.sessionTimeout) {
+            // Finished sessions are reaped after a short grace period, independent of sessionTimeout
+            const maxIdle = session.status === 'running'
+                ? this.terminalViewerConfig.sessionTimeout
+                : Math.min(this.terminalViewerConfig.sessionTimeout, interactive_session_manager_1.FINISHED_SESSION_GRACE_MS);
+            if (timeSinceLastActivity > maxIdle) {
                 expiredSessions.push(sessionId);
             }
         });
         expiredSessions.forEach(sessionId => {
             console.error(`Cleaning up expired terminal session: ${sessionId}`);
-            this.killSession(sessionId);
+            this.killSession(sessionId).catch(error => {
+                console.error(`Error cleaning up expired terminal session ${sessionId}:`, error);
+            });
         });
         // Also cleanup fallback sessions
         this.fallbackSessionManager['cleanupExpiredSessions']?.();
