@@ -56,6 +56,7 @@ export declare class ContextManager {
     private persistenceDirty;
     private disposed;
     constructor(config: ContextConfig, auditLogger?: AuditLogger, options?: ContextManagerOptions);
+    private validateMaxHistorySize;
     getCurrentContext(sessionId?: string): Promise<CommandContext>;
     updateAfterCommand(options: UpdateCommandOptions): Promise<void>;
     getHistory(limit?: number, filter?: string): Promise<CommandHistoryEntry[]>;
@@ -87,7 +88,7 @@ export declare class ContextManager {
     /** Write any dirty session state now, after all earlier publications finish. */
     flushSession(): Promise<void>;
     /** Update persistence settings without orphaning timers or losing live context. */
-    updateConfig(config: ContextConfig): Promise<void>;
+    updateConfig(config: Partial<ContextConfig>): Promise<void>;
     /** Stop this manager from publishing after it has been replaced. */
     dispose(): Promise<void>;
     private cancelPendingPersistence;

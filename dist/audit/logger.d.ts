@@ -46,6 +46,17 @@ export declare class AuditLogger {
     private maxInMemoryEntries;
     private initialization;
     constructor(config: AuditConfig);
+    /**
+     * Apply configuration changes in place. Callers must use this instead of
+     * constructing a replacement logger, otherwise components that captured this
+     * instance (ShellExecutor, SecurityManager, ContextManager) keep writing to
+     * the old logger and its entries never reach the reporting tools.
+     *
+     * The log file is only reopened (and re-read) when logging is newly enabled
+     * or the resolved path actually changed.
+     */
+    updateConfig(config: Partial<AuditConfig>): void;
+    private cloneConfig;
     logCommand(options: LogCommandOptions): Promise<void>;
     logError(options: LogErrorOptions): Promise<void>;
     log(options: LogOptions): Promise<void>;

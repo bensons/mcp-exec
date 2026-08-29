@@ -3,6 +3,7 @@
  */
 
 import { spawn, SpawnOptions } from 'child_process';
+import { existsSync } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { v4 as uuidv4 } from 'uuid';
@@ -23,6 +24,7 @@ const SIGKILL_GRACE_MS = 2000;
 const SIGKILL_SETTLE_MS = 500;
 /** How often to check whether a SIGKILLed process group has disappeared. */
 const PROCESS_GROUP_POLL_MS = 25;
+const POSIX_ENV_COMMAND = ['/usr/bin/env', '/bin/env'].find(existsSync) || 'env';
 
 function signalNumber(signal: NodeJS.Signals): number {
   return (os.constants.signals as unknown as Record<string, number>)[signal] ?? 0;
@@ -536,7 +538,7 @@ export class ShellExecutor {
       `${command}\n` +
       '__mcp_exec_status=$?\n' +
       `printf '\\000%s\\000%s\\000' '${marker}' "$PWD" >&2\n` +
-      'command -p env -0 >&2\n' +
+      `${POSIX_ENV_COMMAND} -0 >&2\n` +
       `printf '\\000%s\\000' '${marker}_END' >&2\n` +
       'exit "$__mcp_exec_status"';
   }

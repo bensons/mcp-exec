@@ -38,6 +38,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ShellExecutor = void 0;
 const child_process_1 = require("child_process");
+const fs_1 = require("fs");
 const path = __importStar(require("path"));
 const os = __importStar(require("os"));
 const uuid_1 = require("uuid");
@@ -52,6 +53,7 @@ const SIGKILL_GRACE_MS = 2000;
 const SIGKILL_SETTLE_MS = 500;
 /** How often to check whether a SIGKILLed process group has disappeared. */
 const PROCESS_GROUP_POLL_MS = 25;
+const POSIX_ENV_COMMAND = ['/usr/bin/env', '/bin/env'].find(fs_1.existsSync) || 'env';
 function signalNumber(signal) {
     return os.constants.signals[signal] ?? 0;
 }
@@ -456,7 +458,7 @@ class ShellExecutor {
             `${command}\n` +
             '__mcp_exec_status=$?\n' +
             `printf '\\000%s\\000%s\\000' '${marker}' "$PWD" >&2\n` +
-            'command -p env -0 >&2\n' +
+            `${POSIX_ENV_COMMAND} -0 >&2\n` +
             `printf '\\000%s\\000' '${marker}_END' >&2\n` +
             'exit "$__mcp_exec_status"';
     }

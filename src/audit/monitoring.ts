@@ -64,8 +64,31 @@ export class MonitoringSystem {
   private lastAlertTime: Map<string, Date> = new Map();
 
   constructor(config: MonitoringConfig) {
-    this.config = config;
+    this.config = this.cloneConfig(config);
     this.initializeDefaultRules();
+  }
+
+  updateConfig(config: MonitoringConfig): void {
+    this.config = this.cloneConfig(config);
+    this.cleanup();
+  }
+
+  private cloneConfig(config: MonitoringConfig): MonitoringConfig {
+    return {
+      ...config,
+      emailNotifications: config.emailNotifications
+        ? {
+            ...config.emailNotifications,
+            recipients: [...config.emailNotifications.recipients],
+            smtpConfig: config.emailNotifications.smtpConfig
+              ? { ...config.emailNotifications.smtpConfig }
+              : config.emailNotifications.smtpConfig,
+          }
+        : undefined,
+      desktopNotifications: config.desktopNotifications
+        ? { ...config.desktopNotifications }
+        : undefined,
+    };
   }
 
   addAlertRule(rule: AlertRule): void {

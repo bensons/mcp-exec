@@ -76,6 +76,7 @@ class ContextManager {
     persistenceDirty = false;
     disposed = false;
     constructor(config, auditLogger, options = {}) {
+        this.validateMaxHistorySize(config.maxHistorySize);
         this.config = { ...config };
         this.auditLogger = auditLogger;
         this.sessionId = (0, uuid_1.v4)();
@@ -106,6 +107,11 @@ class ContextManager {
             sessionPersistence: config.sessionPersistence,
             maxHistorySize: config.maxHistorySize
         }, 'context-manager');
+    }
+    validateMaxHistorySize(maxHistorySize) {
+        if (!Number.isInteger(maxHistorySize) || maxHistorySize < 0) {
+            throw new Error('maxHistorySize must be a non-negative integer');
+        }
     }
     async getCurrentContext(sessionId) {
         return {
@@ -418,7 +424,9 @@ class ContextManager {
     /** Update persistence settings without orphaning timers or losing live context. */
     async updateConfig(config) {
         const wasPersistent = this.config.sessionPersistence;
-        this.config = { ...config };
+        const nextConfig = { ...this.config, ...config };
+        this.validateMaxHistorySize(nextConfig.maxHistorySize);
+        this.config = nextConfig;
         while (this.commandHistory.length > this.config.maxHistorySize) {
             const removed = this.commandHistory.shift();
             if (removed) {

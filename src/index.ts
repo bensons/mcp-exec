@@ -376,7 +376,7 @@ const UpdateDisplayOptionsSchema = z.object({
 const UpdateContextConfigSchema = z.object({
   preserveWorkingDirectory: z.boolean().optional().describe('Preserve working directory between commands'),
   sessionPersistence: z.boolean().optional().describe('Enable session persistence'),
-  maxHistorySize: z.number().optional().describe('Maximum command history size'),
+  maxHistorySize: z.number().int().nonnegative().optional().describe('Maximum command history size'),
 });
 
 const UpdateLifecycleConfigSchema = z.object({
@@ -484,7 +484,7 @@ class MCPShellServer {
     // Auto-start terminal viewer service if enabled in config
     if (this.config.terminalViewer.enabled) {
       try {
-        this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
+        this.terminalViewerService = new TerminalViewerService({ ...this.config.terminalViewer });
         this.terminalViewerService.start().catch((error) => {
           console.error('Failed to auto-start terminal viewer service:', error);
           // Don't throw - let the server continue without terminal viewer
@@ -2022,8 +2022,8 @@ class MCPShellServer {
               }
             }
 
-            // Recreate security manager with new config
-            this.securityManager = new SecurityManager(this.config.security);
+            // Apply in place so ShellExecutor validates against the new policy
+            this.securityManager.updateConfig(this.config.security);
 
             return {
               content: [
@@ -2294,8 +2294,7 @@ class MCPShellServer {
               this.config.audit.logDirectory = parsed.logDirectory;
             }
 
-            // Note: Log file location change requires server restart to take effect
-            const requiresRestart = parsed.logFile || parsed.logDirectory;
+            this.auditLogger.updateConfig(this.config.audit);
 
             return {
               content: [
@@ -2305,8 +2304,7 @@ class MCPShellServer {
                     success: true,
                     message: 'Audit configuration updated',
                     updatedConfig: this.config.audit,
-                    currentLogFile: this.auditLogger.getLogFilePath(),
-                    note: requiresRestart ? 'Log file location changes require server restart to take effect' : undefined
+                    currentLogFile: this.auditLogger.getLogFilePath()
                   }, null, 2),
                 },
               ],
@@ -2706,6 +2704,10 @@ class MCPShellServer {
             const parsed = UpdateConfigurationSchema.parse(args);
             const { section, settings } = parsed;
 
+            if (section === 'context' && settings.maxHistorySize !== undefined) {
+              z.number().int().nonnegative().parse(settings.maxHistorySize);
+            }
+
             // Record previous values for history
             const currentSection = this.config[section as keyof ServerConfig];
             const previousValues = currentSection ? JSON.parse(JSON.stringify(currentSection)) : {};
@@ -2758,38 +2760,32 @@ class MCPShellServer {
             const resetResults: Record<string, any> = {};
 
             for (const resetSection of resetSections) {
-              if (resetSection === 'logging') {
-                const previousValues = JSON.parse(JSON.stringify({
-                  audit: this.config.audit,
-                  mcpLogging: this.config.mcpLogging,
-                }));
-                this.config.audit = JSON.parse(JSON.stringify(this.originalConfig.audit));
-                this.config.mcpLogging = JSON.parse(JSON.stringify(this.originalConfig.mcpLogging));
-                const resetLogging = {
-                  audit: this.config.audit,
-                  mcpLogging: this.config.mcpLogging,
-                };
-                this.recordConfigurationChange('logging', resetLogging, previousValues);
-                resetResults.logging = 'reset';
-                continue;
+              const configSections: Array<keyof ServerConfig> = resetSection === 'logging'
+                ? ['audit', 'mcpLogging']
+                : [resetSection as keyof ServerConfig];
+
+              for (const configSection of configSections) {
+                const currentConfig = this.config[configSection];
+                if (currentConfig === undefined) {
+                  continue;
+                }
+
+                const previousValues = JSON.parse(JSON.stringify(currentConfig));
+                if (configSection === 'terminalViewer') {
+                  TerminalViewerService.assertSafeConfiguration(this.originalConfig.terminalViewer);
+                }
+                this.resetSectionInPlace(configSection);
+
+                const resetSectionConfig = this.config[configSection];
+                if (resetSectionConfig) {
+                  this.recordConfigurationChange(
+                    configSection,
+                    resetSectionConfig as Record<string, any>,
+                    previousValues
+                  );
+                }
               }
 
-              // Record previous values
-              const previousValues = JSON.parse(JSON.stringify(this.config[resetSection as keyof ServerConfig]));
-              
-              // Reset to original values
-              const resetValue = JSON.parse(JSON.stringify(this.originalConfig[resetSection as keyof ServerConfig]));
-              if (resetSection === 'terminalViewer') {
-                TerminalViewerService.assertSafeConfiguration(resetValue);
-              }
-              this.config[resetSection as keyof ServerConfig] = resetValue;
-              
-              // Record the reset as a configuration change
-              const resetSectionConfig = this.config[resetSection as keyof ServerConfig];
-              if (resetSectionConfig) {
-                this.recordConfigurationChange(resetSection, resetSectionConfig as Record<string, any>, previousValues);
-              }
-              
               resetResults[resetSection] = 'reset';
             }
 
@@ -2854,8 +2850,8 @@ class MCPShellServer {
                 break;
             }
 
-            // Recreate security manager with updated blocked commands
-            this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+            // Apply in place so ShellExecutor sees the updated blocked commands
+            this.securityManager.updateConfig(this.config.security);
 
             return {
               content: [
@@ -2910,8 +2906,8 @@ class MCPShellServer {
                 break;
             }
 
-            // Recreate security manager with updated allowed directories
-            this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+            // Apply in place so ShellExecutor sees the updated allowed directories
+            this.securityManager.updateConfig(this.config.security);
 
             return {
               content: [
@@ -2947,8 +2943,8 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('security', { resourceLimits: this.config.security.resourceLimits }, { resourceLimits: previousValues });
 
-            // Recreate security manager
-            this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+            // Apply in place so ShellExecutor sees the new resource limits
+            this.securityManager.updateConfig(this.config.security);
 
             return {
               content: [
@@ -2998,8 +2994,8 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('mcpLogging', this.config.mcpLogging, previousValues);
 
-            // Recreate MCP logger
-            this.mcpLogger = new MCPLogger(this.config.mcpLogging);
+            // Apply in place to keep the notification callback and queue
+            this.mcpLogger.updateConfig(this.config.mcpLogging);
 
             return {
               content: [
@@ -3076,8 +3072,8 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('audit', this.config.audit, previousValues);
 
-            // Recreate audit logger
-            this.auditLogger = new AuditLogger(this.config.audit);
+            // Apply in place so every component keeps writing to this logger
+            this.auditLogger.updateConfig(this.config.audit);
 
             return {
               content: [
@@ -3247,8 +3243,8 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('display', this.config.display, previousValues);
 
-            // Recreate display formatter
-            this.displayFormatter = new DisplayFormatter(this.config.display);
+            // Apply in place
+            this.displayFormatter.updateConfig(this.config.display);
 
             return {
               content: [
@@ -3383,6 +3379,10 @@ class MCPShellServer {
               throw new Error(`Configuration change with ID '${changeId}' not found`);
             }
 
+            const valuesBeforeRollback = JSON.parse(JSON.stringify(
+              this.config[changeEntry.section as keyof ServerConfig]
+            ));
+
             // Rollback to previous values
             const configSection = this.config[changeEntry.section as keyof ServerConfig];
             if (configSection && typeof configSection === 'object') {
@@ -3399,7 +3399,7 @@ class MCPShellServer {
             this.recordConfigurationChange(
               changeEntry.section,
               changeEntry.previousValues,
-              JSON.parse(JSON.stringify(this.config[changeEntry.section as keyof ServerConfig]))
+              valuesBeforeRollback
             );
 
             // Reinitialize components
@@ -3995,32 +3995,51 @@ Please start by enabling the terminal viewer service.`,
     });
   }
 
-  private async reinitializeComponents(section?: string): Promise<void> {
-    // Recreate audit logging first so newly constructed managers receive the
-    // current logger during a full reset.
-    if (!section || section === 'audit' || section === 'logging') {
-      this.auditLogger = new AuditLogger(this.config.audit);
+  /**
+   * Restore a configuration section to its original values without replacing
+   * the canonical section object itself. Components are refreshed through
+   * reinitializeComponents after the mutation so they keep the new values
+   * without replacing the long-lived manager instances.
+   */
+  private resetSectionInPlace(section: keyof ServerConfig): void {
+    const current = this.config[section];
+    const original = this.originalConfig[section];
+
+    if (!current || typeof current !== 'object' || !original || typeof original !== 'object') {
+      // Primitive/absent section: a plain assignment is safe, nothing holds it.
+      (this.config as unknown as Record<string, unknown>)[section] = JSON.parse(JSON.stringify(original ?? null));
+      return;
     }
+
+    const target = current as Record<string, unknown>;
+    const source = JSON.parse(JSON.stringify(original)) as Record<string, unknown>;
+
+    // Drop keys that were added after startup, then restore the originals.
+    for (const key of Object.keys(target)) {
+      if (!(key in source)) {
+        delete target[key];
+      }
+    }
+    Object.assign(target, source);
+  }
+
+  private async reinitializeComponents(section?: string): Promise<void> {
     if (!section || section === 'security') {
-      this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+      this.securityManager.updateConfig(this.config.security);
     }
     if (!section || section === 'context') {
       await this.contextManager.updateConfig(this.config.context);
     }
     if (!section || section === 'mcpLogging' || section === 'logging') {
-      this.mcpLogger = new MCPLogger(this.config.mcpLogging || {
-        enabled: true,
-        minLevel: 'info',
-        rateLimitPerMinute: 60,
-        maxQueueSize: 100,
-        includeContext: true
-      });
-      if (this.connected) {
-        this.installMcpLoggerNotificationCallback();
+      if (this.config.mcpLogging) {
+        this.mcpLogger.updateConfig(this.config.mcpLogging);
       }
     }
+    if (!section || section === 'audit' || section === 'logging') {
+      this.auditLogger.updateConfig(this.config.audit);
+    }
     if (!section || section === 'display') {
-      this.displayFormatter = new DisplayFormatter(this.config.display);
+      this.displayFormatter.updateConfig(this.config.display);
     }
     // Session managers are never recreated: that would orphan every running
     // PTY / child process (unreachable by list_sessions / kill_session) and leak
