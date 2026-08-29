@@ -284,9 +284,9 @@ async function run() {
     console.log('✅ regular session cwd is scoped and updated');
 
     console.log('\n🎉 Session command-policy regression tests passed');
-  } catch (error) {
+  } catch {
     failures += 1;
-    console.error('💥 Session command-policy tests failed:', error.message);
+    console.error('💥 Session command-policy tests failed');
   } finally {
     client.stop();
     directoryClient?.stop();

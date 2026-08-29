@@ -377,12 +377,12 @@ class SecurityManager {
         try {
             const fileUrl = new URL(token);
             if (fileUrl.protocol !== 'file:') {
-                return { error: `Unsupported URL scheme in local path: ${token}` };
+                return { error: 'Unsupported URL scheme in local path' };
             }
             return { path: canonicalizePath((0, url_1.fileURLToPath)(fileUrl)) };
         }
         catch {
-            return { error: `Invalid or unsupported local file URL: ${token}` };
+            return { error: 'Invalid or unsupported local file URL' };
         }
     }
     validateDirectoryAccess(command, cwd, environment = process.env) {
@@ -479,9 +479,9 @@ class SecurityManager {
             }
             const resolved = this.resolveFileReference(target, baseDir);
             if (!resolved.path) {
-                return this.denyUnresolved(resolved.error || `Could not resolve cd target: ${target}`);
+                return this.denyUnresolved(resolved.error || 'Could not resolve cd target');
             }
-            const targetCheck = this.validateResolvedPath(resolved.path, target);
+            const targetCheck = this.validateResolvedPath(resolved.path, 'cd target');
             if (!targetCheck.allowed) {
                 return targetCheck;
             }
@@ -492,21 +492,25 @@ class SecurityManager {
                 continue;
             }
             let candidate = expandedWords.get(token) || '';
+            let displayCandidate = token.value;
             const equals = candidate.indexOf('=');
             if (equals !== -1) {
                 candidate = candidate.slice(equals + 1);
+                displayCandidate = displayCandidate.slice(displayCandidate.indexOf('=') + 1);
             }
             if (!candidate || !isPathLike(candidate)) {
                 continue;
             }
             if (token.unquoted.some(Boolean) && /[*?[]/.test(candidate)) {
-                return this.denyUnresolved(`Wildcard path expansion is not supported: ${candidate}`);
+                return this.denyUnresolved('Wildcard path expansion is not supported');
             }
             const resolved = this.resolveFileReference(candidate, baseDir);
             if (!resolved.path) {
-                return this.denyUnresolved(resolved.error || `Could not resolve path: ${candidate}`);
+                return this.denyUnresolved(resolved.error || 'Could not resolve path');
             }
-            const pathCheck = this.validateResolvedPath(resolved.path, candidate);
+            // Diagnostics retain the user's expression rather than its potentially
+            // sensitive environment-derived expansion.
+            const pathCheck = this.validateResolvedPath(resolved.path, displayCandidate);
             if (!pathCheck.allowed) {
                 return pathCheck;
             }

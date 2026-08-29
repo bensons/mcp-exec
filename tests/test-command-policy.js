@@ -63,6 +63,7 @@ async function assertAllowed(manager, command, options, label) {
 async function assertDenied(manager, command, options, label) {
   const result = await manager.validateCommand(command, options);
   assert.strictEqual(result.allowed, false, `${label}: expected blocked`);
+  return result;
 }
 
 async function testDirectoryAccess() {
@@ -184,11 +185,15 @@ async function testDirectoryAccess() {
       { cwd: allowedRoot, env: { HOME: allowedRoot } },
       'allowed HOME expansion'
     );
-    await assertDenied(
+    const expandedHomeDenial = await assertDenied(
       fixtureManager,
       'cat ${HOME}/secret.txt',
       { cwd: allowedRoot, env: { HOME: outsideRoot } },
       'outside HOME expansion'
+    );
+    assert.ok(
+      !(expandedHomeDenial.reason || '').includes(outsideRoot),
+      'policy reason must not expose the environment-derived HOME value'
     );
     await assertDenied(fixtureManager, 'cat $(pwd)/secret.txt', { cwd: allowedRoot }, 'command substitution');
     await assertDenied(fixtureManager, 'cat "unterminated', { cwd: allowedRoot }, 'unterminated quote');
@@ -276,8 +281,10 @@ async function run() {
 }
 
 if (require.main === module) {
-  run().catch((error) => {
-    console.error('💥 command-policy unit tests failed:', error);
+  run().catch(() => {
+    // Individual case labels identify the failing regression without emitting
+    // assertion objects that may contain environment-derived path values.
+    console.error('💥 command-policy unit tests failed');
     process.exit(1);
   });
 }
