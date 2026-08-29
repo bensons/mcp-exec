@@ -24,7 +24,7 @@ export declare class OutputProcessor {
     private config;
     constructor(config: OutputConfig);
     process(rawOutput: RawCommandResult, command?: string): Promise<CommandOutput>;
-    private stripAnsiCodes;
+    static stripAnsiCodes(text: string): string;
     private optimizeForAI;
     private enhanceCommandSpecificOutput;
     private enhanceDirectoryListing;

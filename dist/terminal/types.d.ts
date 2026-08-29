@@ -10,7 +10,6 @@ export interface TerminalViewerConfig {
     bufferSize: number;
     enableAuth: boolean;
     authToken?: string;
-    disableWebSocketBuffering?: boolean;
 }
 export interface TerminalSession {
     sessionId: string;
@@ -26,20 +25,15 @@ export interface TerminalSession {
     viewers: Set<string>;
     aiContext?: string;
 }
+/**
+ * Raw PTY output kept verbatim as a ring of chunks, so a viewer that connects
+ * later replays exactly the byte stream the live viewer saw (partial lines,
+ * carriage returns and cursor movement included).
+ */
 export interface TerminalBuffer {
-    lines: TerminalLine[];
-    cursor: {
-        x: number;
-        y: number;
-    };
-    scrollback: number;
-    maxLines: number;
-}
-export interface TerminalLine {
-    text: string;
-    timestamp: Date;
-    type: 'input' | 'output' | 'error';
-    ansiCodes?: string[];
+    chunks: string[];
+    bytes: number;
+    maxBytes: number;
 }
 export interface TerminalViewerSession {
     sessionId: string;

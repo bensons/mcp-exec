@@ -11,6 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { TerminalViewerService } = require('../dist/terminal/viewer-service.js');
+const { createTerminalBuffer } = require('../dist/terminal/buffer.js');
 
 const SERVER_PATH = path.resolve(__dirname, '..', 'dist', 'index.js');
 const MAX_SESSIONS = 10;
@@ -136,7 +137,7 @@ function testViewerExitStartsGracePeriod() {
         exitHandler = handler;
       },
     },
-    buffer: { lines: [], cursor: { x: 0, y: 0 }, scrollback: 0, maxLines: 100 },
+    buffer: createTerminalBuffer(100),
     viewers: new Set(),
   };
 

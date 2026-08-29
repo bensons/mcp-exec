@@ -46,7 +46,6 @@ export declare class TerminalViewerService {
     sendInput(sessionId: string, input: string, addNewline?: boolean): void;
     private broadcastToSession;
     private broadcastStatusToSession;
-    private addToBuffer;
     getStatus(): TerminalViewerStatus;
     isEnabled(): boolean;
     getSessionUrl(sessionId: string): string | null;

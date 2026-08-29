@@ -31,8 +31,6 @@ export declare class TerminalSessionManager {
     private createPtyProcess;
     private getShell;
     private setupPtyHandlers;
-    private addToBuffer;
-    private extractAnsiCodes;
     sendInput(options: SendInputOptions): Promise<void>;
     killSession(sessionId: string): Promise<void>;
     countRunningSessions(): number;

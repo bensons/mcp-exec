@@ -14,6 +14,7 @@ const net = require('net');
 const path = require('path');
 const WebSocket = require('ws');
 const { TerminalViewerService } = require('../dist/terminal/viewer-service');
+const { createTerminalBuffer } = require('../dist/terminal/buffer');
 
 const TOKEN = 'test-token-issue-29';
 
@@ -56,7 +57,7 @@ function makeSession(sessionId) {
     startTime: new Date(),
     lastActivity: new Date(),
     status: 'running',
-    buffer: { lines: [], cursor: { x: 0, y: 0 }, scrollback: 0, maxLines: 100 },
+    buffer: createTerminalBuffer(100),
     viewers: new Set(),
   };
 }

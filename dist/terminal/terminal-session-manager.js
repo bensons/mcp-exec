@@ -40,6 +40,7 @@ exports.TerminalSessionManager = void 0;
 const path = __importStar(require("path"));
 const pty = __importStar(require("node-pty"));
 const uuid_1 = require("uuid");
+const buffer_1 = require("./buffer");
 const interactive_session_manager_1 = require("../core/interactive-session-manager");
 const command_policy_1 = require("../security/command-policy");
 class TerminalSessionManager {
@@ -116,12 +117,7 @@ class TerminalSessionManager {
             lastActivity: startTime,
             status: 'running',
             pty: ptyProcess,
-            buffer: {
-                lines: [],
-                cursor: { x: 0, y: 0 },
-                scrollback: 0,
-                maxLines: this.terminalViewerConfig.bufferSize
-            },
+            buffer: (0, buffer_1.createTerminalBuffer)(this.terminalViewerConfig.bufferSize),
             viewers: new Set(),
             aiContext: options.aiContext,
         };
@@ -192,7 +188,7 @@ class TerminalSessionManager {
             return;
         // Handle data output
         session.pty.onData((data) => {
-            this.addToBuffer(session, data, 'output');
+            (0, buffer_1.appendToBuffer)(session.buffer, data);
             session.lastActivity = new Date();
         });
         // Handle process exit - PTY onExit receives (exitCode, signal) as separate parameters
@@ -230,33 +226,8 @@ class TerminalSessionManager {
             session.lastActivity = new Date();
             console.error(`[DEBUG] Session ${session.sessionId} status updated to: ${newStatus}`);
             // Add a final message to the buffer indicating the session has ended
-            this.addToBuffer(session, `\n[Session ended with exit code ${numericExitCode}${signal ? `, signal ${JSON.stringify(signal)}` : ''}]`, 'output');
+            (0, buffer_1.appendToBuffer)(session.buffer, `\r\n[Session ended with exit code ${numericExitCode}${signal ? `, signal ${JSON.stringify(signal)}` : ''}]\r\n`);
         });
-    }
-    addToBuffer(session, data, type) {
-        // Split data into lines, preserving ANSI sequences
-        const lines = data.split(/\r?\n/);
-        lines.forEach((line, index) => {
-            // Don't add empty lines except for the last one if it represents a newline
-            if (line.length > 0 || (index === lines.length - 1 && data.endsWith('\n'))) {
-                session.buffer.lines.push({
-                    text: line,
-                    timestamp: new Date(),
-                    type,
-                    ansiCodes: this.extractAnsiCodes(line)
-                });
-            }
-        });
-        // Limit buffer size
-        if (session.buffer.lines.length > session.buffer.maxLines) {
-            const excess = session.buffer.lines.length - session.buffer.maxLines;
-            session.buffer.lines = session.buffer.lines.slice(excess);
-            session.buffer.scrollback += excess;
-        }
-    }
-    extractAnsiCodes(text) {
-        const ansiRegex = /\x1b\[[0-9;]*m/g;
-        return text.match(ansiRegex) || [];
     }
     async sendInput(options) {
         console.error(`[DEBUG] TerminalSessionManager.sendInput called for session ${options.sessionId}`);
@@ -331,14 +302,15 @@ class TerminalSessionManager {
         if (!session) {
             return null;
         }
+        const lines = (0, buffer_1.bufferLines)(session.buffer);
         return {
             sessionId: session.sessionId,
             command: session.command,
             status: session.status,
             startTime: session.startTime,
             lastActivity: session.lastActivity,
-            bufferLines: session.buffer.lines.length,
-            recentOutput: session.buffer.lines.slice(-5).map(line => line.text).join('\n')
+            bufferLines: lines.length,
+            recentOutput: lines.slice(-5).join('\n')
         };
     }
     listSessions() {

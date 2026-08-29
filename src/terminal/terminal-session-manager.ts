@@ -7,6 +7,7 @@ import * as path from 'path';
 import * as pty from 'node-pty';
 import { v4 as uuidv4 } from 'uuid';
 import { TerminalSession, TerminalBuffer } from './types';
+import { createTerminalBuffer, appendToBuffer, bufferLines } from './buffer';
 import { InteractiveSessionManager, StartSessionOptions, SendInputOptions, FINISHED_SESSION_GRACE_MS } from '../core/interactive-session-manager';
 import { ServerConfig } from '../types/index';
 import { CommandGuard, buildFullCommand } from '../security/command-policy';
@@ -112,12 +113,7 @@ export class TerminalSessionManager {
       lastActivity: startTime,
       status: 'running',
       pty: ptyProcess,
-      buffer: {
-        lines: [],
-        cursor: { x: 0, y: 0 },
-        scrollback: 0,
-        maxLines: this.terminalViewerConfig.bufferSize
-      },
+      buffer: createTerminalBuffer(this.terminalViewerConfig.bufferSize),
       viewers: new Set(),
       aiContext: options.aiContext,
     };
@@ -196,7 +192,7 @@ export class TerminalSessionManager {
 
     // Handle data output
     session.pty.onData((data: string) => {
-      this.addToBuffer(session, data, 'output');
+      appendToBuffer(session.buffer, data);
       session.lastActivity = new Date();
     });
 
@@ -238,37 +234,8 @@ export class TerminalSessionManager {
       console.error(`[DEBUG] Session ${session.sessionId} status updated to: ${newStatus}`);
 
       // Add a final message to the buffer indicating the session has ended
-      this.addToBuffer(session, `\n[Session ended with exit code ${numericExitCode}${signal ? `, signal ${JSON.stringify(signal)}` : ''}]`, 'output');
+      appendToBuffer(session.buffer, `\r\n[Session ended with exit code ${numericExitCode}${signal ? `, signal ${JSON.stringify(signal)}` : ''}]\r\n`);
     });
-  }
-
-  private addToBuffer(session: TerminalSession, data: string, type: 'input' | 'output' | 'error'): void {
-    // Split data into lines, preserving ANSI sequences
-    const lines = data.split(/\r?\n/);
-    
-    lines.forEach((line, index) => {
-      // Don't add empty lines except for the last one if it represents a newline
-      if (line.length > 0 || (index === lines.length - 1 && data.endsWith('\n'))) {
-        session.buffer.lines.push({
-          text: line,
-          timestamp: new Date(),
-          type,
-          ansiCodes: this.extractAnsiCodes(line)
-        });
-      }
-    });
-
-    // Limit buffer size
-    if (session.buffer.lines.length > session.buffer.maxLines) {
-      const excess = session.buffer.lines.length - session.buffer.maxLines;
-      session.buffer.lines = session.buffer.lines.slice(excess);
-      session.buffer.scrollback += excess;
-    }
-  }
-
-  private extractAnsiCodes(text: string): string[] {
-    const ansiRegex = /\x1b\[[0-9;]*m/g;
-    return text.match(ansiRegex) || [];
   }
 
   async sendInput(options: SendInputOptions): Promise<void> {
@@ -360,14 +327,16 @@ export class TerminalSessionManager {
       return null;
     }
 
+    const lines = bufferLines(session.buffer);
+
     return {
       sessionId: session.sessionId,
       command: session.command,
       status: session.status,
       startTime: session.startTime,
       lastActivity: session.lastActivity,
-      bufferLines: session.buffer.lines.length,
-      recentOutput: session.buffer.lines.slice(-5).map(line => line.text).join('\n')
+      bufferLines: lines.length,
+      recentOutput: lines.slice(-5).join('\n')
     };
   }
 
