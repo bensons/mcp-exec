@@ -2540,6 +2540,12 @@ class MCPShellServer {
 
             // Update configuration
             if (currentSection && typeof currentSection === 'object') {
+              if (section === 'terminalViewer') {
+                TerminalViewerService.assertSafeConfiguration({
+                  ...this.config.terminalViewer,
+                  ...settings,
+                });
+              }
               Object.assign(currentSection, settings);
             }
 
@@ -2584,7 +2590,11 @@ class MCPShellServer {
               const previousValues = JSON.parse(JSON.stringify(this.config[resetSection as keyof ServerConfig]));
               
               // Reset to original values
-              this.config[resetSection as keyof ServerConfig] = JSON.parse(JSON.stringify(this.originalConfig[resetSection as keyof ServerConfig]));
+              const resetValue = JSON.parse(JSON.stringify(this.originalConfig[resetSection as keyof ServerConfig]));
+              if (resetSection === 'terminalViewer') {
+                TerminalViewerService.assertSafeConfiguration(resetValue);
+              }
+              this.config[resetSection as keyof ServerConfig] = resetValue;
               
               // Record the reset as a configuration change
               const resetSectionConfig = this.config[resetSection as keyof ServerConfig];
@@ -2944,28 +2954,10 @@ class MCPShellServer {
             // Record previous values
             const previousValues = JSON.parse(JSON.stringify(this.config.terminalViewer));
 
-            // Update terminal viewer settings
-            if (parsed.port !== undefined) {
-              this.config.terminalViewer.port = parsed.port;
-            }
-            if (parsed.host !== undefined) {
-              this.config.terminalViewer.host = parsed.host;
-            }
-            if (parsed.enableAuth !== undefined) {
-              this.config.terminalViewer.enableAuth = parsed.enableAuth;
-            }
-            if (parsed.authToken !== undefined) {
-              this.config.terminalViewer.authToken = parsed.authToken;
-            }
-            if (parsed.maxSessions !== undefined) {
-              this.config.terminalViewer.maxSessions = parsed.maxSessions;
-            }
-            if (parsed.sessionTimeout !== undefined) {
-              this.config.terminalViewer.sessionTimeout = parsed.sessionTimeout;
-            }
-            if (parsed.bufferSize !== undefined) {
-              this.config.terminalViewer.bufferSize = parsed.bufferSize;
-            }
+            // Validate the complete candidate before mutating live configuration.
+            const updatedConfig = { ...this.config.terminalViewer, ...parsed };
+            TerminalViewerService.assertSafeConfiguration(updatedConfig);
+            Object.assign(this.config.terminalViewer, parsed);
 
             // Record configuration change
             this.recordConfigurationChange('terminalViewer', this.config.terminalViewer, previousValues);
@@ -2977,12 +2969,8 @@ class MCPShellServer {
               (command) => this.assertCommandAllowed(command, 'terminal-session')
             );
 
-            // Restart terminal viewer service if enabled
-            if (this.config.terminalViewer.enabled && this.terminalViewerService) {
-              await this.terminalViewerService.stop();
-              this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
-              await this.terminalViewerService.start();
-            }
+            // Apply authentication and bind changes to a running viewer immediately.
+            await this.restartTerminalViewerService();
 
             return {
               content: [
@@ -3121,8 +3109,9 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('context', this.config.context, previousValues);
 
-            // Recreate context manager
-            this.contextManager = new ContextManager(this.config.context, this.auditLogger);
+            // Update the live manager so queued writes are cancelled safely and
+            // the executor cannot retain an orphaned context-manager reference.
+            await this.contextManager.updateConfig(this.config.context);
 
             return {
               content: [
@@ -3221,6 +3210,12 @@ class MCPShellServer {
             // Rollback to previous values
             const configSection = this.config[changeEntry.section as keyof ServerConfig];
             if (configSection && typeof configSection === 'object') {
+              if (changeEntry.section === 'terminalViewer') {
+                TerminalViewerService.assertSafeConfiguration({
+                  ...this.config.terminalViewer,
+                  ...changeEntry.previousValues,
+                });
+              }
               Object.assign(configSection, changeEntry.previousValues);
             }
 
@@ -3661,9 +3656,9 @@ Please start by enabling the terminal viewer service.`,
         },
       });
 
-      // Save session state
+      // Save session state (flushes any debounced write)
       if (this.config.context.sessionPersistence) {
-        await (this.contextManager as any).persistSession();
+        await this.contextManager.flushSession();
         console.error('💾 Session state saved');
       }
 
@@ -3801,7 +3796,7 @@ Please start by enabling the terminal viewer service.`,
       this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
     }
     if (!section || section === 'context') {
-      this.contextManager = new ContextManager(this.config.context, this.auditLogger);
+      await this.contextManager.updateConfig(this.config.context);
     }
     if (!section || section === 'mcpLogging') {
       this.mcpLogger = new MCPLogger(this.config.mcpLogging || {
@@ -3825,6 +3820,9 @@ Please start by enabling the terminal viewer service.`,
         (command) => this.assertCommandAllowed(command, 'terminal-session')
       );
     }
+    if (!section || section === 'terminalViewer') {
+      await this.restartTerminalViewerService();
+    }
     if (!section || section === 'output') {
       this.shellExecutor = new ShellExecutor(
         this.securityManager,
@@ -3832,6 +3830,23 @@ Please start by enabling the terminal viewer service.`,
         this.auditLogger,
         this.config
       );
+    }
+  }
+
+  private async restartTerminalViewerService(): Promise<void> {
+    const previousService = this.terminalViewerService;
+    const wasRunning = previousService?.isEnabled() || false;
+    const shouldStart = this.config.terminalViewer.enabled || wasRunning;
+
+    if (wasRunning) {
+      await previousService!.stop();
+    }
+    this.terminalViewerService = undefined;
+
+    if (shouldStart) {
+      const replacement = new TerminalViewerService(this.config.terminalViewer);
+      await replacement.start();
+      this.terminalViewerService = replacement;
     }
   }
 
