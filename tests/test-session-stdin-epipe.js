@@ -7,6 +7,7 @@
  */
 
 const assert = require('assert');
+const { once } = require('events');
 const os = require('os');
 const { InteractiveSessionManager } = require('../dist/core/interactive-session-manager');
 
@@ -43,7 +44,8 @@ async function run() {
   try {
     console.log('📝 sendInput on a child that closed its stdin rejects instead of crashing');
     const sessionId = await manager.startSession({
-      command: "sh -c 'exec 0<&-; sleep 5'",
+      // Replace Node's managed shell instead of nesting another shell that retains fd 0.
+      command: "exec sh -c 'exec 0<&-; sleep 5'",
       cwd: os.tmpdir(),
     });
     await sleep(300); // let the shell close its stdin
@@ -100,6 +102,36 @@ async function run() {
     );
     assert.ok(afterExit, 'expected sendInput on an exited session to reject');
     console.log(`✅ rejected with: ${afterExit.message}`);
+
+    console.log('📝 parent exit keeps the session readable until descendant output drains');
+    const drainingId = await manager.startSession({
+      command: "(sleep 0.5; echo late-output) &",
+      cwd: os.tmpdir(),
+    });
+    const drainingSession = manager.getSession(drainingId);
+    assert.ok(drainingSession, 'draining session should exist');
+    const parentExited = once(drainingSession.process, 'exit');
+    const streamsClosed = once(drainingSession.process, 'close');
+
+    await parentExited;
+    const whileDraining = await manager.readOutput(drainingId);
+    assert.strictEqual(
+      whileDraining.status,
+      'running',
+      'session must not report completion while inherited output pipes remain open'
+    );
+    assert.strictEqual(
+      whileDraining.hasMore,
+      true,
+      'clients must keep polling while inherited output pipes remain open'
+    );
+
+    await streamsClosed;
+    const drained = await manager.readOutput(drainingId);
+    assert.strictEqual(drained.status, 'finished');
+    assert.strictEqual(drained.hasMore, false);
+    assert.match(drained.stdout, /late-output/, `unexpected drained output: ${drained.stdout}`);
+    console.log('✅ late descendant output remained observable');
 
     console.log('📝 the manager still works afterwards (no server-wide damage)');
     const liveId = await manager.startSession({ command: 'cat', cwd: os.tmpdir() });

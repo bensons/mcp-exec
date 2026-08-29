@@ -144,7 +144,7 @@ export class InteractiveSessionManager {
         clearTimeout(graceTimer);
         if (error) reject(error); else resolve();
       };
-      // ponytail: bounded wait for the flush. A child that never reads its stdin can leave a
+      // Use a bounded wait for the flush. A child that never reads its stdin can leave a
       // backpressured write pending forever, so we stop waiting after the grace period; a late
       // EPIPE still lands on the stdin 'error' handler and fails the next sendInput.
       const graceTimer = setTimeout(() => settle(), 50);
@@ -253,14 +253,12 @@ export class InteractiveSessionManager {
       session.lastActivity = new Date();
     });
 
-    // Handle process exit ('exit' fires as soon as the process is gone, 'close' once its
-    // stdio is drained - flag both so status is never stale between the two).
-    const markExited = (code: number | null) => {
+    // A child can exit while a descendant still holds its stdout/stderr pipes open. Keep the
+    // session readable until 'close', which fires only after those streams have drained.
+    childProcess.on('close', (code: number | null) => {
       session.status = code === 0 ? 'finished' : 'error';
       session.lastActivity = new Date();
-    };
-    childProcess.on('exit', markExited);
-    childProcess.on('close', markExited);
+    });
 
     // Handle process errors
     childProcess.on('error', (error: Error) => {
