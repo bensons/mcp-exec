@@ -15,6 +15,20 @@ export interface AlertRule {
   cooldownMinutes: number;
 }
 
+/**
+ * Identifying fields of the triggering entry. Alerts deliberately do not hold
+ * the whole LogEntry: they are retained for days and shipped to webhooks.
+ */
+export interface AlertLogEntry {
+  id: string;
+  timestamp: Date;
+  sessionId: string;
+  userId?: string;
+  command: string;
+  exitCode: number;
+  riskLevel: 'low' | 'medium' | 'high';
+}
+
 export interface Alert {
   id: string;
   ruleId: string;
@@ -22,7 +36,7 @@ export interface Alert {
   severity: 'low' | 'medium' | 'high' | 'critical';
   message: string;
   timestamp: Date;
-  logEntry: LogEntry;
+  logEntry: AlertLogEntry;
   acknowledged: boolean;
   acknowledgedBy?: string;
   acknowledgedAt?: Date;
@@ -129,7 +143,15 @@ export class MonitoringSystem {
       severity: rule.severity,
       message: this.generateAlertMessage(rule, logEntry),
       timestamp: new Date(),
-      logEntry,
+      logEntry: {
+        id: logEntry.id,
+        timestamp: logEntry.timestamp,
+        sessionId: logEntry.sessionId,
+        userId: logEntry.userId,
+        command: logEntry.command,
+        exitCode: logEntry.result.exitCode,
+        riskLevel: logEntry.securityCheck.riskLevel,
+      },
       acknowledged: false,
     };
 

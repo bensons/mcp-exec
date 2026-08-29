@@ -208,7 +208,7 @@ function testDynamicConfiguration() {
           arguments: {
             maxInteractiveSessions: 20,
             sessionTimeout: 3600000,
-            outputBufferSize: 2000
+            outputBufferBytes: 2000
           }
         }
       }) + '\n';
@@ -580,4 +580,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { testDynamicConfiguration, testStaleComponentReferences }; 
+module.exports = { testDynamicConfiguration, testStaleComponentReferences };

@@ -23,13 +23,15 @@ import { LogLevel, LegacyLogLevel } from './types/index';
 
 import { ShellExecutor } from './core/executor';
 import { SecurityManager } from './security/manager';
-import { assertCommandAllowed, buildFullCommand } from './security/command-policy';
+import { assertCommandAllowed, buildFullCommand, CommandPolicyOptions, ConfirmationRequiredError } from './security/command-policy';
+import { parseBlockedCommandsEnvironment } from './security/tokenize';
 import { ContextManager } from './context/manager';
-import { AuditLogger } from './audit/logger';
-import { ConfirmationManager } from './security/confirmation';
+import { AuditLogger, parseAuditLimit } from './audit/logger';
+import { ConfirmationManager, PendingCommandRunner } from './security/confirmation';
 import { DisplayFormatter } from './utils/display-formatter';
 import { TerminalViewerService } from './terminal/viewer-service';
 import { TerminalSessionManager } from './terminal/terminal-session-manager';
+import { bufferLines } from './terminal/buffer';
 import { ServerConfig } from './types/index';
 
 // Default configuration
@@ -37,11 +39,15 @@ const DEFAULT_CONFIG: ServerConfig = {
   security: {
     level: (process.env.MCP_EXEC_SECURITY_LEVEL as 'strict' | 'moderate' | 'permissive') || 'permissive',
     confirmDangerous: process.env.MCP_EXEC_CONFIRM_DANGEROUS === 'true',
+    // Empty = no directory restriction. The old default ([process.cwd(), '/tmp'])
+    // silently allowed everything when the server was launched from `/`, and now
+    // that the check actually works it would block ordinary relative paths.
+    // Set MCP_EXEC_ALLOWED_DIRECTORIES to opt in to an allowlist.
     allowedDirectories: process.env.MCP_EXEC_ALLOWED_DIRECTORIES
-      ? process.env.MCP_EXEC_ALLOWED_DIRECTORIES.split(',').map(dir => dir.trim())
-      : [process.cwd(), '/tmp'].filter(dir => dir !== ''),
+      ? process.env.MCP_EXEC_ALLOWED_DIRECTORIES.split(',').map(dir => dir.trim()).filter(dir => dir !== '')
+      : [],
     blockedCommands: process.env.MCP_EXEC_BLOCKED_COMMANDS
-      ? process.env.MCP_EXEC_BLOCKED_COMMANDS.split(',').map(cmd => cmd.trim())
+      ? parseBlockedCommandsEnvironment(process.env.MCP_EXEC_BLOCKED_COMMANDS)
       : [
           'rm -rf /',
           'format',
@@ -72,7 +78,7 @@ const DEFAULT_CONFIG: ServerConfig = {
   sessions: {
     maxInteractiveSessions: parseInt(process.env.MCP_EXEC_MAX_SESSIONS || '10'),
     sessionTimeout: parseInt(process.env.MCP_EXEC_SESSION_TIMEOUT || '1800000'), // 30 minutes
-    outputBufferSize: parseInt(process.env.MCP_EXEC_SESSION_BUFFER_SIZE || '1000'),
+    outputBufferBytes: parseInt(process.env.MCP_EXEC_SESSION_BUFFER_BYTES || '262144'), // 256 KB of raw output per session
   },
   lifecycle: {
     // For MCP servers, inactivity timeout should be disabled by default since clients
@@ -102,6 +108,14 @@ const DEFAULT_CONFIG: ServerConfig = {
     enabled: process.env.MCP_EXEC_AUDIT_ENABLED !== 'false', // Enabled by default
     logLevel: (process.env.MCP_EXEC_AUDIT_LOG_LEVEL as LogLevel | LegacyLogLevel) || 'debug',
     retention: parseInt(process.env.MCP_EXEC_AUDIT_RETENTION || '30'),
+    maxOutputBytes: parseAuditLimit(process.env.MCP_EXEC_AUDIT_MAX_OUTPUT_BYTES, 4096),
+    maxInMemoryEntries: parseAuditLimit(
+      process.env.MCP_EXEC_AUDIT_MAX_IN_MEMORY_ENTRIES,
+      1000
+    ),
+    redactPatterns: process.env.MCP_EXEC_AUDIT_REDACT_PATTERNS
+      ? process.env.MCP_EXEC_AUDIT_REDACT_PATTERNS.split(',').map(p => p.trim()).filter(Boolean)
+      : undefined,
     logDirectory: process.env.MCP_EXEC_LOG_DIR ||
                   (process.env.HOME && path.join(process.env.HOME, '.mcp-exec')) ||
                   (process.env.USERPROFILE && path.join(process.env.USERPROFILE, '.mcp-exec')), // Safer default
@@ -142,7 +156,7 @@ const ExecuteCommandSchema = z.object({
   cwd: z.string().optional().describe('Working directory for command execution'),
   env: z.record(z.string()).optional().describe('Environment variables'),
   timeout: z.number().optional().describe('Timeout in milliseconds'),
-  shell: z.union([z.boolean(), z.string()]).optional().describe('Shell to use for execution'),
+  shell: z.union([z.boolean(), z.string()]).optional().describe('Shell to use for execution: true (default) runs the command through the platform shell, false runs it directly with args passed verbatim (no shell parsing), or the path/name of a specific shell such as "/bin/zsh"'),
   aiContext: z.string().optional().describe('AI context/intent for this command'),
   enableTerminalViewer: z.boolean().optional().describe('Create a terminal session with browser viewer instead of regular execution'),
   terminalSize: z.object({
@@ -156,7 +170,7 @@ const StartInteractiveSessionSchema = z.object({
   args: z.array(z.string()).optional().describe('Command arguments'),
   cwd: z.string().optional().describe('Working directory for the session'),
   env: z.record(z.string()).optional().describe('Environment variables'),
-  shell: z.union([z.boolean(), z.string()]).optional().describe('Shell to use for execution'),
+  shell: z.union([z.boolean(), z.string()]).optional().describe('Shell to use for execution: true (default) runs the command through the platform shell, false runs it directly with args passed verbatim (no shell parsing), or the path/name of a specific shell such as "/bin/zsh"'),
   aiContext: z.string().optional().describe('AI context/intent for this session'),
 });
 
@@ -327,7 +341,7 @@ const UpdateAuditLoggingSchema = z.object({
 const UpdateSessionLimitsSchema = z.object({
   maxInteractiveSessions: z.number().optional().describe('Maximum concurrent interactive sessions'),
   sessionTimeout: z.number().optional().describe('Session timeout in milliseconds'),
-  outputBufferSize: z.number().optional().describe('Output buffer size per session'),
+  outputBufferBytes: z.number().optional().describe('Output buffer size per session, in bytes'),
 });
 
 const UpdateTerminalViewerSchema = z.object({
@@ -393,6 +407,8 @@ class MCPShellServer {
   private config: ServerConfig;
   private isShuttingDown: boolean = false;
   private transport?: any;
+  /** True only between `server.connect()` resolving and shutdown starting. */
+  private connected: boolean = false;
   private shutdownTimeout?: NodeJS.Timeout;
   private heartbeatInterval?: NodeJS.Timeout;
   private lastActivity: number = Date.now();
@@ -463,11 +479,7 @@ class MCPShellServer {
     });
 
     // Initialize terminal components
-    this.terminalSessionManager = new TerminalSessionManager(
-      this.config.sessions,
-      this.config.terminalViewer,
-      (command) => this.assertCommandAllowed(command, 'terminal-session')
-    );
+    this.terminalSessionManager = this.createTerminalSessionManager();
 
     // Auto-start terminal viewer service if enabled in config
     if (this.config.terminalViewer.enabled) {
@@ -491,21 +503,9 @@ class MCPShellServer {
       this.config
     );
 
-    // Set up MCP logger notification callback
-    this.mcpLogger.setNotificationCallback((message) => {
-      try {
-        // Only send notifications if server is connected
-        if (this.transport) {
-          this.server.notification({
-            method: 'notifications/message',
-            params: message as any
-          });
-        }
-      } catch (error) {
-        // Silently ignore notification errors to avoid infinite loops
-        console.error('Failed to send MCP log notification:', error instanceof Error ? error.message : 'Unknown error');
-      }
-    });
+    // NOTE: the MCP logger notification callback is installed in start(), once
+    // the transport is actually connected. Until then MCPLogger queues messages
+    // and start() flushes them with processQueuedMessages().
 
     this.setupHandlers();
   }
@@ -518,15 +518,97 @@ class MCPShellServer {
     }
   }
 
+  /**
+   * Effective working directory a command will run in: explicit cwd, else the
+   * session context directory, else the server's cwd. Relative and `~` paths in
+   * the command are validated against this, not against process.cwd().
+   */
+  private async getEffectiveCwd(cwd?: string): Promise<string> {
+    if (cwd) {
+      return path.resolve(cwd);
+    }
+    const context = await this.contextManager.getCurrentContext();
+    return path.resolve(context.currentDirectory || process.cwd());
+  }
+
   private async assertCommandAllowed(
     command: string,
     source: string,
-    extraContext: Record<string, unknown> = {}
-  ): Promise<void> {
-    await assertCommandAllowed(this.securityManager, command, this.auditLogger, {
-      source,
-      ...extraContext,
+    extraContext: Record<string, unknown> = {},
+    options: CommandPolicyOptions = {}
+  ): Promise<string | undefined> {
+    return await assertCommandAllowed(
+      this.securityManager,
+      command,
+      this.auditLogger,
+      { source, ...extraContext },
+      {
+        ...options,
+        cwd: await this.getEffectiveCwd(options.cwd),
+      }
+    );
+  }
+
+  /**
+   * Runs the command policy for an entry point. Returns undefined when the
+   * caller may proceed, or the text to return when the command is parked
+   * pending confirm_command. Hard blocks still throw.
+   */
+  private async gateCommand(
+    command: string,
+    source: string,
+    run: PendingCommandRunner,
+    extraContext: Record<string, unknown> = {},
+    options: CommandPolicyOptions = {}
+  ): Promise<string | undefined> {
+    try {
+      await this.assertCommandAllowed(command, source, extraContext, options);
+      return undefined;
+    } catch (error) {
+      if (!(error instanceof ConfirmationRequiredError)) {
+        throw error;
+      }
+
+      const confirmationId = this.confirmationManager.createConfirmation(
+        error.command,
+        error.validation,
+        run,
+        source
+      );
+      const expiresInMinutes = Math.round(this.confirmationManager.getConfirmationTimeout() / 60000);
+
+      await this.auditLogger.notice('Command parked pending confirmation', {
+        confirmationId,
+        fullCommand: error.command,
+        riskLevel: error.validation.riskLevel,
+        source,
+        ...extraContext,
+      }, 'security-validator');
+
+      return `⚠️ **Command requires confirmation**\n\n` +
+        `**Command:** \`${error.command}\`\n` +
+        `**Risk level:** ${error.validation.riskLevel}\n` +
+        `**Reason:** ${error.validation.reason}\n` +
+        `**Confirmation ID:** \`${confirmationId}\`\n\n` +
+        `Call \`confirm_command\` with confirmationId \`${confirmationId}\` to execute it (expires in ${expiresInMinutes} min). ` +
+        `Use \`get_pending_confirmations\` to list pending commands.`;
+    }
+  }
+
+  /**
+   * Create a TerminalSessionManager wired so that any session removal (kill, terminate,
+   * or the inactivity/finished sweep) also drops the session from the terminal viewer service.
+   */
+  private createTerminalSessionManager(): TerminalSessionManager {
+    const manager = new TerminalSessionManager(
+      this.config.sessions,
+      this.config.terminalViewer,
+      (command, options) => this.assertCommandAllowed(command, 'terminal-session', {}, options)
+    );
+    manager.onSessionRemoved((sessionId) => {
+      this.terminalViewerService?.removeSession(sessionId);
     });
+    return manager;
   }
 
   private setupHandlers(): void {
@@ -545,7 +627,7 @@ class MCPShellServer {
                 cwd: { type: 'string', description: 'Working directory for command execution' },
                 env: { type: 'object', description: 'Environment variables' },
                 timeout: { type: 'number', description: 'Timeout in milliseconds' },
-                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution' },
+                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution: true (default) runs the command through the platform shell, false runs it directly with args passed verbatim (no shell parsing), or the path/name of a specific shell such as "/bin/zsh"' },
                 aiContext: { type: 'string', description: 'AI context/intent for this command' },
                 enableTerminalViewer: { type: 'boolean', description: 'Create a terminal session with browser viewer instead of regular execution' },
                 terminalSize: {
@@ -577,7 +659,7 @@ class MCPShellServer {
                 args: { type: 'array', items: { type: 'string' }, description: 'Command arguments' },
                 cwd: { type: 'string', description: 'Working directory for the session' },
                 env: { type: 'object', description: 'Environment variables' },
-                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution' },
+                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution: true (default) runs the command through the platform shell, false runs it directly with args passed verbatim (no shell parsing), or the path/name of a specific shell such as "/bin/zsh"' },
                 aiContext: { type: 'string', description: 'AI context/intent for this session' },
               },
             },
@@ -1211,7 +1293,7 @@ class MCPShellServer {
               properties: {
                 maxInteractiveSessions: { type: 'number', description: 'Maximum concurrent interactive sessions' },
                 sessionTimeout: { type: 'number', description: 'Session timeout in milliseconds' },
-                outputBufferSize: { type: 'number', description: 'Output buffer size per session' },
+                outputBufferBytes: { type: 'number', description: 'Output buffer size per session, in bytes' },
               },
             },
             annotations: {
@@ -1407,44 +1489,63 @@ class MCPShellServer {
 
               try {
                 const fullCommand = buildFullCommand(parsed.command, parsed.args);
-                await this.assertCommandAllowed(fullCommand, 'execute_command', {
+                const context = await this.contextManager.getCurrentContext();
+                const workingDirectory = await this.getEffectiveCwd(parsed.cwd);
+                const environment: Record<string, string> = {
+                  ...Object.fromEntries(
+                    Object.entries(process.env).filter(([_, value]) => value !== undefined)
+                  ) as Record<string, string>,
+                  ...context.environmentVariables,
+                  ...parsed.env,
+                };
+
+                const runTerminalSession = async (): Promise<string> => {
+                  // Ensure terminal viewer service is available
+                  if (!this.terminalViewerService) {
+                    this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
+                  }
+
+                  if (!this.terminalViewerService.isEnabled()) {
+                    await this.terminalViewerService.start();
+                    this.registerTerminalSessionsWithViewer();
+                  }
+
+                  // Create terminal session using enhanced session manager
+                  const sessionId = await this.terminalSessionManager!.startSession({
+                    command: parsed.command,
+                    args: parsed.args,
+                    cwd: workingDirectory,
+                    env: environment,
+                    shell: parsed.shell,
+                    enableTerminalViewer: true,
+                    terminalSize: parsed.terminalSize || { cols: 80, rows: 24 },
+                    aiContext: parsed.aiContext,
+                    skipConfirmation: true,
+                  });
+
+                  // Add session to terminal viewer service
+                  const terminalSession = this.terminalSessionManager!.getSession(sessionId);
+                  if (terminalSession && this.terminalViewerService) {
+                    this.terminalViewerService.addSession(terminalSession);
+                  }
+
+                  // Get viewer URL
+                  const viewerUrl = this.terminalViewerService?.getSessionUrl(sessionId) || 'Service not available';
+                  const behavior = parsed.shell === false
+                    ? `• **Direct Process**: The command is running without shell parsing, so arguments are passed verbatim\n• **Session Lifetime**: The terminal session ends when the command exits`
+                    : `• **Persistent Environment**: This terminal session will continue running even after individual commands exit\n• **Shell Persistence**: When you send \`exit\` to a command like \`bash\`, it exits that command but returns to the parent shell`;
+
+                  return `🖥️ **Terminal Session Started**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Terminal (PTY-based)\n**Viewer URL:** ${viewerUrl}\n\n**Important - Terminal Session Behavior:**\n${behavior}\n• **Session Termination**: Use \`kill_session\` to terminate the entire terminal session\n• **Live Viewing**: Monitor the session in real-time via the browser viewer\n\n**Usage:**\n• Use \`send_to_session\` to send commands\n• Use \`read_session_output\` to read terminal output\n• Use \`kill_session\` to terminate when done`;
+                };
+
+                const pending = await this.gateCommand(fullCommand, 'execute_command', runTerminalSession, {
                   enableTerminalViewer: true,
-                });
-
-                // Ensure terminal viewer service is available
-                if (!this.terminalViewerService) {
-                  this.terminalViewerService = new TerminalViewerService({ ...this.config.terminalViewer });
-                }
-
-                if (!this.terminalViewerService.isEnabled()) {
-                  await this.terminalViewerService.start();
-                }
-
-                // Create terminal session using enhanced session manager
-                const sessionId = await this.terminalSessionManager!.startSession({
-                  command: parsed.command,
-                  args: parsed.args,
-                  cwd: parsed.cwd,
-                  env: parsed.env,
-                  enableTerminalViewer: true,
-                  terminalSize: parsed.terminalSize || { cols: 80, rows: 24 },
-                  aiContext: parsed.aiContext,
-                });
-
-                // Add session to terminal viewer service
-                const terminalSession = this.terminalSessionManager!.getSession(sessionId);
-                if (terminalSession && this.terminalViewerService) {
-                  this.terminalViewerService.addSession(terminalSession);
-                }
-
-                // Get viewer URL
-                const viewerUrl = this.terminalViewerService?.getSessionUrl(sessionId) || 'Service not available';
-
+                }, { cwd: workingDirectory, env: environment });
                 return {
                   content: [
                     {
                       type: 'text',
-                      text: `🖥️ **Terminal Session Started**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Terminal (PTY-based)\n**Viewer URL:** ${viewerUrl}\n\n**Important - Terminal Session Behavior:**\n• **Persistent Environment**: This terminal session will continue running even after individual commands exit\n• **Shell Persistence**: When you send \`exit\` to a command like \`bash\`, it exits that command but returns to the parent shell\n• **Session Termination**: Use \`kill_session\` to terminate the entire terminal session\n• **Live Viewing**: Monitor the session in real-time via the browser viewer\n\n**Usage:**\n• Use \`send_to_session\` to send commands\n• Use \`read_session_output\` to read terminal output\n• Use \`kill_session\` to terminate when done`,
+                      text: pending ?? await runTerminalSession(),
                     },
                   ],
                 };
@@ -1460,29 +1561,45 @@ class MCPShellServer {
               }
             }
 
-            // Execute the command
-            const result = await this.shellExecutor.executeCommand(parsed);
-
             // Build the full command string for display
-            const fullCommand = parsed.args && parsed.args.length > 0
-              ? `${parsed.command} ${parsed.args.join(' ')}`
-              : parsed.command;
+            const fullCommand = buildFullCommand(parsed.command, parsed.args);
+            const context = await this.contextManager.getCurrentContext();
+            const workingDirectory = await this.getEffectiveCwd(parsed.cwd);
+            const environment: Record<string, string> = {
+              ...Object.fromEntries(
+                Object.entries(process.env).filter(([_, value]) => value !== undefined)
+              ) as Record<string, string>,
+              ...context.environmentVariables,
+              ...parsed.env,
+            };
 
-            // Format the output for enhanced display
-            const formattedOutput = this.displayFormatter.formatCommandOutput(
+            const runCommand = async (): Promise<string> => {
+              const result = await this.shellExecutor.executeCommand(parsed, { skipConfirmation: true });
+
+              // Format the output for enhanced display
+              return this.displayFormatter.formatCommandOutput(
+                fullCommand,
+                result,
+                {
+                  showInput: true,
+                  aiContext: parsed.aiContext
+                }
+              );
+            };
+
+            const pending = await this.gateCommand(
               fullCommand,
-              result,
-              {
-                showInput: true,
-                aiContext: parsed.aiContext
-              }
+              'execute_command',
+              runCommand,
+              {},
+              { cwd: workingDirectory, env: environment }
             );
 
             return {
               content: [
                 {
                   type: 'text',
-                  text: formattedOutput,
+                  text: pending ?? await runCommand(),
                 },
               ],
             };
@@ -1503,14 +1620,8 @@ class MCPShellServer {
 
             try {
               const sessionCommand = parsed.command || this.getDefaultShell();
-              await this.assertCommandAllowed(
-                buildFullCommand(sessionCommand, parsed.args),
-                'start_interactive_session'
-              );
-
-              // Use the session manager directly to create an interactive session
               const context = await this.contextManager.getCurrentContext();
-              const workingDirectory = parsed.cwd || context.currentDirectory || process.cwd();
+              const workingDirectory = await this.getEffectiveCwd(parsed.cwd);
               const environment: Record<string, string> = {
                 ...Object.fromEntries(
                   Object.entries(process.env).filter(([_, value]) => value !== undefined)
@@ -1519,22 +1630,34 @@ class MCPShellServer {
                 ...parsed.env,
               };
 
-              const sessionId = await this.shellExecutor.startInteractiveSession({
-                command: parsed.command || this.getDefaultShell(),
-                args: parsed.args,
-                cwd: workingDirectory,
-                env: environment,
-                shell: parsed.shell,
-                aiContext: parsed.aiContext,
-              });
+              const runSession = async (): Promise<string> => {
+                // Use the session manager directly to create an interactive session
+                const sessionId = await this.shellExecutor.startInteractiveSession({
+                  command: sessionCommand,
+                  args: parsed.args,
+                  cwd: workingDirectory,
+                  env: environment,
+                  shell: parsed.shell,
+                  aiContext: parsed.aiContext,
+                  skipConfirmation: true,
+                });
 
-              const fullCommand = parsed.command || this.getDefaultShell();
+                return `🔧 **Interactive Session Started**\n\n**Command:** \`${sessionCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Interactive (process-based)\n\n**Usage:**\n• Use \`send_to_session\` to send commands\n• Session will terminate when the process exits\n• Use \`list_sessions\` to view session status`;
+              };
+
+              const pending = await this.gateCommand(
+                buildFullCommand(sessionCommand, parsed.args),
+                'start_interactive_session',
+                runSession,
+                {},
+                { cwd: workingDirectory, env: environment }
+              );
 
               return {
                 content: [
                   {
                     type: 'text',
-                    text: `🔧 **Interactive Session Started**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Interactive (process-based)\n\n**Usage:**\n• Use \`send_to_session\` to send commands\n• Session will terminate when the process exits\n• Use \`list_sessions\` to view session status`,
+                    text: pending ?? await runSession(),
                   },
                 ],
               };
@@ -1565,49 +1688,68 @@ class MCPShellServer {
             });
 
             try {
-              if (parsed.command) {
-                await this.assertCommandAllowed(
-                  buildFullCommand(parsed.command, parsed.args),
-                  'start_terminal_session'
-                );
-              }
+              const context = await this.contextManager.getCurrentContext();
+              const workingDirectory = await this.getEffectiveCwd(parsed.cwd);
+              const environment: Record<string, string> = {
+                ...Object.fromEntries(
+                  Object.entries(process.env).filter(([_, value]) => value !== undefined)
+                ) as Record<string, string>,
+                ...context.environmentVariables,
+                ...parsed.env,
+              };
 
-              // Ensure terminal viewer service is available
-              if (!this.terminalViewerService) {
-                this.terminalViewerService = new TerminalViewerService({ ...this.config.terminalViewer });
-              }
+              const runTerminalSession = async (): Promise<string> => {
+                // Ensure terminal viewer service is available
+                if (!this.terminalViewerService) {
+                  this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
+                }
 
-              if (!this.terminalViewerService.isEnabled()) {
-                await this.terminalViewerService.start();
-              }
+                if (!this.terminalViewerService.isEnabled()) {
+                  await this.terminalViewerService.start();
+                  this.registerTerminalSessionsWithViewer();
+                }
 
-              // Create terminal session using enhanced session manager
-              const sessionId = await this.terminalSessionManager!.startSession({
-                command: parsed.command, // Don't default to shell - let PTY spawn the shell directly
-                args: parsed.args,
-                cwd: parsed.cwd,
-                env: parsed.env,
-                enableTerminalViewer: true,
-                terminalSize: parsed.terminalSize || { cols: 80, rows: 24 },
-                aiContext: parsed.aiContext,
-              });
+                // Create terminal session using enhanced session manager
+                const sessionId = await this.terminalSessionManager!.startSession({
+                  command: parsed.command, // Don't default to shell - let PTY spawn the shell directly
+                  args: parsed.args,
+                  cwd: workingDirectory,
+                  env: environment,
+                  enableTerminalViewer: true,
+                  terminalSize: parsed.terminalSize || { cols: 80, rows: 24 },
+                  aiContext: parsed.aiContext,
+                  skipConfirmation: true,
+                });
 
-              // Add session to terminal viewer service
-              const terminalSession = this.terminalSessionManager!.getSession(sessionId);
-              if (terminalSession && this.terminalViewerService) {
-                this.terminalViewerService.addSession(terminalSession);
-              }
+                // Add session to terminal viewer service
+                const terminalSession = this.terminalSessionManager!.getSession(sessionId);
+                if (terminalSession && this.terminalViewerService) {
+                  this.terminalViewerService.addSession(terminalSession);
+                }
 
-              // Get viewer URL
-              const viewerUrl = this.terminalViewerService?.getSessionUrl(sessionId) || 'Service not available';
+                // Get viewer URL
+                const viewerUrl = this.terminalViewerService?.getSessionUrl(sessionId) || 'Service not available';
 
-              const fullCommand = parsed.command || 'system shell';
+                const fullCommand = parsed.command || 'system shell';
+
+                return `🖥️ **Terminal Session Started**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Terminal (PTY-based)\n**Viewer URL:** ${viewerUrl}\n\n**Important - Terminal Session Behavior:**\n• **Persistent Environment**: This terminal session will continue running even after individual commands exit\n• **Shell Persistence**: When you send \`exit\` to a command like \`bash\`, it exits that command but returns to the parent shell\n• **Session Termination**: Use \`kill_session\` to terminate the entire terminal session\n• **Live Viewing**: Monitor the session in real-time via the browser viewer\n\n**Usage:**\n• Use \`send_to_session\` to send commands\n• Use \`read_session_output\` to read terminal output\n• Use \`kill_session\` to terminate when done`;
+              };
+
+              const pending = parsed.command
+                ? await this.gateCommand(
+                    buildFullCommand(parsed.command, parsed.args),
+                    'start_terminal_session',
+                    runTerminalSession,
+                    {},
+                    { cwd: workingDirectory, env: environment }
+                  )
+                : undefined;
 
               return {
                 content: [
                   {
                     type: 'text',
-                    text: `🖥️ **Terminal Session Started**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Terminal (PTY-based)\n**Viewer URL:** ${viewerUrl}\n\n**Important - Terminal Session Behavior:**\n• **Persistent Environment**: This terminal session will continue running even after individual commands exit\n• **Shell Persistence**: When you send \`exit\` to a command like \`bash\`, it exits that command but returns to the parent shell\n• **Session Termination**: Use \`kill_session\` to terminate the entire terminal session\n• **Live Viewing**: Monitor the session in real-time via the browser viewer\n\n**Usage:**\n• Use \`send_to_session\` to send commands\n• Use \`read_session_output\` to read terminal output\n• Use \`kill_session\` to terminate when done`,
+                    text: pending ?? await runTerminalSession(),
                   },
                 ],
               };
@@ -1637,48 +1779,58 @@ class MCPShellServer {
             });
 
             try {
-              await this.assertCommandAllowed(parsed.input, 'send_to_session', {
-                sessionId: parsed.sessionId,
-              });
-
-              // Try terminal session manager first
               const terminalSession = this.terminalSessionManager?.getSession(parsed.sessionId);
-              if (terminalSession) {
-                // If terminal viewer service is available and has this session, use it for input
-                // This ensures proper WebSocket broadcasting
-                if (this.terminalViewerService && this.terminalViewerService.hasSession(parsed.sessionId)) {
-                  this.terminalViewerService.sendInput(parsed.sessionId, parsed.input, parsed.addNewline);
-                } else {
-                  // Fallback to direct terminal session manager
+              const interactiveSession = terminalSession
+                ? undefined
+                : this.shellExecutor.getSession(parsed.sessionId);
+              const sessionPolicyOptions: CommandPolicyOptions = terminalSession
+                ? { cwd: terminalSession.cwd, env: terminalSession.env }
+                : interactiveSession
+                  ? { cwd: interactiveSession.cwd, env: interactiveSession.env }
+                  : {};
+
+              const runSendInput = async (): Promise<string> => {
+                // Try terminal session manager first
+                if (terminalSession) {
+                  // Re-check current hard policy at confirmation time, then let
+                  // the manager own the write and live cwd tracking.
+                  await this.assertCommandAllowed(parsed.input, 'send_to_session', {
+                    sessionId: parsed.sessionId,
+                  }, {
+                    skipConfirmation: true,
+                    cwd: terminalSession.cwd,
+                    env: terminalSession.env,
+                  });
                   await this.terminalSessionManager!.sendInput({
                     sessionId: parsed.sessionId,
                     input: parsed.input,
                     addNewline: parsed.addNewline,
+                    skipConfirmation: true,
                   });
+
+                  return `✅ **Input sent to terminal session**\n\n**Session ID:** \`${parsed.sessionId}\`\n**Input:** \`${parsed.input}\`\n\nCheck the terminal viewer or use \`read_session_output\` to see the response.`;
                 }
 
-                return {
-                  content: [
-                    {
-                      type: 'text',
-                      text: `✅ **Input sent to terminal session**\n\n**Session ID:** \`${parsed.sessionId}\`\n**Input:** \`${parsed.input}\`\n\nCheck the terminal viewer or use \`read_session_output\` to see the response.`,
-                    },
-                  ],
-                };
-              }
+                // Fall back to regular session manager
+                await this.shellExecutor.sendInputToSession({
+                  sessionId: parsed.sessionId,
+                  input: parsed.input,
+                  addNewline: parsed.addNewline,
+                  skipConfirmation: true,
+                });
 
-              // Fall back to regular session manager
-              await this.shellExecutor.sendInputToSession({
+                return `✅ **Input sent to interactive session**\n\n**Session ID:** \`${parsed.sessionId}\`\n**Input:** \`${parsed.input}\`\n\nUse \`read_session_output\` to see the response.`;
+              };
+
+              const pending = await this.gateCommand(parsed.input, 'send_to_session', runSendInput, {
                 sessionId: parsed.sessionId,
-                input: parsed.input,
-                addNewline: parsed.addNewline,
-              });
+              }, sessionPolicyOptions);
 
               return {
                 content: [
                   {
                     type: 'text',
-                    text: `✅ **Input sent to interactive session**\n\n**Session ID:** \`${parsed.sessionId}\`\n**Input:** \`${parsed.input}\`\n\nUse \`read_session_output\` to see the response.`,
+                    text: pending ?? await runSendInput(),
                   },
                 ],
               };
@@ -1914,20 +2066,7 @@ class MCPShellServer {
             const parsed = ConfirmCommandSchema.parse(args);
             const confirmed = this.confirmationManager.confirmCommand(parsed.confirmationId);
 
-            if (confirmed) {
-              return {
-                content: [
-                  {
-                    type: 'text',
-                    text: JSON.stringify({
-                      success: true,
-                      message: 'Command confirmed and ready for execution',
-                      confirmationId: parsed.confirmationId
-                    }, null, 2),
-                  },
-                ],
-              };
-            } else {
+            if (!confirmed) {
               return {
                 content: [
                   {
@@ -1937,6 +2076,37 @@ class MCPShellServer {
                       message: 'Confirmation not found or expired',
                       confirmationId: parsed.confirmationId
                     }, null, 2),
+                  },
+                ],
+              };
+            }
+
+            await this.auditLogger.notice('Confirmed command executing', {
+              confirmationId: confirmed.id,
+              fullCommand: confirmed.command,
+              riskLevel: confirmed.riskLevel,
+              source: confirmed.source,
+            }, 'security-validator');
+
+            try {
+              const output = confirmed.run
+                ? await confirmed.run()
+                : 'Command confirmed, but no pending execution was stored for it.';
+
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: `✅ **Confirmed:** \`${confirmed.command}\`\n\n${output}`,
+                  },
+                ],
+              };
+            } catch (error) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: `❌ **Confirmed command failed:** ${error instanceof Error ? error.message : 'Unknown error'}`,
                   },
                 ],
               };
@@ -2301,11 +2471,12 @@ class MCPShellServer {
                     context: {
                       sessionId: parsed.sessionId,
                       status: terminalSession.status,
-                      bufferLines: terminalSession.buffer.lines.length
+                      bufferBytes: terminalSession.buffer.bytes
                     }
                   });
 
                   const buffer = this.terminalSessionManager.getTerminalBuffer(parsed.sessionId);
+                  const lines = buffer ? bufferLines(buffer) : [];
                   const viewerUrl = this.terminalViewerService?.getSessionUrl(parsed.sessionId);
 
                   return {
@@ -2320,8 +2491,8 @@ class MCPShellServer {
                           startTime: terminalSession.startTime,
                           lastActivity: terminalSession.lastActivity,
                           terminalViewerUrl: viewerUrl,
-                          bufferLines: buffer?.lines.length || 0,
-                          recentOutput: buffer?.lines.slice(-10).map(line => line.text).join('\n') || '',
+                          bufferLines: lines.length,
+                          recentOutput: lines.slice(-10).join('\n'),
                           message: 'Terminal session output is streamed live to the browser. Use the terminal viewer URL for real-time output.',
                         }, null, 2),
                       },
@@ -2344,6 +2515,7 @@ class MCPShellServer {
                       stderr: output.stderr,
                       hasMore: output.hasMore,
                       status: output.status,
+                      droppedBytes: output.droppedBytes,
                     }, null, 2),
                   },
                 ],
@@ -2380,6 +2552,7 @@ class MCPShellServer {
 
                 if (!this.terminalViewerService.isEnabled()) {
                   await this.terminalViewerService.start();
+                  this.registerTerminalSessionsWithViewer();
                 }
 
                 const status = this.terminalViewerService.getStatus();
@@ -2541,6 +2714,12 @@ class MCPShellServer {
 
             // Update configuration
             if (currentSection && typeof currentSection === 'object') {
+              if (section === 'terminalViewer') {
+                TerminalViewerService.assertSafeConfiguration({
+                  ...this.config.terminalViewer,
+                  ...settings,
+                });
+              }
               Object.assign(currentSection, settings);
             }
 
@@ -2592,6 +2771,9 @@ class MCPShellServer {
                 }
 
                 const previousValues = JSON.parse(JSON.stringify(currentConfig));
+                if (configSection === 'terminalViewer') {
+                  TerminalViewerService.assertSafeConfiguration(this.originalConfig.terminalViewer);
+                }
                 this.resetSectionInPlace(configSection);
 
                 const resetSectionConfig = this.config[configSection];
@@ -2921,19 +3103,16 @@ class MCPShellServer {
             if (parsed.sessionTimeout !== undefined) {
               this.config.sessions.sessionTimeout = parsed.sessionTimeout;
             }
-            if (parsed.outputBufferSize !== undefined) {
-              this.config.sessions.outputBufferSize = parsed.outputBufferSize;
+            if (parsed.outputBufferBytes !== undefined) {
+              this.config.sessions.outputBufferBytes = parsed.outputBufferBytes;
             }
 
             // Record configuration change
             this.recordConfigurationChange('sessions', this.config.sessions, previousValues);
 
-            // Recreate terminal session manager
-            this.terminalSessionManager = new TerminalSessionManager(
-              this.config.sessions,
-              this.config.terminalViewer,
-              (command) => this.assertCommandAllowed(command, 'terminal-session')
-            );
+            // Apply the new limits to the live managers (recreating them would
+            // orphan every running session).
+            await this.reinitializeComponents('sessions');
 
             return {
               content: [
@@ -2956,40 +3135,18 @@ class MCPShellServer {
             // Record previous values
             const previousValues = JSON.parse(JSON.stringify(this.config.terminalViewer));
 
-            // Update terminal viewer settings
-            if (parsed.port !== undefined) {
-              this.config.terminalViewer.port = parsed.port;
-            }
-            if (parsed.host !== undefined) {
-              this.config.terminalViewer.host = parsed.host;
-            }
-            if (parsed.enableAuth !== undefined) {
-              this.config.terminalViewer.enableAuth = parsed.enableAuth;
-            }
-            if (parsed.authToken !== undefined) {
-              this.config.terminalViewer.authToken = parsed.authToken;
-            }
-            if (parsed.maxSessions !== undefined) {
-              this.config.terminalViewer.maxSessions = parsed.maxSessions;
-            }
-            if (parsed.sessionTimeout !== undefined) {
-              this.config.terminalViewer.sessionTimeout = parsed.sessionTimeout;
-            }
-            if (parsed.bufferSize !== undefined) {
-              this.config.terminalViewer.bufferSize = parsed.bufferSize;
-            }
+            // Validate the complete candidate before mutating live configuration.
+            const updatedConfig = { ...this.config.terminalViewer, ...parsed };
+            TerminalViewerService.assertSafeConfiguration(updatedConfig);
+            Object.assign(this.config.terminalViewer, parsed);
 
             // Record configuration change
             this.recordConfigurationChange('terminalViewer', this.config.terminalViewer, previousValues);
 
-            // Recreate terminal session manager
-            this.terminalSessionManager = new TerminalSessionManager(
-              this.config.sessions,
-              this.config.terminalViewer,
-              (command) => this.assertCommandAllowed(command, 'terminal-session')
-            );
-
-            await this.restartTerminalViewerService(true);
+            // Apply the new settings to the live manager (recreating it would
+            // orphan every running session), then restart the viewer so live
+            // authentication and bind settings take effect.
+            await this.reinitializeComponents('terminalViewer');
 
             return {
               content: [
@@ -3032,13 +3189,9 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('output', this.config.output, previousValues);
 
-            // Recreate shell executor with new config
-            this.shellExecutor = new ShellExecutor(
-              this.securityManager,
-              this.contextManager,
-              this.auditLogger,
-              this.config
-            );
+            // Apply the new output config to the live executor (recreating it
+            // would orphan every running interactive session).
+            await this.reinitializeComponents('output');
 
             return {
               content: [
@@ -3128,8 +3281,9 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('context', this.config.context, previousValues);
 
-            // Apply in place so history and working directory survive the change
-            this.contextManager.updateConfig(this.config.context);
+            // Update the live manager so queued writes are cancelled safely and
+            // the executor cannot retain an orphaned context-manager reference.
+            await this.contextManager.updateConfig(this.config.context);
 
             return {
               content: [
@@ -3232,6 +3386,12 @@ class MCPShellServer {
             // Rollback to previous values
             const configSection = this.config[changeEntry.section as keyof ServerConfig];
             if (configSection && typeof configSection === 'object') {
+              if (changeEntry.section === 'terminalViewer') {
+                TerminalViewerService.assertSafeConfiguration({
+                  ...this.config.terminalViewer,
+                  ...changeEntry.previousValues,
+                });
+              }
               Object.assign(configSection, changeEntry.previousValues);
             }
 
@@ -3449,15 +3609,21 @@ Please start by enabling the terminal viewer service.`,
 
       this.transport = new StdioServerTransport();
 
-      // Set up connection monitoring
-      this.setupConnectionMonitoring();
-      this.mcpLogger.debug('Connection monitoring configured', 'mcp-server');
-
       await this.server.connect(this.transport);
-      this.mcpLogger.info('MCP server transport connected', 'mcp-server');
+      this.connected = true;
+
+      // Only now can notifications be sent: server.notification() rejects with
+      // "Not connected" until connect() resolves.
+      this.installMcpLoggerNotificationCallback();
 
       // Process any queued MCP log messages now that transport is ready
       this.mcpLogger.processQueuedMessages();
+      this.mcpLogger.info('MCP server transport connected', 'mcp-server');
+
+      // Set up connection monitoring (after connect, so the stdin listeners
+      // below never put stdin in flowing mode before the transport attaches)
+      this.setupConnectionMonitoring();
+      this.mcpLogger.debug('Connection monitoring configured', 'mcp-server');
 
       // Log server start with audit log location info
       await this.auditLogger.log({
@@ -3484,6 +3650,29 @@ Please start by enabling the terminal viewer service.`,
       });
       throw error;
     }
+  }
+
+  private installMcpLoggerNotificationCallback(): void {
+    this.mcpLogger.setNotificationCallback((message) => {
+      if (!this.connected) {
+        return;
+      }
+
+      try {
+        Promise.resolve(
+          this.server.notification({
+            method: 'notifications/message',
+            params: message as any,
+          })
+        ).catch((error) => {
+          // Never let this reject unhandled - it would trip the global handler.
+          console.error('Failed to send MCP log notification:', error instanceof Error ? error.message : 'Unknown error');
+        });
+      } catch (error) {
+        // Defend against transports that throw synchronously as well as reject.
+        console.error('Failed to send MCP log notification:', error instanceof Error ? error.message : 'Unknown error');
+      }
+    });
   }
 
   private setupConnectionMonitoring(): void {
@@ -3625,11 +3814,9 @@ Please start by enabling the terminal viewer service.`,
         console.error('📝 Audit logs flushed');
       }
 
-      // Clear any pending confirmations
-      if (this.confirmationManager && typeof (this.confirmationManager as any).cleanup === 'function') {
-        (this.confirmationManager as any).cleanup();
-        console.error('✅ Confirmations cleared');
-      }
+      // Clear any pending confirmations (and stop their cleanup timer)
+      this.confirmationManager?.cleanup();
+      console.error('✅ Confirmations cleared');
 
       // Remove stdin/stdout listeners to prevent memory leaks
       process.stdin.removeAllListeners('end');
@@ -3649,6 +3836,7 @@ Please start by enabling the terminal viewer service.`,
     }
 
     this.isShuttingDown = true;
+    this.connected = false; // stop emitting notifications on a closing transport
     console.error(`🔄 Initiating graceful shutdown: ${reason}`);
 
     try {
@@ -3672,9 +3860,9 @@ Please start by enabling the terminal viewer service.`,
         },
       });
 
-      // Save session state
+      // Save session state (flushes any debounced write)
       if (this.config.context.sessionPersistence) {
-        await (this.contextManager as any).persistSession();
+        await this.contextManager.flushSession();
         console.error('💾 Session state saved');
       }
 
@@ -3840,7 +4028,7 @@ Please start by enabling the terminal viewer service.`,
       this.securityManager.updateConfig(this.config.security);
     }
     if (!section || section === 'context') {
-      this.contextManager.updateConfig(this.config.context);
+      await this.contextManager.updateConfig(this.config.context);
     }
     if (!section || section === 'mcpLogging' || section === 'logging') {
       if (this.config.mcpLogging) {
@@ -3853,38 +4041,54 @@ Please start by enabling the terminal viewer service.`,
     if (!section || section === 'display') {
       this.displayFormatter.updateConfig(this.config.display);
     }
+    // Session managers are never recreated: that would orphan every running
+    // PTY / child process (unreachable by list_sessions / kill_session) and leak
+    // the old manager's cleanup timer. Swap the config in place instead.
     if (!section || section === 'sessions' || section === 'terminalViewer') {
-      this.terminalSessionManager = new TerminalSessionManager(
-        this.config.sessions,
-        this.config.terminalViewer,
-        (command) => this.assertCommandAllowed(command, 'terminal-session')
-      );
+      this.terminalSessionManager?.updateConfig(this.config.sessions, this.config.terminalViewer);
     }
     if (!section || section === 'terminalViewer') {
       await this.restartTerminalViewerService();
     }
-    if (!section || section === 'output') {
-      this.shellExecutor = new ShellExecutor(
+    if (!section || section === 'sessions' || section === 'output') {
+      this.shellExecutor.updateConfig(this.config);
+    }
+    if (!section || section === 'security' || section === 'context' || section === 'audit' || section === 'logging') {
+      this.shellExecutor.updateDependencies(
         this.securityManager,
         this.contextManager,
-        this.auditLogger,
-        this.config
+        this.auditLogger
       );
     }
   }
 
-  private async restartTerminalViewerService(preserveRunningState = false): Promise<void> {
-    const wasRunning = this.terminalViewerService?.isEnabled() || false;
-
-    if (this.terminalViewerService) {
-      await this.terminalViewerService.stop();
-      this.terminalViewerService = undefined;
+  private registerTerminalSessionsWithViewer(): void {
+    if (!this.terminalViewerService || !this.terminalSessionManager) {
+      return;
     }
 
-    if (this.config.terminalViewer.enabled || (preserveRunningState && wasRunning)) {
-      const viewerService = new TerminalViewerService({ ...this.config.terminalViewer });
-      await viewerService.start();
-      this.terminalViewerService = viewerService;
+    for (const session of this.terminalSessionManager.getTerminalSessions()) {
+      this.terminalViewerService.addSession(session);
+    }
+  }
+
+  private async restartTerminalViewerService(): Promise<void> {
+    const previousService = this.terminalViewerService;
+    const wasRunning = previousService?.isEnabled() || false;
+    const shouldStart = this.config.terminalViewer.enabled || wasRunning;
+
+    // stop() also detaches PTY listeners from a service that was constructed
+    // but never successfully started, so always retire an existing instance.
+    if (previousService) {
+      await previousService.stop();
+    }
+    this.terminalViewerService = undefined;
+
+    if (shouldStart) {
+      const replacement = new TerminalViewerService(this.config.terminalViewer);
+      await replacement.start();
+      this.terminalViewerService = replacement;
+      this.registerTerminalSessionsWithViewer();
     }
   }
 

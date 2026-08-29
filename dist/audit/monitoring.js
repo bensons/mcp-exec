@@ -83,7 +83,15 @@ class MonitoringSystem {
             severity: rule.severity,
             message: this.generateAlertMessage(rule, logEntry),
             timestamp: new Date(),
-            logEntry,
+            logEntry: {
+                id: logEntry.id,
+                timestamp: logEntry.timestamp,
+                sessionId: logEntry.sessionId,
+                userId: logEntry.userId,
+                command: logEntry.command,
+                exitCode: logEntry.result.exitCode,
+                riskLevel: logEntry.securityCheck.riskLevel,
+            },
             acknowledged: false,
         };
         this.alerts.push(alert);
