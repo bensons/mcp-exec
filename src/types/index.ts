@@ -298,7 +298,7 @@ export interface ServerConfig {
   sessions: {
     maxInteractiveSessions: number; // Maximum number of concurrent interactive sessions
     sessionTimeout: number; // Session timeout in milliseconds
-    outputBufferSize: number; // Maximum lines to buffer per session
+    outputBufferBytes: number; // Maximum bytes of output buffered per session (per stream)
   };
   lifecycle: {
     inactivityTimeout: number; // milliseconds before shutdown due to inactivity
@@ -361,6 +361,16 @@ export interface ServerConfig {
 }
 
 // Interactive Session Types
+export interface SessionOutputBuffer {
+  chunks: Buffer[];
+  head: number;
+  headOffset: number;
+  startByte: number;
+  endByte: number;
+  lineBreaks: number[];
+  lineBreakHead: number;
+}
+
 export interface InteractiveSession {
   sessionId: string;
   command: string;
@@ -371,8 +381,9 @@ export interface InteractiveSession {
   cwd: string;
   env: Record<string, string>;
   status: 'running' | 'finished' | 'error';
-  outputBuffer: string[];
-  errorBuffer: string[];
+  outputBuffer: SessionOutputBuffer;
+  errorBuffer: SessionOutputBuffer;
+  droppedBytes: number; // Bytes discarded from the front of the buffers to stay under outputBufferBytes
   aiContext?: string;
 }
 
@@ -382,6 +393,7 @@ export interface SessionOutput {
   stderr: string;
   hasMore: boolean; // Whether there's more output available
   status: 'running' | 'finished' | 'error';
+  droppedBytes: number; // Bytes dropped because the buffer exceeded outputBufferBytes (0 = nothing lost)
 }
 
 export interface SessionInfo {

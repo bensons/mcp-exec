@@ -39,7 +39,7 @@ function createExecutor() {
     sessions: {
       maxInteractiveSessions: 1,
       sessionTimeout: 60000,
-      outputBufferSize: 100,
+      outputBufferBytes: 100,
     },
     lifecycle: {
       inactivityTimeout: 0,

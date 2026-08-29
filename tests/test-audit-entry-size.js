@@ -41,7 +41,7 @@ function buildConfig(logDirectory) {
     sessions: {
       maxInteractiveSessions: 10,
       sessionTimeout: 1800000,
-      outputBufferSize: 1000,
+      outputBufferBytes: 1000,
     },
     lifecycle: {
       inactivityTimeout: 0,

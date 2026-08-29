@@ -145,7 +145,7 @@ async function testLiveBroadcast(viewerService, sessionManager, port) {
 async function main() {
   const viewerService = new TerminalViewerService(viewerConfig);
   const sessionManager = new TerminalSessionManager(
-    { maxInteractiveSessions: 10, sessionTimeout: 1800000, outputBufferSize: 1000 },
+    { maxInteractiveSessions: 10, sessionTimeout: 1800000, outputBufferBytes: 1000 },
     viewerConfig
   );
 

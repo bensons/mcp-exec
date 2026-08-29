@@ -14,7 +14,7 @@ const { InteractiveSessionManager } = require('../dist/core/interactive-session-
 const SESSION_CONFIG = {
   maxInteractiveSessions: 5,
   sessionTimeout: 60000,
-  outputBufferSize: 100,
+  outputBufferBytes: 100,
 };
 
 const BIG_INPUT = 'x'.repeat(70000); // > the 64KB pipe buffer, so the write cannot be absorbed
@@ -76,9 +76,10 @@ async function run() {
     const session = manager.getSession(sessionId);
     assert.ok(session, 'session should still exist');
     assert.strictEqual(session.status, 'error', 'session status should flip to error');
+    const bufferedError = manager.consumeBuffer(session.errorBuffer);
     assert.ok(
-      session.errorBuffer.some((line) => line.includes('stdin error')),
-      `expected a stdin error in the error buffer, got: ${JSON.stringify(session.errorBuffer)}`
+      bufferedError.includes('stdin error'),
+      `expected a stdin error in the error buffer, got: ${JSON.stringify(bufferedError)}`
     );
     console.log('✅ stdin error captured on the session');
 

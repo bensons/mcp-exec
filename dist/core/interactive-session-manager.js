@@ -117,8 +117,9 @@ class InteractiveSessionManager {
             cwd,
             env: environment,
             status: 'running',
-            outputBuffer: [],
-            errorBuffer: [],
+            outputBuffer: this.createOutputBuffer(),
+            errorBuffer: this.createOutputBuffer(),
+            droppedBytes: 0,
             aiContext: options.aiContext,
         };
         // Set up process event handlers
@@ -176,12 +177,12 @@ class InteractiveSessionManager {
         if (!session) {
             throw new Error(`Session ${sessionId} not found`);
         }
-        // Get buffered output
-        const stdout = session.outputBuffer.join('\n');
-        const stderr = session.errorBuffer.join('\n');
-        // Clear buffers after reading
-        session.outputBuffer = [];
-        session.errorBuffer = [];
+        // Return the raw buffers verbatim; splitting/joining here corrupts output
+        const stdout = this.consumeBuffer(session.outputBuffer);
+        const stderr = this.consumeBuffer(session.errorBuffer);
+        const droppedBytes = session.droppedBytes;
+        // The raw buffers were cleared by consumeBuffer; reset loss accounting too.
+        session.droppedBytes = 0;
         // The process is gone and its output has now been handed over: drop the session
         // so it stops occupying a slot and holding on to its buffers.
         if (session.status !== 'running') {
@@ -193,6 +194,7 @@ class InteractiveSessionManager {
             stderr,
             hasMore: session.status === 'running',
             status: session.status,
+            droppedBytes,
         };
     }
     async killSession(sessionId) {
@@ -241,31 +243,24 @@ class InteractiveSessionManager {
     }
     setupProcessHandlers(session) {
         const { process: childProcess } = session;
+        // Decode as UTF-8 so Node re-assembles code points split across chunks
+        childProcess.stdout?.setEncoding('utf8');
+        childProcess.stderr?.setEncoding('utf8');
         // Handle stdout data
-        childProcess.stdout?.on('data', (data) => {
-            const output = data.toString();
-            session.outputBuffer.push(...output.split('\n').filter(line => line.length > 0));
+        childProcess.stdout?.on('data', (chunk) => {
+            session.droppedBytes += this.appendCapped(session.outputBuffer, chunk);
             session.lastActivity = new Date();
-            // Limit buffer size
-            if (session.outputBuffer.length > this.config.outputBufferSize) {
-                session.outputBuffer = session.outputBuffer.slice(-this.config.outputBufferSize);
-            }
         });
         // Handle stderr data
-        childProcess.stderr?.on('data', (data) => {
-            const output = data.toString();
-            session.errorBuffer.push(...output.split('\n').filter(line => line.length > 0));
+        childProcess.stderr?.on('data', (chunk) => {
+            session.droppedBytes += this.appendCapped(session.errorBuffer, chunk);
             session.lastActivity = new Date();
-            // Limit buffer size
-            if (session.errorBuffer.length > this.config.outputBufferSize) {
-                session.errorBuffer = session.errorBuffer.slice(-this.config.outputBufferSize);
-            }
         });
         // Handle stdin errors (EPIPE when the child closed its stdin or already exited).
         // Without a listener Node rethrows these as uncaught exceptions, which crashes the server.
         childProcess.stdin?.on('error', (error) => {
             session.status = 'error';
-            session.errorBuffer.push(`stdin error: ${error.message}`);
+            session.droppedBytes += this.appendCapped(session.errorBuffer, `stdin error: ${error.message}\n`);
             session.lastActivity = new Date();
         });
         // A child can exit while a descendant still holds its stdout/stderr pipes open. Keep the
@@ -277,9 +272,143 @@ class InteractiveSessionManager {
         // Handle process errors
         childProcess.on('error', (error) => {
             session.status = 'error';
-            session.errorBuffer.push(`Process error: ${error.message}`);
+            session.droppedBytes += this.appendCapped(session.errorBuffer, `Process error: ${error.message}\n`);
             session.lastActivity = new Date();
         });
+    }
+    /**
+     * Create an empty queue-backed buffer. Absolute byte offsets let appends track
+     * capacity and line boundaries without re-encoding the retained output.
+     */
+    createOutputBuffer() {
+        return {
+            chunks: [],
+            head: 0,
+            headOffset: 0,
+            startByte: 0,
+            endByte: 0,
+            lineBreaks: [],
+            lineBreakHead: 0,
+        };
+    }
+    /**
+     * Append a chunk while keeping the retained output under `outputBufferBytes`.
+     * Each append encodes and scans only the new chunk; queue removal is amortized
+     * across chunks that are discarded. The return value is the number of bytes
+     * dropped from the front.
+     */
+    appendCapped(buffer, chunk) {
+        const bytes = Buffer.from(chunk, 'utf8');
+        if (bytes.length === 0) {
+            return 0;
+        }
+        const chunkStart = buffer.endByte;
+        buffer.chunks.push(bytes);
+        buffer.endByte += bytes.length;
+        // Store positions immediately after newlines so boundary lookup is O(new chunk).
+        for (let newline = bytes.indexOf(0x0a); newline !== -1; newline = bytes.indexOf(0x0a, newline + 1)) {
+            buffer.lineBreaks.push(chunkStart + newline + 1);
+        }
+        const configuredMax = this.config.outputBufferBytes;
+        const maxBytes = Number.isFinite(configuredMax) && configuredMax > 0
+            ? Math.floor(configuredMax)
+            : 0;
+        const retainedBytes = buffer.endByte - buffer.startByte;
+        if (retainedBytes <= maxBytes) {
+            return 0;
+        }
+        if (maxBytes === 0) {
+            this.resetBuffer(buffer);
+            return retainedBytes;
+        }
+        const minimumStart = buffer.endByte - maxBytes;
+        while (buffer.lineBreakHead < buffer.lineBreaks.length &&
+            buffer.lineBreaks[buffer.lineBreakHead] < minimumStart) {
+            buffer.lineBreakHead++;
+        }
+        const lineStart = buffer.lineBreaks[buffer.lineBreakHead];
+        // A newline at the very end belongs to the oversized retained line. Dropping
+        // through it would discard the newest output, so keep a code-point-safe tail.
+        const useLineBoundary = lineStart !== undefined && lineStart < buffer.endByte;
+        const requestedStart = useLineBoundary ? lineStart : minimumStart;
+        const droppedBytes = this.dropBufferPrefix(buffer, requestedStart, !useLineBoundary);
+        while (buffer.lineBreakHead < buffer.lineBreaks.length &&
+            buffer.lineBreaks[buffer.lineBreakHead] <= buffer.startByte) {
+            buffer.lineBreakHead++;
+        }
+        this.compactBufferMetadata(buffer);
+        return droppedBytes;
+    }
+    /** Drop through an absolute byte offset, optionally aligning to a UTF-8 boundary. */
+    dropBufferPrefix(buffer, requestedStart, alignUtf8) {
+        const originalStart = buffer.startByte;
+        let remaining = requestedStart - originalStart;
+        let actualStart = requestedStart;
+        while (remaining > 0 && buffer.head < buffer.chunks.length) {
+            const headChunk = buffer.chunks[buffer.head];
+            const available = headChunk.length - buffer.headOffset;
+            if (remaining >= available) {
+                remaining -= available;
+                buffer.head++;
+                buffer.headOffset = 0;
+                continue;
+            }
+            let nextOffset = buffer.headOffset + remaining;
+            if (alignUtf8) {
+                while (nextOffset < headChunk.length &&
+                    (headChunk[nextOffset] & 0xc0) === 0x80) {
+                    nextOffset++;
+                    actualStart++;
+                }
+            }
+            buffer.headOffset = nextOffset;
+            if (buffer.headOffset === headChunk.length) {
+                buffer.head++;
+                buffer.headOffset = 0;
+            }
+            remaining = 0;
+        }
+        buffer.startByte = actualStart;
+        if (buffer.startByte >= buffer.endByte) {
+            const droppedBytes = buffer.endByte - originalStart;
+            this.resetBuffer(buffer);
+            return droppedBytes;
+        }
+        return buffer.startByte - originalStart;
+    }
+    /** Join retained chunks only when a caller reads, then clear the queue. */
+    consumeBuffer(buffer) {
+        const retainedBytes = buffer.endByte - buffer.startByte;
+        if (retainedBytes === 0) {
+            this.resetBuffer(buffer);
+            return '';
+        }
+        const chunks = buffer.chunks.slice(buffer.head);
+        chunks[0] = chunks[0].subarray(buffer.headOffset);
+        const text = Buffer.concat(chunks, retainedBytes).toString('utf8');
+        this.resetBuffer(buffer);
+        return text;
+    }
+    resetBuffer(buffer) {
+        buffer.chunks = [];
+        buffer.head = 0;
+        buffer.headOffset = 0;
+        buffer.startByte = 0;
+        buffer.endByte = 0;
+        buffer.lineBreaks = [];
+        buffer.lineBreakHead = 0;
+    }
+    /** Periodically release consumed array slots while keeping appends amortized O(1). */
+    compactBufferMetadata(buffer) {
+        if (buffer.head >= 64 && buffer.head * 2 >= buffer.chunks.length) {
+            buffer.chunks = buffer.chunks.slice(buffer.head);
+            buffer.head = 0;
+        }
+        if (buffer.lineBreakHead >= 64 &&
+            buffer.lineBreakHead * 2 >= buffer.lineBreaks.length) {
+            buffer.lineBreaks = buffer.lineBreaks.slice(buffer.lineBreakHead);
+            buffer.lineBreakHead = 0;
+        }
     }
     cleanupExpiredSessions() {
         const now = new Date();

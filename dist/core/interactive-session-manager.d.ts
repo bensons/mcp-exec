@@ -41,6 +41,25 @@ export declare class InteractiveSessionManager {
     getSession(sessionId: string): InteractiveSession | undefined;
     countRunningSessions(): number;
     private setupProcessHandlers;
+    /**
+     * Create an empty queue-backed buffer. Absolute byte offsets let appends track
+     * capacity and line boundaries without re-encoding the retained output.
+     */
+    private createOutputBuffer;
+    /**
+     * Append a chunk while keeping the retained output under `outputBufferBytes`.
+     * Each append encodes and scans only the new chunk; queue removal is amortized
+     * across chunks that are discarded. The return value is the number of bytes
+     * dropped from the front.
+     */
+    private appendCapped;
+    /** Drop through an absolute byte offset, optionally aligning to a UTF-8 boundary. */
+    private dropBufferPrefix;
+    /** Join retained chunks only when a caller reads, then clear the queue. */
+    private consumeBuffer;
+    private resetBuffer;
+    /** Periodically release consumed array slots while keeping appends amortized O(1). */
+    private compactBufferMetadata;
     private cleanupExpiredSessions;
     shutdown(): Promise<void>;
 }

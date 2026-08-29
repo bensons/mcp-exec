@@ -78,7 +78,7 @@ const DEFAULT_CONFIG: ServerConfig = {
   sessions: {
     maxInteractiveSessions: parseInt(process.env.MCP_EXEC_MAX_SESSIONS || '10'),
     sessionTimeout: parseInt(process.env.MCP_EXEC_SESSION_TIMEOUT || '1800000'), // 30 minutes
-    outputBufferSize: parseInt(process.env.MCP_EXEC_SESSION_BUFFER_SIZE || '1000'),
+    outputBufferBytes: parseInt(process.env.MCP_EXEC_SESSION_BUFFER_BYTES || '262144'), // 256 KB of raw output per session
   },
   lifecycle: {
     // For MCP servers, inactivity timeout should be disabled by default since clients
@@ -341,7 +341,7 @@ const UpdateAuditLoggingSchema = z.object({
 const UpdateSessionLimitsSchema = z.object({
   maxInteractiveSessions: z.number().optional().describe('Maximum concurrent interactive sessions'),
   sessionTimeout: z.number().optional().describe('Session timeout in milliseconds'),
-  outputBufferSize: z.number().optional().describe('Output buffer size per session'),
+  outputBufferBytes: z.number().optional().describe('Output buffer size per session, in bytes'),
 });
 
 const UpdateTerminalViewerSchema = z.object({
@@ -1293,7 +1293,7 @@ class MCPShellServer {
               properties: {
                 maxInteractiveSessions: { type: 'number', description: 'Maximum concurrent interactive sessions' },
                 sessionTimeout: { type: 'number', description: 'Session timeout in milliseconds' },
-                outputBufferSize: { type: 'number', description: 'Output buffer size per session' },
+                outputBufferBytes: { type: 'number', description: 'Output buffer size per session, in bytes' },
               },
             },
             annotations: {
@@ -2517,6 +2517,7 @@ class MCPShellServer {
                       stderr: output.stderr,
                       hasMore: output.hasMore,
                       status: output.status,
+                      droppedBytes: output.droppedBytes,
                     }, null, 2),
                   },
                 ],
@@ -3106,8 +3107,8 @@ class MCPShellServer {
             if (parsed.sessionTimeout !== undefined) {
               this.config.sessions.sessionTimeout = parsed.sessionTimeout;
             }
-            if (parsed.outputBufferSize !== undefined) {
-              this.config.sessions.outputBufferSize = parsed.outputBufferSize;
+            if (parsed.outputBufferBytes !== undefined) {
+              this.config.sessions.outputBufferBytes = parsed.outputBufferBytes;
             }
 
             // Record configuration change
