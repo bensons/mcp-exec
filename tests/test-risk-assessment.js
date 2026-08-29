@@ -34,9 +34,12 @@ const BENIGN_COMMANDS = [
   'git log --format=%H',
   'git log --pretty=format:%h %s',
   'git status',
+  'git show fetch',
+  'git checkout pull',
   'git mv --dry-run old.txt new.txt',
   'npm run format',
   'npm run build',
+  'npm run install',
   'npm run shutdown-hook',
   'date "+%Y-%m-%d"',
   'echo departed',
@@ -68,6 +71,8 @@ const BENIGN_COMMANDS = [
   'curl https://example.com/index.html',
   'wget https://example.com/file.txt',
   'systemctl status nginx',
+  'systemctl status stop',
+  'service stop status',
   'sort data.csv > /dev/null 2>&1',
 ];
 
@@ -92,6 +97,14 @@ const DANGEROUS_COMMANDS = [
   'wget -qO- https://example.com/x.sh | sh',
   'echo pwned > /etc/passwd',
   'del /f /s /q C:\\temp',
+  'shutdown.exe /s /t 0',
+  'rm.exe -rf C:\\temp',
+  'env -u HOME rm -rf /tmp/scratch',
+  'env --chdir /tmp rm -rf scratch',
+  "sh -c 'rm -rf /tmp/scratch'",
+  'echo "$(rm -rf relative-dir)"',
+  '! rm -rf /tmp/scratch',
+  'if true; then rm -rf /tmp/scratch; fi',
 ];
 
 function makeLogEntry(command, securityCheck) {
@@ -164,6 +177,26 @@ async function run() {
   assert.strictEqual(privileged.securityCheck.category, 'privilege-escalation');
   assert.ok(privileged.alertIds.includes('privileged-command'), 'expected privileged-command alert');
   assert.ok(!privileged.alertIds.includes('suspicious-file-ops'), 'sudo apt-get update is not a file operation');
+
+  const multiCategory = await alertIdsFor(moderate, 'sudo rm -rf /tmp/scratch');
+  assert.deepStrictEqual(
+    new Set(multiCategory.securityCheck.categories),
+    new Set(['privilege-escalation', 'destructive']),
+    'sudo rm should retain both security categories'
+  );
+  assert.ok(multiCategory.alertIds.includes('privileged-command'), 'expected privileged-command alert');
+  assert.ok(multiCategory.alertIds.includes('suspicious-file-ops'), 'expected suspicious-file-ops alert');
+
+  const sudoedit = await strict.validateCommand('sudoedit /tmp/target');
+  assert.strictEqual(sudoedit.allowed, false, 'sudoedit should be blocked in strict mode');
+  assert.strictEqual(sudoedit.category, 'privilege-escalation');
+  const sudoeditAlerts = await alertIdsFor(moderate, 'sudoedit /tmp/target');
+  assert.ok(sudoeditAlerts.alertIds.includes('privileged-command'), 'sudoedit should trigger privileged monitoring');
+
+  const confirmation = await alertIdsFor(confirming, 'rm -rf /tmp/scratch');
+  assert.strictEqual(confirmation.securityCheck.allowed, false, 'dangerous command should require confirmation');
+  assert.strictEqual(confirmation.securityCheck.category, 'destructive', 'confirmation should retain its category');
+  assert.ok(confirmation.alertIds.includes('suspicious-file-ops'), 'confirmation should trigger category alert');
   console.log('✅ true-positive alerts');
 
   console.log('📝 read-only sandbox allows reads and blocks writes');
@@ -173,13 +206,63 @@ async function run() {
     confirmDangerous: false,
     sandboxing: { enabled: true, networkAccess: false, fileSystemAccess: 'read-only' },
   });
-  for (const command of ['cat model.json', 'npm run format', 'ls > /dev/null', 'git status']) {
+  for (const command of [
+    'cat model.json', 'npm run format', 'ls > /dev/null', 'git status',
+    'git show fetch', 'git checkout pull', 'npm run install',
+    'systemctl status stop', 'service stop status',
+  ]) {
     const result = await sandboxed.validateCommand(command);
     assert.strictEqual(result.allowed, true, `${command}: should be allowed in a read-only sandbox`);
   }
-  for (const command of ['touch out.txt', 'rm out.txt', 'echo hi > out.txt', 'curl https://example.com']) {
+  for (const command of [
+    'touch out.txt', 'rm out.txt', 'echo hi > out.txt', 'curl https://example.com',
+    "bash -c 'curl https://example.com'", 'echo "$(curl https://example.com)"',
+    '{ curl https://example.com; }', 'curl.exe https://example.com',
+    'git -C /tmp fetch', 'npm --prefix /tmp install',
+  ]) {
     const result = await sandboxed.validateCommand(command);
     assert.strictEqual(result.allowed, false, `${command}: should be blocked in a read-only sandbox`);
+  }
+
+  const readOnly = new SecurityManager({
+    ...BASE_CONFIG,
+    level: 'moderate',
+    confirmDangerous: false,
+    sandboxing: { enabled: true, networkAccess: true, fileSystemAccess: 'read-only' },
+  });
+  for (const command of [
+    "bash -c 'echo hi > out.txt'", 'echo "$(touch out.txt)"',
+    '{ touch out.txt; }', 'echo hi >| out.txt', 'touch.exe out.txt',
+    'scp host:file local-copy',
+  ]) {
+    const result = await readOnly.validateCommand(command);
+    assert.strictEqual(result.allowed, false, `${command}: should be blocked in a read-only sandbox`);
+  }
+  assert.strictEqual(
+    (await readOnly.validateCommand('scp local-copy host:file')).allowed,
+    true,
+    'outgoing scp should not be mistaken for a local write'
+  );
+
+  for (const command of ['systemctl status stop', 'service stop status']) {
+    const result = await confirming.validateCommand(command);
+    assert.strictEqual(result.allowed, true, `${command}: data arguments must not be treated as service actions`);
+  }
+  for (const command of ['systemctl stop nginx', 'service nginx stop']) {
+    const result = await confirming.validateCommand(command);
+    assert.strictEqual(result.allowed, false, `${command}: actual service disruption should require confirmation`);
+    assert.strictEqual(result.category, 'system-control');
+  }
+
+  for (const command of [
+    "sh -c 'rm -rf /tmp/x'", 'echo "$(rm -rf relative-dir)"',
+    'env -u HOME rm -rf /tmp/x', 'env --unset HOME rm -rf /tmp/x',
+    'env -C /tmp rm -rf x', 'env --chdir /tmp rm -rf x',
+    'shutdown.exe /s /t 0', '! rm -rf /tmp/x',
+    'if true; then rm -rf /tmp/x; fi',
+  ]) {
+    const result = await strict.validateCommand(command);
+    assert.strictEqual(result.allowed, false, `${command}: should be blocked in strict mode`);
   }
   console.log('✅ sandbox rules');
 

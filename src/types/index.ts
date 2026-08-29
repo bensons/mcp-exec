@@ -91,6 +91,8 @@ export interface ValidationResult {
   suggestions?: string[];
   riskLevel: 'low' | 'medium' | 'high';
   category?: SecurityCategory;
+  /** All classifications when a command has more than one security concern. */
+  categories?: SecurityCategory[];
 }
 
 export interface SecurityProvider {

@@ -52,13 +52,15 @@ export interface CommandSegment {
   redirects: string[];
   /** Operator preceding this segment. */
   connector: CommandConnector;
+  /** Set when shell syntax cannot be modeled safely. */
+  unsafeSyntax?: string;
 }
 
 /** Wrappers that prefix the real command, mapped to their value-taking options. */
 const COMMAND_WRAPPERS: Record<string, string[]> = {
-  sudo: ['-u', '-g', '-p', '-C', '-U', '-r', '-t'],
+  sudo: ['-u', '--user', '-g', '--group', '-p', '--prompt', '-C', '--close-from', '-U', '--other-user', '-r', '--role', '-t', '--type', '-h', '--host'],
   doas: ['-u', '-C'],
-  env: [],
+  env: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string'],
   nice: ['-n'],
   ionice: ['-c', '-n', '-p'],
   nohup: [],
@@ -72,6 +74,17 @@ const COMMAND_WRAPPERS: Record<string, string[]> = {
 
 const PRIVILEGE_WRAPPERS = new Set(['sudo', 'doas', 'runas']);
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const WINDOWS_EXECUTABLE_SUFFIX = /\.(?:exe|com|cmd|bat)$/i;
+const SHELL_CONTROL_WORDS = new Set([
+  '!', '{', '}', 'if', 'then', 'elif', 'else', 'fi', 'while', 'until', 'do', 'done',
+  'for', 'select', 'in', 'case', 'esac', 'function',
+]);
+const SUBSTITUTION_TOKEN = '__mcp_exec_substitution__';
+const MAX_PARSE_DEPTH = 8;
+
+function normalizeCommandName(token: string): string {
+  return path.basename(token).toLowerCase().replace(WINDOWS_EXECUTABLE_SUFFIX, '');
+}
 
 function buildSegment(
   argv: string[],
@@ -88,7 +101,18 @@ function buildSegment(
       continue;
     }
 
-    const base = path.basename(argv[index]).toLowerCase();
+    const base = normalizeCommandName(argv[index]);
+
+    if (SHELL_CONTROL_WORDS.has(base)) {
+      index++;
+      continue;
+    }
+
+    if (base === 'sudoedit') {
+      privileged = true;
+      break;
+    }
+
     const valueOptions = COMMAND_WRAPPERS[base];
     if (!valueOptions) {
       break;
@@ -103,8 +127,14 @@ function buildSegment(
       const arg = argv[index];
       if (ENV_ASSIGNMENT.test(arg)) {
         index++;
+      } else if (arg === '--') {
+        index++;
+        break;
       } else if (arg.startsWith('-')) {
-        index += valueOptions.includes(arg) ? 2 : 1;
+        const option = arg.split('=', 1)[0];
+        const takesSeparateValue = valueOptions.includes(option) && !arg.includes('=') &&
+          !(/^-[A-Za-z].+/.test(arg) && !arg.startsWith('--'));
+        index += takesSeparateValue ? 2 : 1;
       } else if (/^\d+(\.\d+)?[smhd]?$/.test(arg)) {
         index++; // e.g. `nice 10`, `timeout 5s`
       } else {
@@ -113,19 +143,121 @@ function buildSegment(
     }
   }
 
-  const name = index < argv.length ? path.basename(argv[index]).toLowerCase() : '';
-  return { argv, name, args: argv.slice(index + 1), privileged, redirects, connector };
+  const nameToken = index < argv.length ? argv[index] : '';
+  const name = normalizeCommandName(nameToken);
+  const unsafeSyntax = nameToken.includes(SUBSTITUTION_TOKEN) || nameToken.startsWith('$')
+    ? 'dynamic command name cannot be determined safely'
+    : undefined;
+  return { argv, name, args: argv.slice(index + 1), privileged, redirects, connector, unsafeSyntax };
+}
+
+interface NestedExpression {
+  content: string;
+  end: number;
+}
+
+function readParenthesized(command: string, start: number): NestedExpression | undefined {
+  let depth = 1;
+  let quote: "'" | '"' | undefined;
+
+  for (let i = start + 2; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '(') depth++;
+    if (ch === ')' && --depth === 0) {
+      return { content: command.slice(start + 2, i), end: i };
+    }
+  }
+
+  return undefined;
+}
+
+function readBackticks(command: string, start: number): NestedExpression | undefined {
+  for (let i = start + 1; i < command.length; i++) {
+    if (command[i] === '\\') {
+      i++;
+      continue;
+    }
+    if (command[i] === '`') {
+      return { content: command.slice(start + 1, i), end: i };
+    }
+  }
+  return undefined;
+}
+
+function shellPayload(segment: CommandSegment): { payload?: string; unsafe?: string } {
+  const args = segment.args;
+  if (['sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'fish'].includes(segment.name)) {
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-c' || /^-[A-Za-z]*c[A-Za-z]*$/.test(args[i])) {
+        return args[i + 1]
+          ? { payload: args[i + 1] }
+          : { unsafe: `${segment.name} command-string option has no inspectable payload` };
+      }
+    }
+  }
+  if (segment.name === 'cmd') {
+    const index = args.findIndex(arg => /^\/[ck]$/i.test(arg));
+    if (index >= 0) {
+      return args[index + 1]
+        ? { payload: args.slice(index + 1).join(' ') }
+        : { unsafe: 'cmd command-string option has no inspectable payload' };
+    }
+  }
+  if (segment.name === 'powershell' || segment.name === 'pwsh') {
+    const encoded = args.findIndex(arg => /^-(?:enc|encodedcommand)$/i.test(arg));
+    if (encoded >= 0) return { unsafe: 'encoded PowerShell payload cannot be inspected safely' };
+    const index = args.findIndex(arg => /^-(?:c|command)$/i.test(arg));
+    if (index >= 0) {
+      return args[index + 1]
+        ? { payload: args.slice(index + 1).join(' ') }
+        : { unsafe: 'PowerShell command-string option has no inspectable payload' };
+    }
+  }
+  return {};
 }
 
 /** Split a command line into segments with quote-aware argv and redirect targets. */
-export function parseCommand(command: string): CommandSegment[] {
+function parseCommandAtDepth(command: string, depth: number): CommandSegment[] {
   const segments: CommandSegment[] = [];
+  const embeddedSegments: CommandSegment[] = [];
   let argv: string[] = [];
   let redirects: string[] = [];
   let connector: CommandConnector = 'start';
   let token = '';
   let hasToken = false;
   let redirectTarget = false;
+
+  const markUnsafe = (reason: string): void => {
+    embeddedSegments.push(buildSegment([], [], 'start'));
+    embeddedSegments[embeddedSegments.length - 1].unsafeSyntax = reason;
+  };
+
+  const addNested = (expression: NestedExpression | undefined, reason: string): number | undefined => {
+    token += SUBSTITUTION_TOKEN;
+    hasToken = true;
+    if (!expression) {
+      markUnsafe(reason);
+      return undefined;
+    }
+    if (depth >= MAX_PARSE_DEPTH) {
+      markUnsafe('maximum shell parsing depth exceeded');
+    } else {
+      embeddedSegments.push(...parseCommandAtDepth(expression.content, depth + 1));
+    }
+    return expression.end;
+  };
 
   const endToken = (): void => {
     if (!hasToken) return;
@@ -165,10 +297,47 @@ export function parseCommand(command: string): CommandSegment[] {
       i++;
       while (i < command.length && command[i] !== quote) {
         if (quote === '"' && command[i] === '\\' && i + 1 < command.length) {
+          token += command[++i];
           i++;
+          continue;
+        }
+        if (quote === '"' && command[i] === '$' && command[i + 1] === '(') {
+          const end = addNested(readParenthesized(command, i), 'unterminated command substitution');
+          if (end === undefined) {
+            i = command.length;
+            break;
+          }
+          i = end + 1;
+          continue;
+        }
+        if (quote === '"' && command[i] === '`') {
+          const end = addNested(readBackticks(command, i), 'unterminated backtick substitution');
+          if (end === undefined) {
+            i = command.length;
+            break;
+          }
+          i = end + 1;
+          continue;
         }
         token += command[i++];
       }
+      if (i >= command.length && command[command.length - 1] !== quote) {
+        markUnsafe(`unterminated ${quote} quote`);
+      }
+      continue;
+    }
+
+    if (ch === '$' && command[i + 1] === '(') {
+      const end = addNested(readParenthesized(command, i), 'unterminated command substitution');
+      if (end === undefined) break;
+      i = end;
+      continue;
+    }
+
+    if (ch === '`') {
+      const end = addNested(readBackticks(command, i), 'unterminated backtick substitution');
+      if (end === undefined) break;
+      i = end;
       continue;
     }
 
@@ -177,8 +346,8 @@ export function parseCommand(command: string): CommandSegment[] {
       continue;
     }
 
-    // Command substitution and subshells become their own segments
-    if (ch === '\n' || ch === ';' || ch === '`' || ch === '(' || ch === ')') {
+    // Grouping and control operators divide commands into separately classified segments.
+    if (ch === '\n' || ch === ';' || ch === '(' || ch === ')') {
       endSegment(';');
       continue;
     }
@@ -215,7 +384,7 @@ export function parseCommand(command: string): CommandSegment[] {
       } else {
         endToken();
       }
-      if (command[i + 1] === '>') i++;
+      if (command[i + 1] === '>' || command[i + 1] === '|') i++;
       if (command[i + 1] === '&') {
         // `2>&1` duplicates a descriptor, it has no file target
         i++;
@@ -231,7 +400,28 @@ export function parseCommand(command: string): CommandSegment[] {
   }
 
   endSegment(';');
-  return segments;
+  const expanded = [...segments, ...embeddedSegments];
+  for (const segment of segments) {
+    const nested = shellPayload(segment);
+    if (nested.unsafe) {
+      const unsafe = buildSegment([], [], 'start');
+      unsafe.unsafeSyntax = nested.unsafe;
+      expanded.push(unsafe);
+    } else if (nested.payload) {
+      if (depth >= MAX_PARSE_DEPTH) {
+        const unsafe = buildSegment([], [], 'start');
+        unsafe.unsafeSyntax = 'maximum shell parsing depth exceeded';
+        expanded.push(unsafe);
+      } else {
+        expanded.push(...parseCommandAtDepth(nested.payload, depth + 1));
+      }
+    }
+  }
+  return expanded;
+}
+
+export function parseCommand(command: string): CommandSegment[] {
+  return parseCommandAtDepth(command, 0);
 }
 
 export interface CommandClassification {
@@ -239,6 +429,8 @@ export interface CommandClassification {
   /** Genuinely dangerous: blocked in strict mode at high risk, confirmed when confirmDangerous is on. */
   dangerous: boolean;
   category?: SecurityCategory;
+  /** Every applicable category, including secondary classifications. */
+  categories?: SecurityCategory[];
   reason?: string;
 }
 
@@ -246,7 +438,7 @@ const RISK_ORDER: Record<'low' | 'medium' | 'high', number> = { low: 0, medium: 
 
 const SHELLS = new Set([
   'sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'fish',
-  'cmd', 'cmd.exe', 'powershell', 'pwsh', 'python', 'python3', 'perl', 'ruby', 'node',
+  'cmd', 'powershell', 'pwsh', 'python', 'python3', 'perl', 'ruby', 'node',
 ]);
 const FETCHERS = new Set(['curl', 'wget', 'fetch']);
 const DISK_COMMANDS = new Set([
@@ -259,12 +451,51 @@ const DEVICE_PATH = /^\/dev\/(sd|hd|vd|nvme|disk|rdisk|mapper)/i;
 const SYSTEM_PATH = /^\/(etc|sys|proc|boot)\//i;
 const RECURSIVE_OR_FORCED = /^(-[a-zA-Z]*[rRf]|--recursive|--force|--no-preserve-root)/;
 
+function optionPosition(args: string[], valueOptions: Set<string> = new Set()): number {
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index];
+    if (arg === '--') return index + 1;
+    if (!arg.startsWith('-') || arg === '-') return index;
+    const option = arg.split('=', 1)[0];
+    if (valueOptions.has(option) && !arg.includes('=')) index++;
+    index++;
+  }
+  return index;
+}
+
+function serviceAction(segment: CommandSegment): string | undefined {
+  if (segment.name === 'systemctl') {
+    const valueOptions = new Set([
+      '-H', '--host', '-M', '--machine', '-t', '--type', '--state', '-p', '--property',
+      '-P', '--value', '--job-mode', '--kill-whom', '-s', '--signal', '--root', '--image',
+      '--lines', '-o', '--output', '--namespace',
+    ]);
+    return segment.args[optionPosition(segment.args, valueOptions)]?.toLowerCase();
+  }
+  if (segment.name === 'service') {
+    const serviceIndex = optionPosition(segment.args);
+    return segment.args[serviceIndex + 1]?.toLowerCase();
+  }
+  return undefined;
+}
+
 function classifySegment(
   segment: CommandSegment,
   previous?: CommandSegment
 ): CommandClassification[] {
   const { name, args } = segment;
   const found: CommandClassification[] = [];
+
+  if (segment.unsafeSyntax) {
+    found.push({
+      riskLevel: 'high',
+      dangerous: true,
+      category: 'remote-execution',
+      reason: segment.unsafeSyntax,
+    });
+    return found;
+  }
 
   // Downloaded content piped into an interpreter
   if (segment.connector === '|' && previous && FETCHERS.has(previous.name)) {
@@ -287,8 +518,9 @@ function classifySegment(
     found.push({ riskLevel: 'high', dangerous: true, category: 'system-control', reason: `system control command: ${name}` });
   }
 
-  if ((name === 'systemctl' && args.some(arg => ['stop', 'disable', 'mask', 'kill'].includes(arg))) ||
-      (name === 'service' && args.includes('stop'))) {
+  const action = serviceAction(segment);
+  if ((name === 'systemctl' && action !== undefined && ['stop', 'disable', 'mask', 'kill'].includes(action)) ||
+      (name === 'service' && action === 'stop')) {
     found.push({ riskLevel: 'medium', dangerous: true, category: 'system-control', reason: `service disruption: ${name}` });
   }
 
@@ -356,6 +588,9 @@ function combineClassifications(candidates: CommandClassification[]): CommandCla
     riskLevel,
     dangerous: dangerous.length > 0,
     category: primary.category,
+    categories: Array.from(new Set(candidates.flatMap(candidate =>
+      candidate.categories ?? (candidate.category ? [candidate.category] : [])
+    ))),
     reason: primary.reason,
   };
 }
@@ -379,12 +614,50 @@ const NETWORK_SUBCOMMANDS: Record<string, string[]> = {
   pip: ['install', 'upgrade'],
   pip3: ['install', 'upgrade'],
 };
+const NETWORK_VALUE_OPTIONS: Record<string, Set<string>> = {
+  git: new Set(['-C', '-c', '--config-env', '--exec-path', '--git-dir', '--work-tree', '--namespace', '--super-prefix']),
+  npm: new Set(['--prefix', '--workspace', '-w', '--registry', '--cache', '--userconfig']),
+  pip: new Set(['--proxy', '--timeout', '--retries', '--cert', '--client-cert', '--cache-dir', '--config-settings']),
+  pip3: new Set(['--proxy', '--timeout', '--retries', '--cert', '--client-cert', '--cache-dir', '--config-settings']),
+};
 const WRITE_COMMANDS = new Set([
   'rm', 'rmdir', 'mv', 'cp', 'touch', 'mkdir', 'dd', 'tee', 'truncate', 'ln', 'install',
-  'shred', 'chmod', 'chown', 'unlink', 'rename', 'del', 'erase', 'md', 'rd',
+  'shred', 'chmod', 'chown', 'unlink', 'rename', 'del', 'erase', 'md', 'rd', 'sudoedit',
 ]);
 /** Redirect targets that do not actually write to the file system. */
 const NON_FILE_REDIRECTS = new Set(['/dev/null', '/dev/zero', '/dev/stdout', '/dev/stderr', '/dev/tty']);
+
+function networkSubcommand(segment: CommandSegment): string | undefined {
+  const position = optionPosition(segment.args, NETWORK_VALUE_OPTIONS[segment.name]);
+  return segment.args[position]?.toLowerCase();
+}
+
+function isScpRemoteOperand(arg: string): boolean {
+  if (/^scp:\/\//i.test(arg)) return true;
+  if (/^[A-Za-z]:[\\/]/.test(arg)) return false;
+  return /^(?:[^@/:\s]+@)?[^/:\s]+:/.test(arg);
+}
+
+function scpWritesLocal(args: string[]): boolean {
+  const valueOptions = new Set(['-c', '-D', '-F', '-i', '-J', '-l', '-o', '-P', '-S', '-X']);
+  const operands: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === '--') {
+      operands.push(...args.slice(index + 1));
+      break;
+    }
+    const option = arg.split('=', 1)[0];
+    if (arg.startsWith('-')) {
+      if (valueOptions.has(option) && !arg.includes('=')) index++;
+      continue;
+    }
+    operands.push(arg);
+  }
+  if (operands.length < 2) return false;
+  const destination = operands[operands.length - 1];
+  return !isScpRemoteOperand(destination) && operands.slice(0, -1).some(isScpRemoteOperand);
+}
 
 export class SecurityManager {
   private config: SecurityConfig;
@@ -481,7 +754,7 @@ export class SecurityManager {
 
   private checkPrivilegeEscalation(command: string): ValidationResult {
     const escalates = parseCommand(command).some(
-      segment => segment.privileged || segment.name === 'su' || segment.name === 'runas'
+      segment => segment.privileged || segment.name === 'su' || segment.name === 'runas' || segment.name === 'sudoedit'
     );
 
     if (!escalates) {
@@ -494,6 +767,7 @@ export class SecurityManager {
         reason: 'Privilege escalation commands blocked in strict mode',
         riskLevel: 'high',
         category: 'privilege-escalation',
+        categories: ['privilege-escalation'],
         suggestions: ['Run without elevated privileges or switch security level'],
       };
     }
@@ -503,6 +777,7 @@ export class SecurityManager {
       reason: 'Privilege escalation detected',
       riskLevel: 'high',
       category: 'privilege-escalation',
+      categories: ['privilege-escalation'],
       suggestions: ['Ensure you understand the implications of elevated privileges'],
     };
   }
@@ -558,12 +833,23 @@ export class SecurityManager {
     const sandbox = this.config.sandboxing;
     const segments = parseCommand(command);
 
+    if (segments.some(segment => segment.unsafeSyntax)) {
+      return {
+        allowed: false,
+        reason: 'Command contains shell syntax that cannot be inspected safely in sandbox mode',
+        riskLevel: 'high',
+        category: 'remote-execution',
+        categories: ['remote-execution'],
+        suggestions: ['Use a literal command without dynamic or encoded shell execution'],
+      };
+    }
+
     // Check network access
     if (!sandbox.networkAccess) {
       const usesNetwork = segments.some(segment =>
         NETWORK_COMMANDS.has(segment.name) ||
         (segment.name === 'rsync' && segment.args.some(arg => arg.includes('::') || /^[\w.-]+@/.test(arg))) ||
-        (NETWORK_SUBCOMMANDS[segment.name] ?? []).some(sub => segment.args.includes(sub))
+        (NETWORK_SUBCOMMANDS[segment.name] ?? []).includes(networkSubcommand(segment) ?? '')
       );
 
       if (usesNetwork) {
@@ -580,6 +866,7 @@ export class SecurityManager {
     if (sandbox.fileSystemAccess === 'read-only') {
       const writes = segments.some(segment =>
         WRITE_COMMANDS.has(segment.name) ||
+        (segment.name === 'scp' && scpWritesLocal(segment.args)) ||
         (segment.name === 'sed' && segment.args.some(arg => arg.startsWith('-i'))) ||
         segment.redirects.some(target => !NON_FILE_REDIRECTS.has(target.toLowerCase()))
       );
@@ -648,6 +935,7 @@ export class SecurityManager {
           reason: 'High-risk command blocked in strict mode',
           riskLevel,
           category: classification.category,
+          categories: classification.categories,
           suggestions: ['Use a safer alternative or switch to moderate security level'],
         };
       }
@@ -663,6 +951,8 @@ export class SecurityManager {
           allowed: false,
           reason: 'Dangerous command requires confirmation',
           riskLevel,
+          category: classification.category,
+          categories: classification.categories,
           suggestions: ['Review command carefully before proceeding'],
         };
       }
@@ -699,6 +989,7 @@ export class SecurityManager {
       allowed: true,
       riskLevel: finalRiskLevel,
       category: classification.category,
+      categories: classification.categories,
       securityLevel: this.config.level
     }, 'security-validator');
 
@@ -706,6 +997,7 @@ export class SecurityManager {
       allowed: true,
       riskLevel: finalRiskLevel,
       category: classification.category,
+      categories: classification.categories,
     };
   }
 }
