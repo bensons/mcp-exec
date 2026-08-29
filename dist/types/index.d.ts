@@ -62,10 +62,16 @@ export interface ValidationResult {
     reason?: string;
     suggestions?: string[];
     riskLevel: 'low' | 'medium' | 'high';
+    requiresConfirmation?: boolean;
+    /** Deterministic cwd after a validated stateful-shell input such as `cd`. */
+    resultingCwd?: string;
 }
 export interface SecurityProvider {
     securityLevel: 'strict' | 'moderate' | 'permissive';
-    validateCommand(command: string): ValidationResult;
+    validateCommand(command: string, options?: {
+        cwd?: string;
+        env?: Record<string, string | undefined>;
+    }): ValidationResult | Promise<ValidationResult>;
     resourceLimits: {
         maxExecutionTime: number;
         maxMemoryUsage: number;
@@ -117,7 +123,7 @@ export interface AuditLogger {
         sessionId: string;
         userId?: string;
         command: string;
-        context: CommandContext;
+        context: AuditContext;
         result: CommandOutput;
         securityCheck: ValidationResult;
         aiIntent?: string;
@@ -142,6 +148,19 @@ export interface CommandContext {
     previousCommands: string[];
     aiIntent?: string;
 }
+/**
+ * Slim, non-recursive context recorded on every audit entry. Deliberately
+ * excludes commandHistory / outputCache / fileSystemChanges / environment maps:
+ * embedding the full CommandContext made entry N contain entries 1..N-1 and put
+ * the whole process environment on disk. See issue #30.
+ */
+export interface AuditContext {
+    sessionId: string;
+    workingDirectory: string;
+    previousCommands: string[];
+    aiIntent?: string;
+    userId?: string;
+}
 export interface LogFilters {
     sessionId?: string;
     userId?: string;
@@ -159,7 +178,7 @@ export interface LogEntry {
     sessionId: string;
     userId?: string;
     command: string;
-    context: CommandContext;
+    context: AuditContext;
     result: CommandOutput;
     securityCheck: ValidationResult;
     aiIntent?: string;
@@ -202,7 +221,7 @@ export interface ServerConfig {
     sessions: {
         maxInteractiveSessions: number;
         sessionTimeout: number;
-        outputBufferSize: number;
+        outputBufferBytes: number;
     };
     lifecycle: {
         inactivityTimeout: number;
@@ -232,6 +251,9 @@ export interface ServerConfig {
         retention: number;
         logFile?: string;
         logDirectory?: string;
+        maxOutputBytes?: number;
+        maxInMemoryEntries?: number;
+        redactPatterns?: string[];
         monitoring?: {
             enabled: boolean;
             alertRetention: number;
@@ -260,6 +282,15 @@ export interface ServerConfig {
         authToken?: string;
     };
 }
+export interface SessionOutputBuffer {
+    chunks: Buffer[];
+    head: number;
+    headOffset: number;
+    startByte: number;
+    endByte: number;
+    lineBreaks: number[];
+    lineBreakHead: number;
+}
 export interface InteractiveSession {
     sessionId: string;
     command: string;
@@ -270,8 +301,9 @@ export interface InteractiveSession {
     cwd: string;
     env: Record<string, string>;
     status: 'running' | 'finished' | 'error';
-    outputBuffer: string[];
-    errorBuffer: string[];
+    outputBuffer: SessionOutputBuffer;
+    errorBuffer: SessionOutputBuffer;
+    droppedBytes: number;
     aiContext?: string;
 }
 export interface SessionOutput {
@@ -280,6 +312,7 @@ export interface SessionOutput {
     stderr: string;
     hasMore: boolean;
     status: 'running' | 'finished' | 'error';
+    droppedBytes: number;
 }
 export interface SessionInfo {
     sessionId: string;

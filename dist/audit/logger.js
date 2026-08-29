@@ -37,22 +37,47 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AuditLogger = void 0;
+exports.parseAuditLimit = parseAuditLimit;
 const fs = __importStar(require("fs/promises"));
 const path = __importStar(require("path"));
 const uuid_1 = require("uuid");
 const index_1 = require("../types/index");
 const monitoring_1 = require("./monitoring");
+const redact_1 = require("./redact");
+const DEFAULT_MAX_OUTPUT_BYTES = 4 * 1024;
+const DEFAULT_MAX_IN_MEMORY_ENTRIES = 1000;
+/** Upper bound on how much of the log file tail is read at startup. */
+const MAX_TAIL_BYTES = 4 * 1024 * 1024;
+/** Parse an externally supplied audit limit without allowing NaN or fractions. */
+function parseAuditLimit(value, fallback) {
+    if (typeof value === 'string' && value.trim() === '') {
+        return fallback;
+    }
+    if (typeof value !== 'string' && typeof value !== 'number') {
+        return fallback;
+    }
+    const parsed = typeof value === 'number' ? value : Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
 class AuditLogger {
     config;
     logFile;
     logs;
     monitoringSystem;
+    redactPatterns;
+    maxOutputBytes;
+    maxInMemoryEntries;
+    initialization;
     constructor(config) {
         this.config = config;
         this.logFile = this.resolveLogFilePath(config);
         this.logs = [];
+        this.redactPatterns = (0, redact_1.compileRedactPatterns)(config.redactPatterns);
+        this.maxOutputBytes = parseAuditLimit(config.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
+        this.maxInMemoryEntries = parseAuditLimit(config.maxInMemoryEntries, DEFAULT_MAX_IN_MEMORY_ENTRIES);
+        this.initialization = Promise.resolve();
         if (config.enabled) {
-            this.initializeLogging();
+            this.initialization = this.initializeLogging();
         }
         // Initialize monitoring if configured
         if (config.monitoring) {
@@ -60,10 +85,11 @@ class AuditLogger {
         }
     }
     async logCommand(options) {
+        await this.initialization;
         if (!this.config.enabled) {
             return;
         }
-        const logEntry = {
+        const logEntry = this.sanitizeEntry({
             id: (0, uuid_1.v4)(),
             timestamp: new Date(),
             sessionId: options.context.sessionId,
@@ -73,9 +99,9 @@ class AuditLogger {
             result: options.result,
             securityCheck: options.securityCheck,
             aiIntent: options.context.aiIntent,
-        };
+        });
         await this.writeLogEntry(logEntry);
-        this.logs.push(logEntry);
+        this.appendToMemory(logEntry);
         // Process monitoring alerts
         if (this.monitoringSystem) {
             await this.monitoringSystem.processLogEntry(logEntry);
@@ -83,6 +109,7 @@ class AuditLogger {
         await this.enforceRetention();
     }
     async logError(options) {
+        await this.initialization;
         if (!this.config.enabled) {
             return;
         }
@@ -103,7 +130,7 @@ class AuditLogger {
                 sideEffects: [],
             },
         };
-        const logEntry = {
+        const logEntry = this.sanitizeEntry({
             id: (0, uuid_1.v4)(),
             timestamp: new Date(),
             sessionId: options.context.sessionId,
@@ -116,11 +143,12 @@ class AuditLogger {
                 reason: 'Command execution failed',
                 riskLevel: 'medium',
             },
-        };
+        });
         await this.writeLogEntry(logEntry);
-        this.logs.push(logEntry);
+        this.appendToMemory(logEntry);
     }
     async log(options) {
+        await this.initialization;
         if (!this.config.enabled) {
             return;
         }
@@ -133,7 +161,7 @@ class AuditLogger {
             timestamp: new Date().toISOString(),
             level: normalizedLevel.toUpperCase(),
             message: options.message,
-            context: options.context,
+            context: (0, redact_1.redactSecrets)(options.context, this.redactPatterns),
             logger: options.logger,
             pid: process.pid,
             severity: index_1.LOG_LEVELS[normalizedLevel], // RFC 5424 numeric severity
@@ -171,7 +199,18 @@ class AuditLogger {
         return this.log({ level: 'debug', message, context, logger });
     }
     async queryLogs(filters) {
-        let filteredLogs = [...this.logs];
+        await this.initialization;
+        // The bounded array is only a hot cache. Reports and exports retain their
+        // original full-history semantics by consulting the durable audit file.
+        const logsById = new Map();
+        for (const log of await this.readAllExistingLogs()) {
+            logsById.set(log.id, log);
+        }
+        // Retain entries whose disk write failed, without duplicating persisted IDs.
+        for (const log of this.logs) {
+            logsById.set(log.id, log);
+        }
+        let filteredLogs = Array.from(logsById.values());
         if (filters.sessionId) {
             filteredLogs = filteredLogs.filter(log => log.sessionId === filters.sessionId);
         }
@@ -449,28 +488,141 @@ class AuditLogger {
         const tempDir = process.env.TMPDIR || process.env.TEMP || '/tmp';
         return path.join(tempDir, defaultFilename);
     }
+    /**
+     * Load only the tail into the hot cache so startup cost and resident memory do
+     * not grow with the lifetime of the log. Explicit queries read durable history.
+     */
     async loadExistingLogs() {
         try {
-            const logContent = await fs.readFile(this.logFile, 'utf-8');
-            const lines = logContent.split('\n').filter(line => line.trim());
+            const { size } = await fs.stat(this.logFile);
+            const start = Math.max(0, size - MAX_TAIL_BYTES);
+            const length = size - start;
+            let tail = '';
+            if (length > 0) {
+                const handle = await fs.open(this.logFile, 'r');
+                try {
+                    const buffer = Buffer.alloc(length);
+                    await handle.read(buffer, 0, length, start);
+                    tail = buffer.toString('utf-8');
+                }
+                finally {
+                    await handle.close();
+                }
+            }
+            const lines = tail.split('\n');
+            if (start > 0) {
+                lines.shift(); // first line is likely truncated mid-record
+            }
+            const entries = [];
             for (const line of lines) {
+                if (!line.trim())
+                    continue;
                 try {
                     const logData = JSON.parse(line);
                     if (logData.id && logData.command) {
                         // This is a command log entry
-                        this.logs.push({
+                        const entry = this.normalizeEntry({
                             ...logData,
                             timestamp: new Date(logData.timestamp),
                         });
+                        entries.push(entry);
                     }
                 }
                 catch {
                     // Skip invalid log lines
                 }
             }
+            this.logs.push(...entries.slice(-this.maxInMemoryEntries));
+            this.trimMemory();
         }
         catch {
             // No existing logs or file not readable
+        }
+    }
+    /** Bound output copies and redact secret-bearing values before storage or export. */
+    sanitizeEntry(entry) {
+        return this.normalizeEntry(entry);
+    }
+    normalizeEntry(entry) {
+        const normalized = {
+            ...entry,
+            timestamp: entry.timestamp instanceof Date ? entry.timestamp : new Date(entry.timestamp),
+            result: this.truncateOutput(entry.result),
+        };
+        return (0, redact_1.redactSecrets)(normalized, this.redactPatterns);
+    }
+    /**
+     * Audit entries record a bounded excerpt of stdout/stderr; the full output
+     * still lives in the context output cache.
+     */
+    truncateOutput(result) {
+        return {
+            stdout: this.truncate(result.stdout),
+            stderr: this.truncate(result.stderr),
+            exitCode: result.exitCode,
+            // Structured output and the descriptive arrays are derived copies of the
+            // streams. Omitting them from audit records prevents output from escaping
+            // the configured byte cap through another representation.
+            metadata: {
+                executionTime: result.metadata.executionTime,
+                commandType: result.metadata.commandType,
+                affectedResources: [],
+                warnings: [],
+                suggestions: [],
+                ...(result.metadata.commandIntent
+                    ? { commandIntent: result.metadata.commandIntent }
+                    : {}),
+            },
+            summary: {
+                success: result.summary.success,
+                mainResult: '',
+                sideEffects: [],
+            },
+        };
+    }
+    truncate(value) {
+        if (typeof value !== 'string' || Buffer.byteLength(value, 'utf-8') <= this.maxOutputBytes) {
+            return value;
+        }
+        const kept = Buffer.from(value, 'utf-8')
+            .subarray(0, this.maxOutputBytes)
+            .toString('utf-8');
+        return `${kept}\n... [truncated to ${this.maxOutputBytes} bytes]`;
+    }
+    appendToMemory(entry) {
+        this.logs.push(entry);
+        this.trimMemory();
+    }
+    trimMemory() {
+        if (this.logs.length > this.maxInMemoryEntries) {
+            this.logs.splice(0, this.logs.length - this.maxInMemoryEntries);
+        }
+    }
+    /** Read and sanitize every durable command record for explicit queries. */
+    async readAllExistingLogs() {
+        try {
+            const logContent = await fs.readFile(this.logFile, 'utf-8');
+            const entries = [];
+            for (const line of logContent.split('\n')) {
+                if (!line.trim())
+                    continue;
+                try {
+                    const logData = JSON.parse(line);
+                    if (logData.id && logData.command && logData.result) {
+                        entries.push(this.normalizeEntry({
+                            ...logData,
+                            timestamp: new Date(logData.timestamp),
+                        }));
+                    }
+                }
+                catch {
+                    // Skip invalid or non-command audit lines.
+                }
+            }
+            return entries;
+        }
+        catch {
+            return [];
         }
     }
     async writeLogEntry(entry) {

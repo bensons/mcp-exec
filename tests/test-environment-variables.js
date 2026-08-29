@@ -12,6 +12,15 @@ const { ShellExecutor } = require('../dist/core/executor');
 
 const SERVER_PATH = path.resolve(__dirname, '..', 'dist', 'index.js');
 
+function findSessionFile(directory) {
+  const matches = fs.readdirSync(directory)
+    .filter((name) => /^session-[a-f0-9]{16}\.json$/.test(name));
+  if (matches.length !== 1) {
+    throw new Error(`Expected one scoped session file in ${directory}, found: ${matches.join(', ')}`);
+  }
+  return path.join(directory, matches[0]);
+}
+
 /**
  * Start an mcp-exec server in a throwaway directory and return a JSON-RPC client.
  * Everything the server writes (audit log, session file) is confined to that
@@ -123,18 +132,22 @@ async function testContextTracking() {
 
     // 1. A one-off `env` override applies to its own command only.
     const withOverride = await client.call('execute_command', {
-      command: "env | grep '^MCP_TEST_CI='",
+      command: "printf 'MCP_TEST_CI=%s' \"$MCP_TEST_CI\"",
       env: { MCP_TEST_CI: '1' },
     });
-    check('override reaches the command it was passed to', withOverride.includes('MCP_TEST_CI=1'));
+    check(
+      'override reaches the command it was passed to',
+      withOverride.includes('MCP_TEST_CI=1'),
+      withOverride
+    );
 
     const withoutOverride = await client.call('execute_command', {
-      command: "env | grep '^MCP_TEST_CI='",
+      command: "printf 'MCP_TEST_CI=%s' \"${MCP_TEST_CI-unset}\"",
     });
     check(
       'override does not leak into the next command',
-      !withoutOverride.includes('MCP_TEST_CI=1'),
-      'MCP_TEST_CI was still set'
+      withoutOverride.includes('MCP_TEST_CI=unset'),
+      withoutOverride
     );
 
     await client.call('execute_command', {
@@ -202,13 +215,13 @@ async function testContextTracking() {
     });
     await client.call('execute_command', {
       command: 'export MCP_TEST_MANUAL_SH=from-manual-sh',
-      shell: false,
+      shell: '/bin/sh',
     });
     const crossShell = await client.call('execute_command', {
       command: "printf 'bash=%s manual=%s' \"$MCP_TEST_BASH\" \"$MCP_TEST_MANUAL_SH\"",
     });
     check(
-      'state capture works with explicit Bash and manual /bin/sh execution',
+      'state capture works with explicit Bash and sh execution',
       crossShell.includes('bash=from-bash manual=from-manual-sh'),
       crossShell
     );
@@ -307,7 +320,7 @@ async function testNavigationPersistence() {
     await first.stop(false);
   }
 
-  const sessionFile = path.join(tmpDir, '.mcp-exec-session.json');
+  const sessionFile = findSessionFile(tmpDir);
   const saved = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
   saved.previousDirectory = initialDirectory;
   saved.directoryStack = [initialDirectory];
@@ -323,7 +336,9 @@ async function testNavigationPersistence() {
 
   const reSaved = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
   const failures = [];
-  if (reSaved.previousDirectory !== initialDirectory) failures.push('previousDirectory');
+  if (reSaved.previousDirectory !== initialDirectory) {
+    failures.push(`previousDirectory (expected ${initialDirectory}, got ${reSaved.previousDirectory})`);
+  }
   if (JSON.stringify(reSaved.directoryStack) !== JSON.stringify([initialDirectory])) {
     failures.push('directoryStack');
   }
