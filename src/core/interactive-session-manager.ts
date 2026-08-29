@@ -24,6 +24,9 @@ export interface SendInputOptions {
   addNewline?: boolean;
 }
 
+/** How long a finished/errored session is kept around so its output can still be drained. */
+export const FINISHED_SESSION_GRACE_MS = 5 * 60 * 1000;
+
 export class InteractiveSessionManager {
   private sessions: Map<string, InteractiveSession>;
   private config: ServerConfig['sessions'];
@@ -39,6 +42,7 @@ export class InteractiveSessionManager {
     this.cleanupInterval = setInterval(() => {
       this.cleanupExpiredSessions();
     }, 60000); // Check every minute
+    this.cleanupInterval.unref();
   }
 
   async startSession(options: StartSessionOptions): Promise<string> {
@@ -54,8 +58,8 @@ export class InteractiveSessionManager {
       await this.commandGuard(buildFullCommand(options.command, options.args), cwd, environment);
     }
 
-    // Check session limit
-    if (this.sessions.size >= this.config.maxInteractiveSessions) {
+    // Check session limit - only sessions that are still running occupy a slot
+    if (this.countRunningSessions() >= this.config.maxInteractiveSessions) {
       throw new Error(`Maximum number of interactive sessions (${this.config.maxInteractiveSessions}) reached`);
     }
 
@@ -173,6 +177,12 @@ export class InteractiveSessionManager {
     session.outputBuffer = [];
     session.errorBuffer = [];
 
+    // The process is gone and its output has now been handed over: drop the session
+    // so it stops occupying a slot and holding on to its buffers.
+    if (session.status !== 'running') {
+      this.sessions.delete(sessionId);
+    }
+
     return {
       sessionId,
       stdout,
@@ -222,6 +232,16 @@ export class InteractiveSessionManager {
 
   getSession(sessionId: string): InteractiveSession | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  countRunningSessions(): number {
+    let count = 0;
+    for (const session of this.sessions.values()) {
+      if (session.status === 'running') {
+        count++;
+      }
+    }
+    return count;
   }
 
   private setupProcessHandlers(session: InteractiveSession): void {
@@ -280,8 +300,12 @@ export class InteractiveSessionManager {
 
     for (const [sessionId, session] of this.sessions.entries()) {
       const timeSinceActivity = now.getTime() - session.lastActivity.getTime();
-      
-      if (timeSinceActivity > this.config.sessionTimeout) {
+      // Finished sessions are reaped after a short grace period, independent of sessionTimeout
+      const maxIdle = session.status === 'running'
+        ? this.config.sessionTimeout
+        : Math.min(this.config.sessionTimeout, FINISHED_SESSION_GRACE_MS);
+
+      if (timeSinceActivity > maxIdle) {
         expiredSessions.push(sessionId);
       }
     }

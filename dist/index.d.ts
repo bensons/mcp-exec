@@ -32,6 +32,11 @@ declare class MCPShellServer {
      */
     private getEffectiveCwd;
     private assertCommandAllowed;
+    /**
+     * Create a TerminalSessionManager wired so that any session removal (kill, terminate,
+     * or the inactivity/finished sweep) also drops the session from the terminal viewer service.
+     */
+    private createTerminalSessionManager;
     private setupHandlers;
     start(): Promise<void>;
     private setupConnectionMonitoring;

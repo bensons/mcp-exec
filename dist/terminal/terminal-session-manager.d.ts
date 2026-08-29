@@ -20,7 +20,13 @@ export declare class TerminalSessionManager {
     private cleanupInterval;
     private fallbackSessionManager;
     private commandGuard?;
+    private sessionRemovedHandler?;
     constructor(config: ServerConfig['sessions'], terminalViewerConfig: ServerConfig['terminalViewer'], commandGuard?: CommandGuard);
+    /**
+     * Register a callback invoked whenever a terminal session is removed from this manager
+     * (kill, terminate or sweep). Used to keep the terminal viewer service in sync.
+     */
+    onSessionRemoved(handler: (sessionId: string) => void): void;
     startSession(options: TerminalStartSessionOptions): Promise<string>;
     private createPtyProcess;
     private getShell;
@@ -29,6 +35,7 @@ export declare class TerminalSessionManager {
     private extractAnsiCodes;
     sendInput(options: SendInputOptions): Promise<void>;
     killSession(sessionId: string): Promise<void>;
+    countRunningSessions(): number;
     getSession(sessionId: string): TerminalSession | undefined;
     getSessionInfo(sessionId: string): any;
     listSessions(): Array<{
