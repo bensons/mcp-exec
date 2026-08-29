@@ -15,6 +15,7 @@ import { AuditLogger } from '../audit/logger';
 import { OutputProcessor, RawCommandResult } from '../utils/output-processor';
 import { IntentTracker } from '../utils/intent-tracker';
 import { InteractiveSessionManager, StartSessionOptions, SendInputOptions } from './interactive-session-manager';
+import { resolveShellOption } from './shell-option';
 
 /** How long a timed-out process gets to handle SIGTERM before SIGKILL. */
 const SIGKILL_GRACE_MS = 2000;
@@ -191,6 +192,21 @@ export class ShellExecutor {
       // Analyze command intent
       const intent = this.intentTracker.analyzeIntent(fullCommand, options.aiContext);
 
+      const shell = resolveShellOption(options.shell, {
+        cwd: workingDirectory,
+        env: environment,
+      });
+
+      if (typeof shell === 'string') {
+        await assertCommandAllowed(this.securityManager, shell, this.auditLogger, {
+          source: 'execute_command_shell',
+        }, {
+          skipConfirmation: policyOptions.skipConfirmation,
+          cwd: workingDirectory,
+          env: environment,
+        });
+      }
+
       // Execute command
       await this.auditLogger.debug('Starting command execution', {
         commandId,
@@ -204,7 +220,7 @@ export class ShellExecutor {
         {
           cwd: workingDirectory,
           env: environment,
-          shell: options.shell !== undefined ? options.shell : true,
+          shell,
           timeout: options.timeout || this.config.security.timeout,
         }
       );
@@ -324,27 +340,9 @@ export class ShellExecutor {
     return new Promise((resolve, reject) => {
       const { timeout, ...spawnOptions } = options;
 
-      // Determine execution method based on shell option
-      let execCommand: string;
-      let execArgs: string[];
-
-      if (spawnOptions.shell) {
-        // When shell=true, let Node.js handle the shell execution
-        execCommand = command;
-        execArgs = args;
-      } else {
-        // When shell=false, manually construct shell command
-        if (process.platform === 'win32') {
-          execCommand = 'cmd.exe';
-          execArgs = ['/c', command, ...args];
-        } else {
-          execCommand = '/bin/sh';
-          const fullCommand = args.length > 0 ? `${command} ${args.join(' ')}` : command;
-          execArgs = ['-c', fullCommand];
-        }
-      }
-
-      const child = spawn(execCommand, execArgs, {
+      // spawnOptions.shell is already resolved: true/string spawns through a shell,
+      // false spawns the command directly with args kept separate.
+      const child = spawn(command, args, {
         ...spawnOptions,
         stdio: ['pipe', 'pipe', 'pipe'],
         // Own process group so a timeout can kill the whole tree, not just the

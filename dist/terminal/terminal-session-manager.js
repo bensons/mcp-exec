@@ -43,6 +43,7 @@ const uuid_1 = require("uuid");
 const buffer_1 = require("./buffer");
 const interactive_session_manager_1 = require("../core/interactive-session-manager");
 const command_policy_1 = require("../security/command-policy");
+const shell_option_1 = require("../core/shell-option");
 class TerminalSessionManager {
     sessions;
     config;
@@ -114,10 +115,24 @@ class TerminalSessionManager {
         if (this.countRunningSessions() >= this.terminalViewerConfig.maxSessions) {
             throw new Error(`Maximum number of terminal sessions (${this.terminalViewerConfig.maxSessions}) reached`);
         }
+        const shell = (0, shell_option_1.resolveShellOption)(options.shell, {
+            cwd,
+            env: environment,
+        });
+        if (this.commandGuard && typeof shell === 'string') {
+            await this.commandGuard(shell, {
+                skipConfirmation: options.skipConfirmation,
+                cwd,
+                env: environment,
+            });
+        }
+        if (shell === false && !options.command) {
+            throw new Error('shell:false requires a command for terminal-viewer execution');
+        }
         const sessionId = (0, uuid_1.v4)();
         const startTime = new Date();
         // Create PTY process
-        const ptyProcess = this.createPtyProcess(normalizedOptions);
+        const ptyProcess = this.createPtyProcess(normalizedOptions, shell, cwd, environment);
         // Create terminal session
         const session = {
             sessionId,
@@ -147,37 +162,35 @@ class TerminalSessionManager {
         console.error(`[DEBUG] Terminal session ${sessionId} created and stored, total sessions: ${this.sessions.size}`);
         return sessionId;
     }
-    createPtyProcess(options) {
-        const shell = this.getShell();
+    createPtyProcess(options, shellOption, workingDirectory, environment) {
+        const executable = shellOption === false
+            ? options.command
+            : typeof shellOption === 'string'
+                ? shellOption
+                : this.getShell();
+        const executableArgs = shellOption === false ? options.args || [] : [];
         const size = options.terminalSize || { cols: 80, rows: 24 };
-        console.error(`[DEBUG] Creating PTY with shell: ${shell}`);
-        // Prepare environment
-        const environment = {
-            ...process.env,
-            ...options.env,
-            TERM: 'xterm-256color',
-            COLORTERM: 'truecolor',
-        };
+        console.error(`[DEBUG] Creating PTY with executable: ${executable}`);
         try {
             // Create PTY process
-            const ptyProcess = pty.spawn(shell, [], {
+            const ptyProcess = pty.spawn(executable, executableArgs, {
                 name: 'xterm-color',
                 cols: size.cols,
                 rows: size.rows,
-                cwd: options.cwd || process.cwd(),
+                cwd: workingDirectory,
                 env: environment,
                 encoding: 'utf8',
             });
             console.error(`[DEBUG] PTY process created successfully with PID: ${ptyProcess.pid}`);
             // Send initial command if provided
-            if (options.command) {
+            if (options.command && shellOption !== false) {
                 const fullCommand = options.args && options.args.length > 0
                     ? `${options.command} ${options.args.join(' ')}`
                     : options.command;
                 console.error(`[DEBUG] Sending initial command to PTY: "${fullCommand}"`);
                 ptyProcess.write(fullCommand + '\r');
             }
-            else {
+            else if (!options.command) {
                 console.error(`[DEBUG] No initial command provided, PTY will start with default shell`);
             }
             return ptyProcess;

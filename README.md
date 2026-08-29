@@ -157,6 +157,18 @@ The server provides comprehensive MCP tools organized into categories:
 - **`execute_command`** - Execute one-shot shell commands with full security validation and enhanced output formatting
 - **`confirm_command`** - Interactive confirmation system for dangerous operations
 
+Both `execute_command` and `start_interactive_session` accept a `shell` option:
+
+| Value | Behavior |
+| --- | --- |
+| `true` (default) | Run the command through the platform shell (`/bin/sh`, `cmd.exe`) |
+| `false` | Spawn the command directly - no shell, so `args` are passed verbatim and entries containing spaces stay a single argument |
+| a string, e.g. `"/bin/zsh"` | Run the command through that shell. Absolute executable paths may contain spaces; bare names must contain no whitespace or shell metacharacters and are resolved using the command's `env.PATH` and `cwd`. The resolved executable is checked by the command security policy |
+
+When `execute_command` combines `shell: false` with `enableTerminalViewer: true`,
+the command is spawned directly under the PTY. Its arguments remain discrete and
+the terminal session ends when that process exits.
+
 ### Interactive Session Tools
 
 - **`start_interactive_session`** - Start new interactive shell sessions for persistent processes
