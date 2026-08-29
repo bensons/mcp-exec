@@ -4,22 +4,27 @@
  * Regression tests: session tools must honor the same command policy as execute_command.
  */
 
+const assert = require('assert');
 const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 class McpClient {
-  constructor() {
+  constructor(extraEnv = {}) {
     this.server = null;
     this.messageId = 1;
     this.responses = new Map();
     this.buffer = '';
+    this.stderr = '';
     this.serverPath = path.resolve(__dirname, '..', 'dist', 'index.js');
+    this.extraEnv = extraEnv;
   }
 
   async start() {
     this.server = spawn('node', [this.serverPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, NODE_ENV: 'test' },
+      env: { ...process.env, ...this.extraEnv, NODE_ENV: 'test' },
     });
 
     this.server.stdout.on('data', (data) => {
@@ -39,8 +44,9 @@ class McpClient {
       }
     });
 
-    this.server.stderr.on('data', () => {
-      // Session managers log debug lines to stderr
+    this.server.stderr.on('data', (data) => {
+      // Preserve diagnostics without mixing them into JSON-RPC stdout.
+      this.stderr += data.toString();
     });
 
     await this.call('initialize', {
@@ -76,7 +82,7 @@ class McpClient {
           return;
         }
         if (Date.now() - started > timeout) {
-          reject(new Error(`Timeout waiting for MCP response ${id}`));
+          reject(new Error(`Timeout waiting for MCP response ${id}\n${this.stderr.slice(-2000)}`));
           return;
         }
         setTimeout(check, 50);
@@ -110,6 +116,8 @@ function extractSessionId(text) {
 
 async function run() {
   const client = new McpClient();
+  let directoryClient;
+  let fixtureRoot;
   let failures = 0;
 
   try {
@@ -150,11 +158,12 @@ async function run() {
     console.log('📝 send_to_session rejects blocked commands on a live session');
     {
       const started = await client.callTool('start_interactive_session', {
-        command: 'cat',
+        command: process.platform === 'win32' ? 'cmd.exe' : 'sh',
+        cwd: process.cwd(),
         aiContext: 'Benign session used to test send_to_session policy',
       });
       if (started.text.includes('blocked by security policy')) {
-        throw new Error(`starting cat should be allowed, got:\n${started.text}`);
+        throw new Error(`starting shell should be allowed, got:\n${started.text}`);
       }
       const sessionId = extractSessionId(started.text);
       const sent = await client.callTool('send_to_session', {
@@ -184,12 +193,106 @@ async function run() {
       console.log('✅ execute_command allows safe commands');
     }
 
+    console.log('📝 regular sessions retain and update their own validated cwd');
+    fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-session-policy-'));
+    const initialCwd = path.join(fixtureRoot, 'x');
+    const nextCwd = path.join(fixtureRoot, 'y', 'sub');
+    const homeOutsideAllowlist = path.join(fixtureRoot, 'home');
+    fs.mkdirSync(initialCwd, { recursive: true });
+    fs.mkdirSync(nextCwd, { recursive: true });
+    fs.mkdirSync(homeOutsideAllowlist, { recursive: true });
+    fs.writeFileSync(path.join(initialCwd, 'inside.txt'), 'inside');
+
+    directoryClient = new McpClient({
+      MCP_EXEC_ALLOWED_DIRECTORIES: `${initialCwd},${nextCwd}`,
+      HOME: homeOutsideAllowlist,
+    });
+    await directoryClient.start();
+
+    const started = await directoryClient.callTool('start_interactive_session', {
+      command: process.platform === 'win32' ? 'cmd.exe' : 'sh',
+      cwd: initialCwd,
+      aiContext: 'Allowed-directory session cwd regression',
+    });
+    if (started.text.includes('blocked by security policy')) {
+      throw new Error(`starting allowlisted shell should succeed, got:\n${started.text}`);
+    }
+    const sessionId = extractSessionId(started.text);
+
+    // Move global context away from the session. The session-scoped command is
+    // valid only relative to its own cwd and must not hit the old outer guard.
+    const contextChange = await directoryClient.callTool('execute_command', {
+      command: 'cd',
+      args: [nextCwd],
+      cwd: initialCwd,
+    });
+    if (contextChange.text.includes('blocked by security policy')) {
+      throw new Error(`allowlisted context change should succeed, got:\n${contextChange.text}`);
+    }
+
+    const terminalStarted = await directoryClient.callTool('start_terminal_session', {
+      command: 'pwd',
+      aiContext: 'Context cwd must be passed through to the PTY',
+    });
+    if (terminalStarted.text.includes('blocked by security policy')) {
+      throw new Error(`terminal session in persisted context cwd should succeed, got:\n${terminalStarted.text}`);
+    }
+    const terminalSessionId = extractSessionId(terminalStarted.text);
+    const listed = await directoryClient.callTool('list_sessions', {});
+    const listedPayload = JSON.parse(listed.text);
+    const terminalInfo = listedPayload.sessions.find(session => session.sessionId === terminalSessionId);
+    if (!terminalInfo) {
+      throw new Error(`terminal session ${terminalSessionId} was absent from list_sessions`);
+    }
+    assert.strictEqual(
+      fs.realpathSync(terminalInfo.cwd),
+      fs.realpathSync(nextCwd),
+      'terminal session should start in the validated persisted context cwd'
+    );
+    await directoryClient.callTool('kill_session', { sessionId: terminalSessionId }).catch(() => {});
+
+    const sessionScoped = await directoryClient.callTool('send_to_session', {
+      sessionId,
+      input: 'cat ../x/inside.txt',
+    });
+    if (sessionScoped.text.includes('blocked by security policy')) {
+      throw new Error(`regular session should validate against its own cwd, got:\n${sessionScoped.text}`);
+    }
+
+    const moved = await directoryClient.callTool('send_to_session', {
+      sessionId,
+      input: `cd ${nextCwd}`,
+    });
+    if (moved.text.includes('blocked by security policy')) {
+      throw new Error(`allowlisted session cd should succeed, got:\n${moved.text}`);
+    }
+
+    // This operand was valid against the startup cwd, but escapes from the
+    // shell's new cwd. A stale-cwd guard would incorrectly allow it.
+    const staleCwdBypass = await directoryClient.callTool('send_to_session', {
+      sessionId,
+      input: 'cat ../x/inside.txt',
+    });
+    assertBlocked(staleCwdBypass.text, 'send_to_session after cd');
+
+    const bareCd = await directoryClient.callTool('send_to_session', {
+      sessionId,
+      input: 'cd',
+    });
+    assertBlocked(bareCd.text, 'bare cd to outside HOME');
+    await directoryClient.callTool('kill_session', { sessionId }).catch(() => {});
+    console.log('✅ regular session cwd is scoped and updated');
+
     console.log('\n🎉 Session command-policy regression tests passed');
   } catch (error) {
     failures += 1;
     console.error('💥 Session command-policy tests failed:', error.message);
   } finally {
     client.stop();
+    directoryClient?.stop();
+    if (fixtureRoot) {
+      fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   }
 
   if (failures > 0) {

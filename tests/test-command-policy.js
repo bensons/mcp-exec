@@ -5,8 +5,10 @@
  */
 
 const assert = require('assert');
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { SecurityManager, isInside } = require('../dist/security/manager');
 const { assertCommandAllowed, buildFullCommand } = require('../dist/security/command-policy');
 
@@ -42,7 +44,7 @@ async function expectBlocked(promise, label) {
   }
 }
 
-function managerWith(overrides) {
+function managerWith(overrides, configurationBase) {
   return new SecurityManager({
     level: 'permissive',
     confirmDangerous: false,
@@ -50,7 +52,7 @@ function managerWith(overrides) {
     blockedCommands: [],
     timeout: 300000,
     ...overrides,
-  });
+  }, undefined, configurationBase);
 }
 
 async function assertAllowed(manager, command, options, label) {
@@ -89,9 +91,9 @@ async function testDirectoryAccess() {
 
   console.log('📝 ~ is expanded to the home directory');
   const homeOnly = managerWith({ allowedDirectories: [os.homedir()] });
-  await assertAllowed(homeOnly, 'cat ~/x', { cwd: '/' }, 'cat ~/x');
-  await assertDenied(homeOnly, 'cat ~/../other-home/x', { cwd: '/' }, 'cat ~/../other-home/x');
-  await assertAllowed(managerWith({ allowedDirectories: ['~'] }), 'cat ~/x', { cwd: '/' }, '~ allowlist entry');
+  await assertAllowed(homeOnly, 'cat ~/x', { cwd: os.homedir() }, 'cat ~/x');
+  await assertDenied(homeOnly, 'cat ~/../other-home/x', { cwd: os.homedir() }, 'cat ~/../other-home/x');
+  await assertAllowed(managerWith({ allowedDirectories: ['~'] }), 'cat ~/x', { cwd: os.homedir() }, '~ allowlist entry');
   console.log('✅ ~ expansion');
 
   console.log('📝 quoted and =-attached paths are extracted');
@@ -101,10 +103,16 @@ async function testDirectoryAccess() {
   console.log('✅ token extraction');
 
   console.log('📝 non-path tokens do not trip the allowlist');
-  await assertAllowed(allowlisted, 'echo hello.world', { cwd: '/var/tmp' }, 'bare word with a dot');
-  await assertAllowed(allowlisted, 'node --version', { cwd: '/var/tmp' }, 'flag');
-  await assertAllowed(allowlisted, 'curl https://example.com', { cwd: '/var/tmp' }, 'url');
+  await assertAllowed(allowlisted, 'echo hello.world', { cwd: '/home/user' }, 'bare word with a dot');
+  await assertAllowed(allowlisted, 'node --version', { cwd: '/home/user' }, 'flag');
+  await assertAllowed(allowlisted, 'curl https://example.com', { cwd: '/home/user' }, 'url');
   console.log('✅ non-path tokens');
+
+  console.log('📝 the effective cwd itself must be allowlisted');
+  await assertDenied(allowlisted, 'cat passwd', { cwd: '/etc' }, 'bare operand from outside cwd');
+  await assertDenied(allowlisted, 'echo harmless', { cwd: '/var/tmp' }, 'command cwd outside allowlist');
+  await assertDenied(allowlisted, '', { cwd: '/var/tmp' }, 'empty command outside allowlist');
+  console.log('✅ effective cwd validation');
 
   console.log('📝 strict mode blocks system directories on path boundaries');
   const strict = managerWith({ level: 'strict' });
@@ -112,7 +120,8 @@ async function testDirectoryAccess() {
   await assertDenied(strict, 'ls /bin/ls', { cwd: '/home/user' }, 'ls /bin/ls');
   await assertAllowed(strict, 'ls /binaries', { cwd: '/home/user' }, 'ls /binaries');
   await assertAllowed(strict, 'ls /etcetera', { cwd: '/home/user' }, 'ls /etcetera');
-  await assertDenied(strict, 'ls ../../etc', { cwd: '/home/user' }, 'relative path into /etc');
+  const strictBase = path.join(path.dirname(fs.realpathSync('/etc')), 'tmp');
+  await assertDenied(strict, 'ls ../etc', { cwd: strictBase }, 'relative path into /etc');
   console.log('✅ strict system directories');
 
   console.log('📝 an empty allowlist means no directory restriction');
@@ -125,6 +134,99 @@ async function testDirectoryAccess() {
   await assertAllowed(cwdOnly, 'cat file.txt', { cwd: path.join(process.cwd(), 'tests') }, 'inside cwd');
   await assertDenied(cwdOnly, 'cat ./x', { cwd: os.tmpdir() }, 'relative path outside cwd');
   console.log('✅ cwd base');
+
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-policy-'));
+  try {
+    const allowedRoot = path.join(fixtureRoot, 'allowed');
+    const outsideRoot = path.join(fixtureRoot, 'outside');
+    fs.mkdirSync(allowedRoot);
+    fs.mkdirSync(outsideRoot);
+    fs.writeFileSync(path.join(allowedRoot, 'inside.txt'), 'inside');
+    fs.writeFileSync(path.join(outsideRoot, 'secret.txt'), 'secret');
+    const fixtureManager = managerWith({ allowedDirectories: [allowedRoot] });
+
+    console.log('📝 local file URLs are checked as filesystem paths');
+    await assertAllowed(
+      fixtureManager,
+      `curl ${pathToFileURL(path.join(allowedRoot, 'inside.txt')).href}`,
+      { cwd: allowedRoot },
+      'allowed file URL'
+    );
+    await assertDenied(
+      fixtureManager,
+      `curl ${pathToFileURL(path.join(outsideRoot, 'secret.txt')).href}`,
+      { cwd: allowedRoot },
+      'outside file URL'
+    );
+    await assertDenied(fixtureManager, 'curl file://remote-host/share/file', { cwd: allowedRoot }, 'unsupported file URL');
+    console.log('✅ local file URLs');
+
+    console.log('📝 attached shell redirections are split and checked');
+    await assertAllowed(fixtureManager, 'cat<inside.txt', { cwd: allowedRoot }, 'attached allowed input redirect');
+    await assertDenied(
+      fixtureManager,
+      `cat<${path.join(outsideRoot, 'secret.txt')}`,
+      { cwd: allowedRoot },
+      'attached outside input redirect'
+    );
+    await assertDenied(
+      fixtureManager,
+      `echo nope 2>${path.join(outsideRoot, 'error.log')}`,
+      { cwd: allowedRoot },
+      'attached outside output redirect'
+    );
+    console.log('✅ attached redirections');
+
+    console.log('📝 known shell expansions are resolved and ambiguous expansions fail closed');
+    await assertAllowed(
+      fixtureManager,
+      'cat $HOME/inside.txt',
+      { cwd: allowedRoot, env: { HOME: allowedRoot } },
+      'allowed HOME expansion'
+    );
+    await assertDenied(
+      fixtureManager,
+      'cat ${HOME}/secret.txt',
+      { cwd: allowedRoot, env: { HOME: outsideRoot } },
+      'outside HOME expansion'
+    );
+    await assertDenied(fixtureManager, 'cat $(pwd)/secret.txt', { cwd: allowedRoot }, 'command substitution');
+    await assertDenied(fixtureManager, 'cat "unterminated', { cwd: allowedRoot }, 'unterminated quote');
+    await assertDenied(fixtureManager, 'cat ../*', { cwd: allowedRoot }, 'wildcard path');
+    console.log('✅ shell expansion handling');
+
+    console.log('📝 relative allowlist entries use their configuration base, not command cwd');
+    const relativeManager = managerWith({ allowedDirectories: ['.'] }, allowedRoot);
+    await assertAllowed(relativeManager, 'cat inside.txt', { cwd: allowedRoot }, 'relative configured root');
+    await assertDenied(relativeManager, 'cat secret.txt', { cwd: outsideRoot }, 'caller cwd cannot move configured root');
+    console.log('✅ stable relative allowlist base');
+
+    console.log('📝 deterministic cd changes report and validate the next cwd');
+    const child = path.join(allowedRoot, 'child');
+    fs.mkdirSync(child);
+    const cdResult = await fixtureManager.validateCommand('cd child', { cwd: allowedRoot });
+    assert.ok(cdResult.allowed, cdResult.reason);
+    assert.strictEqual(cdResult.resultingCwd, fs.realpathSync(child));
+    await assertDenied(fixtureManager, `cd ${outsideRoot}`, { cwd: allowedRoot }, 'cd outside allowlist');
+    await assertDenied(fixtureManager, 'cd child && cat file', { cwd: allowedRoot }, 'compound cd');
+    await assertDenied(
+      fixtureManager,
+      'cd child',
+      { cwd: allowedRoot, env: { CDPATH: outsideRoot } },
+      'relative cd with CDPATH'
+    );
+    console.log('✅ stateful cwd policy');
+
+    if (process.platform !== 'win32') {
+      console.log('📝 symlinks cannot escape the allowlist');
+      const link = path.join(allowedRoot, 'outside-link');
+      fs.symlinkSync(outsideRoot, link);
+      await assertDenied(fixtureManager, 'cat ./outside-link/secret.txt', { cwd: allowedRoot }, 'symlink escape');
+      console.log('✅ symlink containment');
+    }
+  } finally {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 }
 
 async function run() {

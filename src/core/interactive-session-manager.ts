@@ -3,6 +3,7 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
+import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { InteractiveSession, SessionOutput, SessionInfo, ServerConfig } from '../types/index';
 import { CommandGuard, buildFullCommand } from '../security/command-policy';
@@ -40,8 +41,16 @@ export class InteractiveSessionManager {
   }
 
   async startSession(options: StartSessionOptions): Promise<string> {
+    const cwd = path.resolve(options.cwd || process.cwd());
+    const environment: Record<string, string> = {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([_, value]) => value !== undefined)
+      ) as Record<string, string>,
+      ...options.env,
+    };
+
     if (this.commandGuard) {
-      await this.commandGuard(buildFullCommand(options.command, options.args), options.cwd);
+      await this.commandGuard(buildFullCommand(options.command, options.args), cwd, environment);
     }
 
     // Check session limit
@@ -75,15 +84,8 @@ export class InteractiveSessionManager {
     }
 
     // Spawn the process
-    const environment: Record<string, string> = {
-      ...Object.fromEntries(
-        Object.entries(process.env).filter(([_, value]) => value !== undefined)
-      ) as Record<string, string>,
-      ...options.env,
-    };
-
     const childProcess = spawn(execCommand, execArgs, {
-      cwd: options.cwd || process.cwd(),
+      cwd,
       env: environment,
       shell: options.shell !== false,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -97,7 +99,7 @@ export class InteractiveSessionManager {
       process: childProcess,
       startTime,
       lastActivity: startTime,
-      cwd: options.cwd || process.cwd(),
+      cwd,
       env: environment,
       status: 'running',
       outputBuffer: [],
@@ -115,11 +117,6 @@ export class InteractiveSessionManager {
   }
 
   async sendInput(options: SendInputOptions): Promise<void> {
-    if (this.commandGuard) {
-      // Validate input against the session's own working directory.
-      await this.commandGuard(options.input, this.sessions.get(options.sessionId)?.cwd);
-    }
-
     const session = this.sessions.get(options.sessionId);
     if (!session) {
       throw new Error(`Session ${options.sessionId} not found`);
@@ -129,9 +126,17 @@ export class InteractiveSessionManager {
       throw new Error(`Session ${options.sessionId} is not running (status: ${session.status})`);
     }
 
+    const resultingCwd = this.commandGuard
+      ? await this.commandGuard(options.input, session.cwd, session.env)
+      : undefined;
+
     // Send input to the process
     const input = options.addNewline !== false ? options.input + '\n' : options.input;
     session.process.stdin?.write(input);
+    if (resultingCwd && options.addNewline !== false) {
+      session.cwd = resultingCwd;
+      session.env.PWD = resultingCwd;
+    }
     session.lastActivity = new Date();
   }
 

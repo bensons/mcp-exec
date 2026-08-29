@@ -2,9 +2,43 @@
 /**
  * Core shell command executor with cross-platform support
  */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ShellExecutor = void 0;
 const child_process_1 = require("child_process");
+const path = __importStar(require("path"));
 const uuid_1 = require("uuid");
 const command_policy_1 = require("../security/command-policy");
 const output_processor_1 = require("../utils/output-processor");
@@ -25,9 +59,19 @@ class ShellExecutor {
         this.config = config;
         this.outputProcessor = new output_processor_1.OutputProcessor(config.output);
         this.intentTracker = new intent_tracker_1.IntentTracker();
-        this.sessionManager = new interactive_session_manager_1.InteractiveSessionManager(config.sessions, (command) => (0, command_policy_1.assertCommandAllowed)(this.securityManager, command, this.auditLogger, {
-            source: 'interactive-session',
-        }));
+        this.sessionManager = new interactive_session_manager_1.InteractiveSessionManager(config.sessions, async (command, cwd, env) => (0, command_policy_1.assertCommandAllowed)(this.securityManager, command, this.auditLogger, { source: 'interactive-session' }, await this.getEffectiveCwd(cwd), env));
+    }
+    /**
+     * Effective working directory a command will run in: explicit cwd, else the
+     * session context directory, else the server's cwd. Relative and `~` paths in
+     * the command are validated against this, not against process.cwd().
+     */
+    async getEffectiveCwd(cwd) {
+        if (cwd) {
+            return path.resolve(cwd);
+        }
+        const context = await this.contextManager.getCurrentContext();
+        return path.resolve(context.currentDirectory || process.cwd());
     }
     async executeCommand(options) {
         const commandId = (0, uuid_1.v4)();
@@ -52,7 +96,20 @@ class ShellExecutor {
                 commandId,
                 fullCommand
             }, 'security-validator');
-            const securityCheck = await this.securityManager.validateCommand(fullCommand);
+            // Determine the working directory up front: directory checks resolve
+            // relative and `~` paths against it.
+            const context = await this.contextManager.getCurrentContext();
+            const workingDirectory = path.resolve(options.cwd || context.currentDirectory || process.cwd());
+            // Validate expansions against the same merged environment supplied to the shell.
+            const environment = {
+                ...process.env,
+                ...context.environmentVariables,
+                ...options.env,
+            };
+            const securityCheck = await this.securityManager.validateCommand(fullCommand, {
+                cwd: workingDirectory,
+                env: environment,
+            });
             if (!securityCheck.allowed) {
                 await this.auditLogger.warning('Command blocked by security policy', {
                     commandId,
@@ -68,16 +125,6 @@ class ShellExecutor {
             }, 'security-validator');
             // Analyze command intent
             const intent = this.intentTracker.analyzeIntent(fullCommand, options.aiContext);
-            // Get current context
-            const context = await this.contextManager.getCurrentContext();
-            // Determine working directory
-            const workingDirectory = options.cwd || context.currentDirectory || process.cwd();
-            // Merge environment variables
-            const environment = {
-                ...process.env,
-                ...context.environmentVariables,
-                ...options.env,
-            };
             // Execute command
             await this.auditLogger.debug('Starting command execution', {
                 commandId,
@@ -252,8 +299,15 @@ class ShellExecutor {
     }
     // Public method to start a new interactive session
     async startInteractiveSession(options) {
-        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, this.buildFullCommand(options), this.auditLogger, { source: 'start_interactive_session' });
-        return await this.sessionManager.startSession(options);
+        const context = await this.contextManager.getCurrentContext();
+        const cwd = await this.getEffectiveCwd(options.cwd);
+        const env = {
+            ...Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== undefined)),
+            ...context.environmentVariables,
+            ...options.env,
+        };
+        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, this.buildFullCommand(options), this.auditLogger, { source: 'start_interactive_session' }, cwd, env);
+        return await this.sessionManager.startSession({ ...options, cwd, env });
     }
     // Public method to send input to a session
     async sendInputToSession(options) {

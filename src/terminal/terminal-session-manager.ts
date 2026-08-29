@@ -3,6 +3,7 @@
  */
 
 import { spawn as nodeSpawn, ChildProcess } from 'child_process';
+import * as path from 'path';
 import * as pty from 'node-pty';
 import { v4 as uuidv4 } from 'uuid';
 import { TerminalSession, TerminalBuffer } from './types';
@@ -44,8 +45,23 @@ export class TerminalSessionManager {
   async startSession(options: TerminalStartSessionOptions): Promise<string> {
     console.error(`[DEBUG] TerminalSessionManager.startSession called with enableTerminalViewer: ${options.enableTerminalViewer}`);
 
-    if (this.commandGuard && options.command) {
-      await this.commandGuard(buildFullCommand(options.command, options.args), options.cwd);
+    const cwd = path.resolve(options.cwd || process.cwd());
+    const environment: Record<string, string> = {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([_, value]) => value !== undefined)
+      ) as Record<string, string>,
+      ...options.env,
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+    };
+    const normalizedOptions = { ...options, cwd, env: environment };
+
+    if (this.commandGuard) {
+      await this.commandGuard(
+        buildFullCommand(options.command, options.args),
+        cwd,
+        environment
+      );
     }
 
     // If terminal viewer is not requested, use fallback
@@ -53,7 +69,7 @@ export class TerminalSessionManager {
       console.error(`[DEBUG] Terminal viewer not requested, using fallback session manager`);
       // Ensure command is provided for fallback session manager
       const fallbackOptions: StartSessionOptions = {
-        ...options,
+        ...normalizedOptions,
         command: options.command || this.getShell()
       };
       return this.fallbackSessionManager.startSession(fallbackOptions);
@@ -70,20 +86,15 @@ export class TerminalSessionManager {
     const startTime = new Date();
 
     // Create PTY process
-    const ptyProcess = this.createPtyProcess(options);
+    const ptyProcess = this.createPtyProcess(normalizedOptions);
 
     // Create terminal session
     const session: TerminalSession = {
       sessionId,
       command: options.command || 'system shell',
       args: options.args || [],
-      cwd: options.cwd || process.cwd(),
-      env: {
-        ...Object.fromEntries(
-          Object.entries(process.env).filter(([_, value]) => value !== undefined)
-        ) as Record<string, string>,
-        ...options.env,
-      },
+      cwd,
+      env: environment,
       startTime,
       lastActivity: startTime,
       status: 'running',
@@ -250,11 +261,6 @@ export class TerminalSessionManager {
   async sendInput(options: SendInputOptions): Promise<void> {
     console.error(`[DEBUG] TerminalSessionManager.sendInput called for session ${options.sessionId}`);
 
-    if (this.commandGuard) {
-      // Validate input against the session's own working directory.
-      await this.commandGuard(options.input, this.sessions.get(options.sessionId)?.cwd);
-    }
-
     const session = this.sessions.get(options.sessionId);
 
     if (!session) {
@@ -273,9 +279,17 @@ export class TerminalSessionManager {
       throw new Error(`Session ${options.sessionId} does not have a PTY`);
     }
 
+    const resultingCwd = this.commandGuard
+      ? await this.commandGuard(options.input, session.cwd, session.env)
+      : undefined;
+
     // Send input to PTY
     const input = options.addNewline !== false ? options.input + '\r' : options.input;
     session.pty.write(input);
+    if (resultingCwd && options.addNewline !== false) {
+      session.cwd = resultingCwd;
+      session.env.PWD = resultingCwd;
+    }
 
     // Don't manually add to buffer - let PTY echo handle display to avoid duplication
     session.lastActivity = new Date();

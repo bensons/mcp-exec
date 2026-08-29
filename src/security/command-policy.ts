@@ -6,7 +6,11 @@
 import { SecurityManager } from './manager';
 import { AuditLogger } from '../audit/logger';
 
-export type CommandGuard = (command: string, cwd?: string) => Promise<void>;
+export type CommandGuard = (
+  command: string,
+  cwd?: string,
+  env?: Record<string, string | undefined>
+) => Promise<string | undefined>;
 
 export function buildFullCommand(command?: string, args?: string[]): string {
   if (!command) {
@@ -23,16 +27,17 @@ export async function assertCommandAllowed(
   command: string,
   auditLogger?: AuditLogger,
   context: Record<string, unknown> = {},
-  cwd?: string
-): Promise<void> {
+  cwd?: string,
+  env?: Record<string, string | undefined>
+): Promise<string | undefined> {
   const trimmed = command.trim();
-  if (!trimmed) {
+  if (!trimmed && cwd === undefined) {
     return;
   }
 
-  const securityCheck = await securityManager.validateCommand(trimmed, { cwd });
+  const securityCheck = await securityManager.validateCommand(trimmed, { cwd, env });
   if (securityCheck.allowed) {
-    return;
+    return securityCheck.resultingCwd;
   }
 
   await auditLogger?.warning('Command blocked by security policy', {
