@@ -86,6 +86,8 @@ export interface ValidationResult {
   // Set with allowed: false when the command is only blocked pending an
   // explicit confirm_command call (see ConfirmationManager).
   requiresConfirmation?: boolean;
+  /** Deterministic cwd after a validated stateful-shell input such as `cd`. */
+  resultingCwd?: string;
 }
 
 export interface SecurityProvider {
@@ -93,7 +95,10 @@ export interface SecurityProvider {
   securityLevel: 'strict' | 'moderate' | 'permissive';
   
   // Command validation before execution
-  validateCommand(command: string): ValidationResult;
+  validateCommand(
+    command: string,
+    options?: { cwd?: string; env?: Record<string, string | undefined> }
+  ): ValidationResult | Promise<ValidationResult>;
   
   // Resource limits
   resourceLimits: {

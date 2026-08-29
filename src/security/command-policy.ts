@@ -10,9 +10,16 @@ import { ValidationResult } from '../types/index';
 export interface CommandPolicyOptions {
   /** Bypass only the "needs confirmation" branch; hard blocks still apply. */
   skipConfirmation?: boolean;
+  /** Effective working directory used to resolve filesystem operands. */
+  cwd?: string;
+  /** Environment supplied to the command, used to validate shell expansions. */
+  env?: Record<string, string | undefined>;
 }
 
-export type CommandGuard = (command: string, options?: CommandPolicyOptions) => Promise<void>;
+export type CommandGuard = (
+  command: string,
+  options?: CommandPolicyOptions
+) => Promise<string | undefined>;
 
 /** Thrown when a command is allowed but gated behind confirm_command. */
 export class ConfirmationRequiredError extends Error {
@@ -38,26 +45,30 @@ export async function assertCommandAllowed(
   auditLogger?: AuditLogger,
   context: Record<string, unknown> = {},
   options: CommandPolicyOptions = {}
-): Promise<void> {
+): Promise<string | undefined> {
   const trimmed = command.trim();
-  if (!trimmed) {
+  if (!trimmed && options.cwd === undefined) {
     return;
   }
 
-  const securityCheck = await securityManager.validateCommand(trimmed);
+  const securityCheck = await securityManager.validateCommand(trimmed, {
+    cwd: options.cwd,
+    env: options.env,
+  });
   if (securityCheck.allowed) {
-    return;
+    return securityCheck.resultingCwd;
   }
 
   if (securityCheck.requiresConfirmation) {
     if (options.skipConfirmation) {
-      return;
+      return securityCheck.resultingCwd;
     }
     throw new ConfirmationRequiredError(trimmed, securityCheck);
   }
 
   await auditLogger?.warning('Command blocked by security policy', {
     fullCommand: trimmed,
+    cwd: options.cwd,
     reason: securityCheck.reason,
     riskLevel: securityCheck.riskLevel,
     ...context,

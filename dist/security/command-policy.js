@@ -30,21 +30,25 @@ function buildFullCommand(command, args) {
 }
 async function assertCommandAllowed(securityManager, command, auditLogger, context = {}, options = {}) {
     const trimmed = command.trim();
-    if (!trimmed) {
+    if (!trimmed && options.cwd === undefined) {
         return;
     }
-    const securityCheck = await securityManager.validateCommand(trimmed);
+    const securityCheck = await securityManager.validateCommand(trimmed, {
+        cwd: options.cwd,
+        env: options.env,
+    });
     if (securityCheck.allowed) {
-        return;
+        return securityCheck.resultingCwd;
     }
     if (securityCheck.requiresConfirmation) {
         if (options.skipConfirmation) {
-            return;
+            return securityCheck.resultingCwd;
         }
         throw new ConfirmationRequiredError(trimmed, securityCheck);
     }
     await auditLogger?.warning('Command blocked by security policy', {
         fullCommand: trimmed,
+        cwd: options.cwd,
         reason: securityCheck.reason,
         riskLevel: securityCheck.riskLevel,
         ...context,

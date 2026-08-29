@@ -8,8 +8,12 @@ import { ValidationResult } from '../types/index';
 export interface CommandPolicyOptions {
     /** Bypass only the "needs confirmation" branch; hard blocks still apply. */
     skipConfirmation?: boolean;
+    /** Effective working directory used to resolve filesystem operands. */
+    cwd?: string;
+    /** Environment supplied to the command, used to validate shell expansions. */
+    env?: Record<string, string | undefined>;
 }
-export type CommandGuard = (command: string, options?: CommandPolicyOptions) => Promise<void>;
+export type CommandGuard = (command: string, options?: CommandPolicyOptions) => Promise<string | undefined>;
 /** Thrown when a command is allowed but gated behind confirm_command. */
 export declare class ConfirmationRequiredError extends Error {
     readonly command: string;
@@ -17,5 +21,5 @@ export declare class ConfirmationRequiredError extends Error {
     constructor(command: string, validation: ValidationResult);
 }
 export declare function buildFullCommand(command?: string, args?: string[]): string;
-export declare function assertCommandAllowed(securityManager: SecurityManager, command: string, auditLogger?: AuditLogger, context?: Record<string, unknown>, options?: CommandPolicyOptions): Promise<void>;
+export declare function assertCommandAllowed(securityManager: SecurityManager, command: string, auditLogger?: AuditLogger, context?: Record<string, unknown>, options?: CommandPolicyOptions): Promise<string | undefined>;
 //# sourceMappingURL=command-policy.d.ts.map

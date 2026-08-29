@@ -63,10 +63,15 @@ export interface ValidationResult {
     suggestions?: string[];
     riskLevel: 'low' | 'medium' | 'high';
     requiresConfirmation?: boolean;
+    /** Deterministic cwd after a validated stateful-shell input such as `cd`. */
+    resultingCwd?: string;
 }
 export interface SecurityProvider {
     securityLevel: 'strict' | 'moderate' | 'permissive';
-    validateCommand(command: string): ValidationResult;
+    validateCommand(command: string, options?: {
+        cwd?: string;
+        env?: Record<string, string | undefined>;
+    }): ValidationResult | Promise<ValidationResult>;
     resourceLimits: {
         maxExecutionTime: number;
         maxMemoryUsage: number;
