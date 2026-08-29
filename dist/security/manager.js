@@ -57,6 +57,9 @@ class SecurityManager {
             sandboxingEnabled: config.sandboxing?.enabled || false
         }, 'security-manager');
     }
+    setAuditLogger(auditLogger) {
+        this.auditLogger = auditLogger;
+    }
     initializeDangerousPatterns() {
         this.dangerousPatterns = [
             // File system destruction

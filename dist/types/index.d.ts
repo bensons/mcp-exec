@@ -232,6 +232,7 @@ export interface ServerConfig {
         retention: number;
         logFile?: string;
         logDirectory?: string;
+        maxPendingWriteBytes?: number;
         monitoring?: {
             enabled: boolean;
             alertRetention: number;

@@ -42,6 +42,9 @@ export declare class ShellExecutor {
     startInteractiveSession(options: StartSessionOptions): Promise<string>;
     sendInputToSession(options: SendInputOptions): Promise<void>;
     readSessionOutput(sessionId: string): Promise<SessionOutput>;
+    setSecurityManager(securityManager: SecurityManager): void;
+    setContextManager(contextManager: ContextManager): void;
+    setAuditLogger(auditLogger: AuditLogger): void;
     shutdown(): Promise<void>;
 }
 //# sourceMappingURL=executor.d.ts.map

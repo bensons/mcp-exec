@@ -9,6 +9,7 @@ export interface AuditConfig {
     retention: number;
     logFile?: string;
     logDirectory?: string;
+    maxPendingWriteBytes?: number;
     monitoring?: MonitoringConfig;
 }
 export interface LogCommandOptions {
@@ -36,7 +37,26 @@ export declare class AuditLogger {
     private logFile;
     private logs;
     private monitoringSystem?;
+    private maintenanceTimer?;
+    private initializationPromise;
+    private pendingLines;
+    private pendingWriteBytes;
+    private drainPromise?;
+    private closed;
+    private readonly maxPendingWriteBytes;
+    private lastQueueWarningAt;
     constructor(config: AuditConfig);
+    private writeLine;
+    private startDrain;
+    private drainWrites;
+    /**
+     * Wait for all accepted records to reach storage.
+     */
+    flush(): Promise<void>;
+    /**
+     * Stop maintenance and reject future records after draining accepted writes.
+     */
+    close(): Promise<void>;
     logCommand(options: LogCommandOptions): Promise<void>;
     logError(options: LogErrorOptions): Promise<void>;
     log(options: LogOptions): Promise<void>;
@@ -65,6 +85,7 @@ export declare class AuditLogger {
     private getFallbackLogPath;
     private loadExistingLogs;
     private writeLogEntry;
+    private writeSerialized;
     private shouldLog;
     private normalizeLogLevel;
     private enforceRetention;

@@ -18,6 +18,7 @@ const os = require('os');
 const path = require('path');
 
 const { MonitoringSystem } = require(path.resolve(__dirname, '..', 'dist', 'audit', 'monitoring'));
+const { AuditLogger } = require(path.resolve(__dirname, '..', 'dist', 'audit', 'logger'));
 const serverPath = path.resolve(__dirname, '..', 'dist', 'index.js');
 
 function makeLogEntry(command, exitCode) {
@@ -106,6 +107,117 @@ async function testMaxAlertsPerHour() {
   console.log(`✅ capped at ${total} alerts (limit 2)`);
 }
 
+async function testTimedOutNotifierIsTerminated() {
+  console.log('📝 timed-out desktop notifier is terminated and disabled');
+
+  let notifierCalls = 0;
+  let killedWith;
+  const fakeNotifier = {
+    notify() {
+      notifierCalls += 1;
+      return {
+        kill(signal) {
+          killedWith = signal;
+          return true;
+        },
+      };
+    },
+  };
+  const monitoring = new MonitoringSystem({
+    enabled: true,
+    alertRetention: 7,
+    maxAlertsPerHour: 100,
+    desktopNotifications: { enabled: true },
+  }, fakeNotifier, 20);
+
+  const firstAttempt = monitoring.sendDesktopNotification('test', 'hung child');
+  const concurrentAttempt = monitoring.sendDesktopNotification('test', 'must share first attempt');
+  await Promise.all([firstAttempt, concurrentAttempt]);
+  assert.strictEqual(killedWith, 'SIGTERM', 'timeout should terminate the notifier child');
+  assert.strictEqual(notifierCalls, 1, 'only one desktop notifier may run at a time');
+
+  await monitoring.sendDesktopNotification('test', 'disabled after timeout');
+  assert.strictEqual(notifierCalls, 1, 'future desktop attempts should remain disabled');
+  console.log('✅ hung notifier was terminated and future attempts were disabled');
+}
+
+function makeAuditConfig(logFile, overrides = {}) {
+  return {
+    enabled: true,
+    logLevel: 'debug',
+    retention: 7,
+    logFile,
+    ...overrides,
+  };
+}
+
+async function testAuditSerializationIsBestEffort() {
+  console.log('📝 serialization failures do not reject audit callers');
+
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-serialize-'));
+  const logFile = path.join(workDir, 'audit.log');
+  const logger = new AuditLogger(makeAuditConfig(logFile));
+  const circular = {};
+  circular.self = circular;
+
+  await assert.doesNotReject(() => logger.info('circular', circular));
+  await assert.doesNotReject(() => logger.info('bigint', { value: 1n }));
+  await logger.info('valid-after-serialization-error', { ok: true });
+  await logger.close();
+
+  const content = fs.readFileSync(logFile, 'utf8');
+  assert.ok(content.includes('valid-after-serialization-error'));
+  content.split('\n').filter(Boolean).forEach(line => JSON.parse(line));
+  console.log('✅ invalid records were skipped and later records remained valid');
+}
+
+async function testAuditFileRotation() {
+  console.log('📝 external log rotation reopens the configured path');
+
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-rotation-'));
+  const logFile = path.join(workDir, 'audit.log');
+  const rotatedFile = path.join(workDir, 'audit.log.1');
+  const logger = new AuditLogger(makeAuditConfig(logFile));
+
+  await logger.info('before-rotation');
+  await logger.flush();
+  fs.renameSync(logFile, rotatedFile);
+  fs.writeFileSync(logFile, '');
+
+  await logger.info('after-rotation');
+  await logger.close();
+
+  assert.ok(fs.readFileSync(rotatedFile, 'utf8').includes('before-rotation'));
+  const activeContent = fs.readFileSync(logFile, 'utf8');
+  assert.ok(activeContent.includes('after-rotation'));
+  assert.ok(!activeContent.includes('before-rotation'));
+  console.log('✅ post-rotation records reached the active file');
+}
+
+async function testAuditQueueIsBoundedAndRecovers() {
+  console.log('📝 audit queue drops excess records at its byte limit and recovers');
+
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-queue-'));
+  const logFile = path.join(workDir, 'audit.log');
+  const logger = new AuditLogger(makeAuditConfig(logFile, { maxPendingWriteBytes: 1024 }));
+  const writes = [];
+  for (let i = 0; i < 100; i++) {
+    writes.push(logger.info(`queued-${i}`, { payload: 'x'.repeat(400) }));
+  }
+  await Promise.all(writes);
+  await logger.flush();
+  await logger.info('after-queue-drain');
+  await logger.close();
+
+  const content = fs.readFileSync(logFile, 'utf8');
+  const lines = content.split('\n').filter(Boolean);
+  assert.ok(lines.length < 100, `expected bounded queue to drop excess records, got ${lines.length}`);
+  assert.ok(content.includes('after-queue-drain'), 'queue should accept records after draining');
+  assert.strictEqual(logger.pendingWriteBytes, 0, 'drained queue should retain no bytes');
+  assert.strictEqual(logger.maintenanceTimer, undefined, 'close should dispose maintenance timer');
+  console.log(`✅ queue remained bounded (${lines.length} records persisted) and recovered`);
+}
+
 async function testAuditLogFlushedOnShutdown() {
   console.log('📝 audit log is written and flushed on graceful shutdown');
 
@@ -161,6 +273,10 @@ async function testAuditLogFlushedOnShutdown() {
       clientInfo: { name: 'audit-stream-test', version: '1.0.0' },
     });
     await call('tools/call', {
+      name: 'update_audit_logging',
+      arguments: { retention: 6 },
+    });
+    await call('tools/call', {
       name: 'execute_command',
       arguments: { command: 'echo', args: ['audit-stream-marker'] },
     });
@@ -188,6 +304,10 @@ async function run() {
   try {
     await testNotificationsDoNotBlock();
     await testMaxAlertsPerHour();
+    await testTimedOutNotifierIsTerminated();
+    await testAuditSerializationIsBestEffort();
+    await testAuditFileRotation();
+    await testAuditQueueIsBoundedAndRecovers();
     await testAuditLogFlushedOnShutdown();
     console.log('\n🎉 Audit stream regression tests passed');
   } catch (error) {

@@ -69,6 +69,10 @@ export class ContextManager {
     }, 'context-manager');
   }
 
+  setAuditLogger(auditLogger: AuditLogger): void {
+    this.auditLogger = auditLogger;
+  }
+
   async getCurrentContext(sessionId?: string): Promise<CommandContext> {
     return {
       sessionId: sessionId || this.sessionId,

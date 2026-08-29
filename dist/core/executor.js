@@ -33,13 +33,13 @@ class ShellExecutor {
         const commandId = (0, uuid_1.v4)();
         const startTime = Date.now();
         // Debug logging through audit logger to avoid JSON-RPC interference
-        await this.auditLogger.log({
+        void this.auditLogger.log({
             level: 'debug',
             message: 'ShellExecutor.executeCommand called',
             context: { command: options.command }
         });
         // Log command execution at info level
-        await this.auditLogger.info('Executing shell command', {
+        void this.auditLogger.info('Executing shell command', {
             commandId,
             command: options.command,
             args: options.args,
@@ -48,13 +48,13 @@ class ShellExecutor {
         try {
             // Security validation
             const fullCommand = this.buildFullCommand(options);
-            await this.auditLogger.debug('Validating command security', {
+            void this.auditLogger.debug('Validating command security', {
                 commandId,
                 fullCommand
             }, 'security-validator');
             const securityCheck = await this.securityManager.validateCommand(fullCommand);
             if (!securityCheck.allowed) {
-                await this.auditLogger.warning('Command blocked by security policy', {
+                void this.auditLogger.warning('Command blocked by security policy', {
                     commandId,
                     fullCommand,
                     reason: securityCheck.reason,
@@ -62,7 +62,7 @@ class ShellExecutor {
                 }, 'security-validator');
                 throw new Error(`Command blocked by security policy: ${securityCheck.reason}`);
             }
-            await this.auditLogger.debug('Command passed security validation', {
+            void this.auditLogger.debug('Command passed security validation', {
                 commandId,
                 riskLevel: securityCheck.riskLevel
             }, 'security-validator');
@@ -79,7 +79,7 @@ class ShellExecutor {
                 ...options.env,
             };
             // Execute command
-            await this.auditLogger.debug('Starting command execution', {
+            void this.auditLogger.debug('Starting command execution', {
                 commandId,
                 workingDirectory,
                 timeout: options.timeout || this.config.security.timeout
@@ -90,7 +90,7 @@ class ShellExecutor {
                 shell: options.shell !== undefined ? options.shell : true,
                 timeout: options.timeout || this.config.security.timeout,
             });
-            await this.auditLogger.info('Command executed successfully', {
+            void this.auditLogger.info('Command executed successfully', {
                 commandId,
                 exitCode: result.exitCode,
                 executionTime: Date.now() - startTime
@@ -129,7 +129,7 @@ class ShellExecutor {
             return processedOutput;
         }
         catch (error) {
-            await this.auditLogger.error('Command execution failed', {
+            void this.auditLogger.error('Command execution failed', {
                 commandId,
                 command: this.buildFullCommand(options),
                 error: error instanceof Error ? error.message : 'Unknown error',
@@ -250,9 +250,9 @@ class ShellExecutor {
     async killSession(sessionId) {
         await this.sessionManager.killSession(sessionId);
     }
-    // Public method to start a new interactive session
+    // Public method to start a new interactive session.
+    // Policy is enforced once, by the session manager's commandGuard.
     async startInteractiveSession(options) {
-        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, this.buildFullCommand(options), this.auditLogger, { source: 'start_interactive_session' });
         return await this.sessionManager.startSession(options);
     }
     // Public method to send input to a session
@@ -261,6 +261,15 @@ class ShellExecutor {
     }
     async readSessionOutput(sessionId) {
         return await this.sessionManager.readOutput(sessionId);
+    }
+    setSecurityManager(securityManager) {
+        this.securityManager = securityManager;
+    }
+    setContextManager(contextManager) {
+        this.contextManager = contextManager;
+    }
+    setAuditLogger(auditLogger) {
+        this.auditLogger = auditLogger;
     }
     async shutdown() {
         await this.sessionManager.shutdown();

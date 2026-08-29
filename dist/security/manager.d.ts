@@ -26,6 +26,7 @@ export declare class SecurityManager {
     private systemDirectories;
     private auditLogger?;
     constructor(config: SecurityConfig, auditLogger?: AuditLogger);
+    setAuditLogger(auditLogger: AuditLogger): void;
     private initializeDangerousPatterns;
     private initializeSystemDirectories;
     private validateDirectoryAccess;

@@ -3,7 +3,6 @@
  */
 
 import * as fs from 'fs/promises';
-import { createWriteStream, WriteStream } from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -27,6 +26,7 @@ export interface AuditConfig {
   retention: number;
   logFile?: string; // Full path to log file
   logDirectory?: string; // Directory for log files
+  maxPendingWriteBytes?: number; // Bound memory used by queued audit writes
   monitoring?: MonitoringConfig;
 }
 
@@ -54,23 +54,35 @@ export interface LogOptions {
 }
 
 const MAINTENANCE_INTERVAL_MS = 60 * 60 * 1000; // hourly
+const DEFAULT_MAX_PENDING_WRITE_BYTES = 8 * 1024 * 1024;
+const MAX_WRITE_BATCH_BYTES = 64 * 1024;
+const QUEUE_WARNING_INTERVAL_MS = 60 * 1000;
 
 export class AuditLogger {
   private config: AuditConfig;
   private logFile: string;
   private logs: LogEntry[];
   private monitoringSystem?: MonitoringSystem;
-  private logStream?: WriteStream;
-  private logStreamPath?: string;
   private maintenanceTimer?: NodeJS.Timeout;
+  private initializationPromise: Promise<void> = Promise.resolve();
+  private pendingLines: Array<{ line: string; bytes: number }> = [];
+  private pendingWriteBytes = 0;
+  private drainPromise?: Promise<void>;
+  private closed = false;
+  private readonly maxPendingWriteBytes: number;
+  private lastQueueWarningAt = 0;
 
   constructor(config: AuditConfig) {
     this.config = config;
     this.logFile = this.resolveLogFilePath(config);
     this.logs = [];
+    this.maxPendingWriteBytes = Number.isFinite(config.maxPendingWriteBytes) &&
+      (config.maxPendingWriteBytes ?? 0) > 0
+      ? config.maxPendingWriteBytes!
+      : DEFAULT_MAX_PENDING_WRITE_BYTES;
 
     if (config.enabled) {
-      this.initializeLogging();
+      this.initializationPromise = this.initializeLogging();
     }
 
     // Initialize monitoring if configured
@@ -88,59 +100,93 @@ export class AuditLogger {
     }
   }
 
-  /**
-   * Append-only log stream, opened lazily so it picks up any fallback logFile
-   * chosen by initializeLogging(). Writes are fire-and-forget: back-pressure is
-   * ignored, which is acceptable for line-oriented logs and keeps the command
-   * hot path off the event loop.
-   */
-  private getStream(): WriteStream | undefined {
-    if (this.logStream && this.logStreamPath === this.logFile) {
-      return this.logStream;
+  private writeLine(line: string): void {
+    if (this.closed || !this.config.enabled) {
+      return;
     }
 
-    this.logStream?.end();
-    this.logStream = undefined;
-    this.logStreamPath = undefined;
-
-    const stream = createWriteStream(this.logFile, { flags: 'a' });
-    stream.on('error', (error) => {
-      console.error('Failed to write to audit log:', error);
-      if (this.logStream === stream) {
-        this.logStream = undefined;
-        this.logStreamPath = undefined;
+    const bytes = Buffer.byteLength(line);
+    if (bytes > this.maxPendingWriteBytes ||
+        this.pendingWriteBytes + bytes > this.maxPendingWriteBytes) {
+      const now = Date.now();
+      if (now - this.lastQueueWarningAt >= QUEUE_WARNING_INTERVAL_MS) {
+        this.lastQueueWarningAt = now;
+        console.error(
+          `Audit write queue reached ${this.maxPendingWriteBytes} bytes; dropping records until storage catches up`
+        );
       }
-    });
+      return;
+    }
 
-    this.logStream = stream;
-    this.logStreamPath = this.logFile;
-    return stream;
+    this.pendingLines.push({ line, bytes });
+    this.pendingWriteBytes += bytes;
+    this.startDrain();
   }
 
-  private writeLine(line: string): void {
-    this.getStream()?.write(line);
+  private startDrain(): void {
+    if (this.drainPromise || this.pendingLines.length === 0) {
+      return;
+    }
+
+    this.drainPromise = this.drainWrites().finally(() => {
+      this.drainPromise = undefined;
+      if (this.pendingLines.length > 0) {
+        this.startDrain();
+      }
+    });
+  }
+
+  private async drainWrites(): Promise<void> {
+    await this.initializationPromise;
+
+    while (this.pendingLines.length > 0) {
+      const batch: Array<{ line: string; bytes: number }> = [];
+      let batchBytes = 0;
+
+      while (this.pendingLines.length > 0) {
+        const next = this.pendingLines[0];
+        if (batch.length > 0 && batchBytes + next.bytes > MAX_WRITE_BATCH_BYTES) {
+          break;
+        }
+        batch.push(this.pendingLines.shift()!);
+        batchBytes += next.bytes;
+      }
+
+      try {
+        if (this.config.enabled) {
+          // Open the configured path for every bounded batch. This preserves
+          // ordering without holding an inode open across external rotation.
+          await fs.appendFile(this.logFile, batch.map(item => item.line).join(''));
+        }
+      } catch (error) {
+        console.error('Failed to write to audit log:', error);
+      } finally {
+        this.pendingWriteBytes = Math.max(0, this.pendingWriteBytes - batchBytes);
+      }
+    }
   }
 
   /**
-   * Flush and close the log stream. Called from graceful shutdown.
+   * Wait for all accepted records to reach storage.
    */
   async flush(): Promise<void> {
+    await this.initializationPromise;
+    while (this.drainPromise || this.pendingLines.length > 0) {
+      this.startDrain();
+      await this.drainPromise;
+    }
+  }
+
+  /**
+   * Stop maintenance and reject future records after draining accepted writes.
+   */
+  async close(): Promise<void> {
+    this.closed = true;
     if (this.maintenanceTimer) {
       clearInterval(this.maintenanceTimer);
       this.maintenanceTimer = undefined;
     }
-
-    const stream = this.logStream;
-    if (!stream) {
-      return;
-    }
-    this.logStream = undefined;
-    this.logStreamPath = undefined;
-
-    await new Promise<void>((resolve) => {
-      stream.once('error', () => resolve());
-      stream.end(() => resolve());
-    });
+    await this.flush();
   }
 
   async logCommand(options: LogCommandOptions): Promise<void> {
@@ -232,7 +278,7 @@ export class AuditLogger {
       severity: LOG_LEVELS[normalizedLevel], // RFC 5424 numeric severity
     };
 
-    this.writeLine(JSON.stringify(logLine) + '\n');
+    this.writeSerialized(logLine, 'audit log entry');
   }
 
   // Convenience methods for RFC 5424 log levels
@@ -635,7 +681,15 @@ export class AuditLogger {
   }
 
   private writeLogEntry(entry: LogEntry): void {
-    this.writeLine(JSON.stringify(entry) + '\n');
+    this.writeSerialized(entry, 'command audit entry');
+  }
+
+  private writeSerialized(value: unknown, description: string): void {
+    try {
+      this.writeLine(JSON.stringify(value) + '\n');
+    } catch (error) {
+      console.error(`Failed to serialize ${description}:`, error);
+    }
   }
 
   private shouldLog(level: LogLevel | LegacyLogLevel): boolean {

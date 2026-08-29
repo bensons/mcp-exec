@@ -45,6 +45,17 @@ export interface MonitoringConfig {
 
 const DESKTOP_NOTIFICATION_TIMEOUT_MS = 5000;
 
+interface DesktopNotifier {
+  notify(
+    options: { title: string; message: string; wait: boolean },
+    callback: (error: Error | null) => void
+  ): unknown;
+}
+
+interface KillableNotificationProcess {
+  kill(signal?: NodeJS.Signals): boolean;
+}
+
 export class MonitoringSystem {
   private config: MonitoringConfig;
   private alertRules: Map<string, AlertRule> = new Map();
@@ -53,9 +64,19 @@ export class MonitoringSystem {
   // ponytail: fixed-window rate limit, swap for a sliding window if burst shaping matters
   private alertWindowStart = Date.now();
   private alertsInWindow = 0;
+  private desktopNotificationsDisabled = false;
+  private readonly desktopNotifier: DesktopNotifier;
+  private readonly desktopNotificationTimeoutMs: number;
+  private desktopNotificationInFlight?: Promise<void>;
 
-  constructor(config: MonitoringConfig) {
+  constructor(
+    config: MonitoringConfig,
+    desktopNotifier: DesktopNotifier = notifier as unknown as DesktopNotifier,
+    desktopNotificationTimeoutMs = DESKTOP_NOTIFICATION_TIMEOUT_MS
+  ) {
     this.config = config;
+    this.desktopNotifier = desktopNotifier;
+    this.desktopNotificationTimeoutMs = desktopNotificationTimeoutMs;
     this.initializeDefaultRules();
   }
 
@@ -199,35 +220,70 @@ export class MonitoringSystem {
   }
 
   async sendDesktopNotification(title: string, message: string): Promise<void> {
-    return new Promise((resolve, reject) => {
+    if (this.desktopNotificationsDisabled) {
+      return;
+    }
+    if (this.desktopNotificationInFlight) {
+      return this.desktopNotificationInFlight;
+    }
+
+    const attempt = new Promise<void>((resolve, reject) => {
       let settled = false;
+      let notificationProcess: KillableNotificationProcess | undefined;
 
       // node-notifier spawns terminal-notifier/notify-send, which can hang
       // indefinitely when no display or notification daemon is available.
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        console.error('Desktop notification timed out after 5000ms');
-        resolve();
-      }, DESKTOP_NOTIFICATION_TIMEOUT_MS);
-      timer.unref();
-
-      notifier.notify({
-        title,
-        message,
-        wait: false,
-      }, (err) => {
-        clearTimeout(timer);
-        if (settled) return;
-        settled = true;
-        if (err) {
-          console.error('Error sending desktop notification:', err);
-          reject(err);
-        } else {
-          resolve();
+        this.desktopNotificationsDisabled = true;
+        try {
+          notificationProcess?.kill('SIGTERM');
+        } catch (error) {
+          console.error('Failed to terminate timed-out desktop notifier:', error);
         }
-      });
+        console.error(
+          `Desktop notification timed out after ${this.desktopNotificationTimeoutMs}ms; ` +
+          'desktop notifications are disabled for this session'
+        );
+        resolve();
+      }, this.desktopNotificationTimeoutMs);
+
+      try {
+        const result = this.desktopNotifier.notify({
+          title,
+          message,
+          wait: false,
+        }, (err) => {
+          clearTimeout(timer);
+          if (settled) return;
+          settled = true;
+          if (err) {
+            console.error('Error sending desktop notification:', err);
+            reject(err);
+          } else {
+            resolve();
+          }
+        });
+
+        if (result && typeof (result as KillableNotificationProcess).kill === 'function') {
+          notificationProcess = result as KillableNotificationProcess;
+        }
+      } catch (error) {
+        clearTimeout(timer);
+        settled = true;
+        reject(error);
+      }
     });
+
+    let trackedAttempt: Promise<void>;
+    trackedAttempt = attempt.finally(() => {
+      if (this.desktopNotificationInFlight === trackedAttempt) {
+        this.desktopNotificationInFlight = undefined;
+      }
+    });
+    this.desktopNotificationInFlight = trackedAttempt;
+    return trackedAttempt;
   }
 
   acknowledgeAlert(alertId: string, acknowledgedBy: string): boolean {

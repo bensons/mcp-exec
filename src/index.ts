@@ -102,6 +102,7 @@ const DEFAULT_CONFIG: ServerConfig = {
     enabled: process.env.MCP_EXEC_AUDIT_ENABLED !== 'false', // Enabled by default
     logLevel: (process.env.MCP_EXEC_AUDIT_LOG_LEVEL as LogLevel | LegacyLogLevel) || 'debug',
     retention: parseInt(process.env.MCP_EXEC_AUDIT_RETENTION || '30'),
+    maxPendingWriteBytes: parseInt(process.env.MCP_EXEC_AUDIT_MAX_PENDING_BYTES || `${8 * 1024 * 1024}`),
     logDirectory: process.env.MCP_EXEC_LOG_DIR ||
                   (process.env.HOME && path.join(process.env.HOME, '.mcp-exec')) ||
                   (process.env.USERPROFILE && path.join(process.env.USERPROFILE, '.mcp-exec')), // Safer default
@@ -527,6 +528,28 @@ class MCPShellServer {
       source,
       ...extraContext,
     });
+  }
+
+  private replaceSecurityManager(): void {
+    this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+    this.shellExecutor?.setSecurityManager(this.securityManager);
+  }
+
+  private replaceContextManager(): void {
+    this.contextManager = new ContextManager(this.config.context, this.auditLogger);
+    this.shellExecutor?.setContextManager(this.contextManager);
+  }
+
+  private async replaceAuditLogger(): Promise<void> {
+    const previousLogger = this.auditLogger;
+    const nextLogger = new AuditLogger(this.config.audit);
+
+    this.auditLogger = nextLogger;
+    this.securityManager?.setAuditLogger(nextLogger);
+    this.contextManager?.setAuditLogger(nextLogger);
+    this.shellExecutor?.setAuditLogger(nextLogger);
+
+    await previousLogger?.close();
   }
 
   private setupHandlers(): void {
@@ -1406,8 +1429,11 @@ class MCPShellServer {
               });
 
               try {
-                // Command policy is enforced once, by the terminal session manager's commandGuard.
                 const fullCommand = buildFullCommand(parsed.command, parsed.args);
+                // Reject denied commands before starting/binding the viewer service.
+                await this.assertCommandAllowed(fullCommand, 'execute_command', {
+                  enableTerminalViewer: true,
+                });
 
                 // Ensure terminal viewer service is available
                 if (!this.terminalViewerService) {
@@ -1559,7 +1585,13 @@ class MCPShellServer {
             });
 
             try {
-              // Command policy is enforced once, by the terminal session manager's commandGuard.
+              if (parsed.command) {
+                // Reject denied commands before starting/binding the viewer service.
+                await this.assertCommandAllowed(
+                  buildFullCommand(parsed.command, parsed.args),
+                  'start_terminal_session'
+                );
+              }
 
               // Ensure terminal viewer service is available
               if (!this.terminalViewerService) {
@@ -1853,7 +1885,7 @@ class MCPShellServer {
             }
 
             // Recreate security manager with new config
-            this.securityManager = new SecurityManager(this.config.security);
+            this.replaceSecurityManager();
 
             return {
               content: [
@@ -2638,7 +2670,7 @@ class MCPShellServer {
             }
 
             // Recreate security manager with updated blocked commands
-            this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+            this.replaceSecurityManager();
 
             return {
               content: [
@@ -2694,7 +2726,7 @@ class MCPShellServer {
             }
 
             // Recreate security manager with updated allowed directories
-            this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+            this.replaceSecurityManager();
 
             return {
               content: [
@@ -2731,7 +2763,7 @@ class MCPShellServer {
             this.recordConfigurationChange('security', { resourceLimits: this.config.security.resourceLimits }, { resourceLimits: previousValues });
 
             // Recreate security manager
-            this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+            this.replaceSecurityManager();
 
             return {
               content: [
@@ -2859,8 +2891,8 @@ class MCPShellServer {
             // Record configuration change
             this.recordConfigurationChange('audit', this.config.audit, previousValues);
 
-            // Recreate audit logger
-            this.auditLogger = new AuditLogger(this.config.audit);
+            // Recreate audit logger and update every component that writes through it.
+            await this.replaceAuditLogger();
 
             return {
               content: [
@@ -3103,7 +3135,7 @@ class MCPShellServer {
             this.recordConfigurationChange('context', this.config.context, previousValues);
 
             // Recreate context manager
-            this.contextManager = new ContextManager(this.config.context, this.auditLogger);
+            this.replaceContextManager();
 
             return {
               content: [
@@ -3589,9 +3621,9 @@ Please start by enabling the terminal viewer service.`,
         console.error('🔧 Shell executor cleaned up');
       }
 
-      // Cleanup audit logger (flush any pending logs)
-      if (this.auditLogger && typeof (this.auditLogger as any).flush === 'function') {
-        await (this.auditLogger as any).flush();
+      // Cleanup audit logger (flush pending logs and release maintenance resources)
+      if (this.auditLogger && typeof (this.auditLogger as any).close === 'function') {
+        await (this.auditLogger as any).close();
         console.error('📝 Audit logs flushed');
       }
 
@@ -3778,11 +3810,15 @@ Please start by enabling the terminal viewer service.`,
   }
 
   private async reinitializeComponents(section?: string): Promise<void> {
+    // Audit must be replaced first so newly initialized dependents receive it.
+    if (!section || section === 'audit') {
+      await this.replaceAuditLogger();
+    }
     if (!section || section === 'security') {
-      this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
+      this.replaceSecurityManager();
     }
     if (!section || section === 'context') {
-      this.contextManager = new ContextManager(this.config.context, this.auditLogger);
+      this.replaceContextManager();
     }
     if (!section || section === 'mcpLogging') {
       this.mcpLogger = new MCPLogger(this.config.mcpLogging || {
@@ -3792,9 +3828,6 @@ Please start by enabling the terminal viewer service.`,
         maxQueueSize: 100,
         includeContext: true
       });
-    }
-    if (!section || section === 'audit') {
-      this.auditLogger = new AuditLogger(this.config.audit);
     }
     if (!section || section === 'display') {
       this.displayFormatter = new DisplayFormatter(this.config.display);

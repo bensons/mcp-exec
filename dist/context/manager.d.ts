@@ -28,6 +28,7 @@ export declare class ContextManager {
     private fileSystemChanges;
     private auditLogger?;
     constructor(config: ContextConfig, auditLogger?: AuditLogger);
+    setAuditLogger(auditLogger: AuditLogger): void;
     getCurrentContext(sessionId?: string): Promise<CommandContext>;
     updateAfterCommand(options: UpdateCommandOptions): Promise<void>;
     getHistory(limit?: number, filter?: string): Promise<CommandHistoryEntry[]>;

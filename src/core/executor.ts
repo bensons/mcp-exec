@@ -336,6 +336,18 @@ export class ShellExecutor {
     return await this.sessionManager.readOutput(sessionId);
   }
 
+  setSecurityManager(securityManager: SecurityManager): void {
+    this.securityManager = securityManager;
+  }
+
+  setContextManager(contextManager: ContextManager): void {
+    this.contextManager = contextManager;
+  }
+
+  setAuditLogger(auditLogger: AuditLogger): void {
+    this.auditLogger = auditLogger;
+  }
+
   async shutdown(): Promise<void> {
     await this.sessionManager.shutdown();
   }

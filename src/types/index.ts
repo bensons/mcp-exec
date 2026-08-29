@@ -306,6 +306,7 @@ export interface ServerConfig {
     retention: number;
     logFile?: string; // Full path to log file
     logDirectory?: string; // Directory for log files
+    maxPendingWriteBytes?: number; // Maximum memory used by queued audit writes
     monitoring?: {
       enabled: boolean;
       alertRetention: number;

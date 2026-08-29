@@ -47,6 +47,10 @@ export class SecurityManager {
     }, 'security-manager');
   }
 
+  setAuditLogger(auditLogger: AuditLogger): void {
+    this.auditLogger = auditLogger;
+  }
+
 
 
   private initializeDangerousPatterns(): void {

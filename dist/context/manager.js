@@ -73,6 +73,9 @@ class ContextManager {
             maxHistorySize: config.maxHistorySize
         }, 'context-manager');
     }
+    setAuditLogger(auditLogger) {
+        this.auditLogger = auditLogger;
+    }
     async getCurrentContext(sessionId) {
         return {
             sessionId: sessionId || this.sessionId,
