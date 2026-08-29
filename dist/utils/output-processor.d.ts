@@ -14,6 +14,11 @@ export interface RawCommandResult {
     stdout: string;
     stderr: string;
     exitCode: number;
+    /** Bytes dropped per stream by the executor's in-memory collection cap. */
+    truncated?: {
+        stdout: number;
+        stderr: number;
+    };
     /** Set when the process was terminated by a signal (e.g. 'SIGTERM'). */
     signal?: string;
     /** Set when the process was killed because it exceeded its timeout. */

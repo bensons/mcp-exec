@@ -74,6 +74,60 @@ export interface ExecuteCommandOptions {
   aiContext?: string;
 }
 
+/** Bytes of the most recent output kept once the hard cap is hit (the tail usually holds the error). */
+const OUTPUT_TAIL_BYTES = 64 * 1024;
+
+/** Default hard cap on bytes retained per stream when `output.maxCollectedBytes` is not configured. */
+export function defaultMaxCollectedBytes(maxOutputLength: number): number {
+  return Math.max(4 * maxOutputLength, 1024 * 1024);
+}
+
+/**
+ * Collects a child stream's text with bounded memory: the first `cap` bytes plus a rolling tail
+ * window, so a command that prints gigabytes cannot OOM the server. The stream is always drained
+ * (never paused) so the child never blocks on a full pipe.
+ */
+class BoundedOutputCollector {
+  private head: string[] = [];
+  private headBytes = 0;
+  private tail: Array<{ chunk: string; bytes: number }> = [];
+  private tailBytes = 0;
+  droppedBytes = 0;
+
+  constructor(private readonly cap: number, private readonly tailWindow: number = OUTPUT_TAIL_BYTES) {
+    if (!Number.isSafeInteger(cap) || cap < 0) {
+      throw new RangeError('maxCollectedBytes must be a non-negative integer');
+    }
+  }
+
+  push(chunk: string): void {
+    const bytes = Buffer.byteLength(chunk, 'utf8');
+    if (this.cap === 0 || this.headBytes + bytes <= this.cap) {
+      this.head.push(chunk);
+      this.headBytes += bytes;
+      return;
+    }
+
+    this.tail.push({ chunk, bytes });
+    this.tailBytes += bytes;
+    // Evict from the front of the tail window, always keeping the newest chunk.
+    while (this.tail.length > 1 && this.tailBytes - this.tail[0].bytes >= this.tailWindow) {
+      const evicted = this.tail.shift()!;
+      this.tailBytes -= evicted.bytes;
+      this.droppedBytes += evicted.bytes;
+    }
+  }
+
+  text(): string {
+    const head = this.head.join('');
+    const tail = this.tail.map(entry => entry.chunk).join('');
+    if (this.droppedBytes === 0) {
+      return head + tail;
+    }
+    return `${head}\n... [Output truncated - ${this.droppedBytes} bytes dropped] ...\n${tail}`;
+  }
+}
+
 interface ShellCommandResult extends RawCommandResult {
   environment?: Record<string, string>;
   workingDirectory?: string;
@@ -367,6 +421,12 @@ export class ShellExecutor {
         childEnvironment.__MCP_EXEC_OLDPWD_VALUE = childEnvironment.OLDPWD;
       }
 
+      const maxCollectedBytes =
+        this.config.output.maxCollectedBytes ??
+        defaultMaxCollectedBytes(this.config.output.maxOutputLength);
+      const stdoutCollector = new BoundedOutputCollector(maxCollectedBytes);
+      const stderrCollector = new BoundedOutputCollector(maxCollectedBytes);
+
       // Wrap shell-backed commands so the shell reports its final exported
       // environment and cwd. With shell:false, preserve direct-spawn semantics.
       const child = spawn(
@@ -382,8 +442,6 @@ export class ShellExecutor {
         }
       );
 
-      let stdout = '';
-      let stderr = '';
       let settled = false;
       let timedOut = false;
       const timers: NodeJS.Timeout[] = [];
@@ -403,11 +461,15 @@ export class ShellExecutor {
       };
 
       const timeoutResult = (): ShellCommandResult => ({
-        stdout,
-        stderr,
+        stdout: stdoutCollector.text(),
+        stderr: stderrCollector.text(),
         exitCode: 124, // coreutils `timeout` convention
         timedOut: true,
         timeoutMs: timeout,
+        truncated: {
+          stdout: stdoutCollector.droppedBytes,
+          stderr: stderrCollector.droppedBytes,
+        },
       });
 
       const killProcessGroup = (pid: number, signal: NodeJS.Signals) => {
@@ -473,13 +535,17 @@ export class ShellExecutor {
         }, timeout));
       }
 
-      // Collect output
-      child.stdout?.on('data', (data) => {
-        stdout += data.toString();
+      // Collect output. setEncoding keeps multi-byte UTF-8 sequences intact across chunk
+      // boundaries; the collectors bound how much of the output is retained in memory.
+      child.stdout?.setEncoding('utf8');
+      child.stderr?.setEncoding('utf8');
+
+      child.stdout?.on('data', (chunk: string) => {
+        stdoutCollector.push(chunk);
       });
 
-      child.stderr?.on('data', (data) => {
-        stderr += data.toString();
+      child.stderr?.on('data', (chunk: string) => {
+        stderrCollector.push(chunk);
       });
 
       // Handle completion
@@ -497,6 +563,8 @@ export class ShellExecutor {
           return;
         }
 
+        const stdout = stdoutCollector.text();
+        const stderr = stderrCollector.text();
         const shellState = !captureShellState
           ? { stderr }
           : process.platform === 'win32'
@@ -511,6 +579,10 @@ export class ShellExecutor {
           signal: signal ?? undefined,
           environment: shellState.environment,
           workingDirectory: shellState.workingDirectory,
+          truncated: {
+            stdout: stdoutCollector.droppedBytes,
+            stderr: stderrCollector.droppedBytes,
+          },
         });
       });
 

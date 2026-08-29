@@ -57,6 +57,7 @@ const display_formatter_1 = require("./utils/display-formatter");
 const viewer_service_1 = require("./terminal/viewer-service");
 const terminal_session_manager_1 = require("./terminal/terminal-session-manager");
 const buffer_1 = require("./terminal/buffer");
+const DEFAULT_MAX_OUTPUT_LENGTH = parseInt(process.env.MCP_EXEC_MAX_OUTPUT_LENGTH || '10000'); // 10KB max output
 // Default configuration
 const DEFAULT_CONFIG = {
     security: {
@@ -115,7 +116,10 @@ const DEFAULT_CONFIG = {
         stripAnsi: process.env.MCP_EXEC_STRIP_ANSI !== 'false', // Enabled by default
         summarizeVerbose: process.env.MCP_EXEC_SUMMARIZE_VERBOSE !== 'false', // Enabled by default
         enableAiOptimizations: process.env.MCP_EXEC_ENABLE_AI_OPTIMIZATIONS !== 'false', // Enabled by default
-        maxOutputLength: parseInt(process.env.MCP_EXEC_MAX_OUTPUT_LENGTH || '10000'), // 10KB max output
+        maxOutputLength: DEFAULT_MAX_OUTPUT_LENGTH,
+        // Hard cap on bytes buffered in memory per stream while a command runs (0 = unlimited)
+        maxCollectedBytes: parseInt(process.env.MCP_EXEC_MAX_COLLECTED_BYTES ||
+            String((0, executor_1.defaultMaxCollectedBytes)(DEFAULT_MAX_OUTPUT_LENGTH))),
     },
     display: {
         showCommandHeader: process.env.MCP_EXEC_SHOW_COMMAND_HEADER !== 'false', // Enabled by default
@@ -340,6 +344,7 @@ const UpdateOutputFormattingSchema = zod_1.z.object({
     stripAnsi: zod_1.z.boolean().optional().describe('Strip ANSI escape codes'),
     enableAiOptimizations: zod_1.z.boolean().optional().describe('Enable AI-powered optimizations'),
     maxOutputLength: zod_1.z.number().optional().describe('Maximum output length in bytes'),
+    maxCollectedBytes: zod_1.z.number().int().nonnegative().optional().describe('Maximum bytes buffered in memory per stream while a command runs (0 = unlimited)'),
     summarizeVerbose: zod_1.z.boolean().optional().describe('Summarize verbose output'),
 });
 const UpdateDisplayOptionsSchema = zod_1.z.object({
@@ -1254,6 +1259,7 @@ class MCPShellServer {
                                 stripAnsi: { type: 'boolean', description: 'Strip ANSI escape codes' },
                                 enableAiOptimizations: { type: 'boolean', description: 'Enable AI-powered optimizations' },
                                 maxOutputLength: { type: 'number', description: 'Maximum output length in bytes' },
+                                maxCollectedBytes: { type: 'integer', minimum: 0, description: 'Maximum bytes buffered in memory per stream while a command runs (0 = unlimited)' },
                                 summarizeVerbose: { type: 'boolean', description: 'Summarize verbose output' },
                             },
                         },
@@ -2876,6 +2882,9 @@ class MCPShellServer {
                         }
                         if (parsed.maxOutputLength !== undefined) {
                             this.config.output.maxOutputLength = parsed.maxOutputLength;
+                        }
+                        if (parsed.maxCollectedBytes !== undefined) {
+                            this.config.output.maxCollectedBytes = parsed.maxCollectedBytes;
                         }
                         if (parsed.summarizeVerbose !== undefined) {
                             this.config.output.summarizeVerbose = parsed.summarizeVerbose;

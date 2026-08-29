@@ -321,6 +321,11 @@ export interface ServerConfig {
     summarizeVerbose: boolean;
     enableAiOptimizations: boolean;
     maxOutputLength: number;
+    /**
+     * Hard cap on the bytes retained in memory per stream while a command runs.
+     * 0 disables the cap; omitted falls back to max(4 x maxOutputLength, 1 MB).
+     */
+    maxCollectedBytes?: number;
   };
   display: {
     showCommandHeader: boolean;

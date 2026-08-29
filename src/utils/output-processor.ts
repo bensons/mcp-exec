@@ -17,6 +17,8 @@ export interface RawCommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  /** Bytes dropped per stream by the executor's in-memory collection cap. */
+  truncated?: { stdout: number; stderr: number };
   /** Set when the process was terminated by a signal (e.g. 'SIGTERM'). */
   signal?: string;
   /** Set when the process was killed because it exceeded its timeout. */
@@ -71,8 +73,18 @@ export class OutputProcessor {
       );
     }
 
+    // Surface output the executor had to drop to stay within its memory cap
+    const droppedBytes = (rawOutput.truncated?.stdout ?? 0) + (rawOutput.truncated?.stderr ?? 0);
+    const truncationWarning = `[Output truncated: ${droppedBytes} bytes dropped]`;
+    if (droppedBytes > 0) {
+      metadata.warnings.push(truncationWarning);
+    }
+
     // Generate AI-friendly summary
     const summary = this.generateSummary(stdout, stderr, exitCode, metadata, rawOutput);
+    if (droppedBytes > 0) {
+      summary.mainResult = `${summary.mainResult} ${truncationWarning}`;
+    }
 
     return {
       stdout,
@@ -171,15 +183,29 @@ export class OutputProcessor {
   private truncateOutput(text: string, maxLength: number): string {
     if (text.length <= maxLength) return text;
 
-    const truncated = text.substring(0, maxLength - 100);
-    const lastNewline = truncated.lastIndexOf('\n');
+    // Keep both ends: the prefix provides command context, while the suffix commonly
+    // contains the final error or summary. This also preserves the rolling tail retained
+    // by ShellExecutor after its in-memory collection cap is reached.
+    let omittedCharacters = text.length;
+    let marker = '';
+    let contentLength = 0;
 
-    if (lastNewline > maxLength * 0.8) {
-      return truncated.substring(0, lastNewline) +
-        `\n\n... [Output truncated - ${text.length - lastNewline} more characters]`;
+    // The marker length depends on the omitted count. Iterate to a stable allocation.
+    for (let iteration = 0; iteration < 4; iteration++) {
+      marker = `\n\n... [Output truncated - ${omittedCharacters} characters omitted] ...\n\n`;
+      contentLength = Math.max(0, maxLength - marker.length);
+      const nextOmittedCharacters = text.length - contentLength;
+      if (nextOmittedCharacters === omittedCharacters) break;
+      omittedCharacters = nextOmittedCharacters;
     }
 
-    return truncated + `\n\n... [Output truncated - ${text.length - maxLength + 100} more characters]`;
+    if (contentLength === 0) {
+      return text.slice(-maxLength);
+    }
+
+    const headLength = Math.ceil(contentLength / 2);
+    const tailLength = Math.floor(contentLength / 2);
+    return text.slice(0, headLength) + marker + text.slice(text.length - tailLength);
   }
 
   private detectStructuredOutput(stdout: string): CommandOutput['structuredOutput'] {
