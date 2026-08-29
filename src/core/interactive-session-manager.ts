@@ -3,6 +3,8 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
+import * as path from 'path';
+import { Writable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
 import { InteractiveSession, SessionOutput, SessionInfo, ServerConfig } from '../types/index';
 import { CommandGuard, buildFullCommand } from '../security/command-policy';
@@ -44,8 +46,16 @@ export class InteractiveSessionManager {
   }
 
   async startSession(options: StartSessionOptions): Promise<string> {
+    const cwd = path.resolve(options.cwd || process.cwd());
+    const environment: Record<string, string> = {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([_, value]) => value !== undefined)
+      ) as Record<string, string>,
+      ...options.env,
+    };
+
     if (this.commandGuard) {
-      await this.commandGuard(buildFullCommand(options.command, options.args));
+      await this.commandGuard(buildFullCommand(options.command, options.args), cwd, environment);
     }
 
     // Check session limit - only sessions that are still running occupy a slot
@@ -79,15 +89,8 @@ export class InteractiveSessionManager {
     }
 
     // Spawn the process
-    const environment: Record<string, string> = {
-      ...Object.fromEntries(
-        Object.entries(process.env).filter(([_, value]) => value !== undefined)
-      ) as Record<string, string>,
-      ...options.env,
-    };
-
     const childProcess = spawn(execCommand, execArgs, {
-      cwd: options.cwd || process.cwd(),
+      cwd,
       env: environment,
       shell: options.shell !== false,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -101,7 +104,7 @@ export class InteractiveSessionManager {
       process: childProcess,
       startTime,
       lastActivity: startTime,
-      cwd: options.cwd || process.cwd(),
+      cwd,
       env: environment,
       status: 'running',
       outputBuffer: [],
@@ -119,10 +122,6 @@ export class InteractiveSessionManager {
   }
 
   async sendInput(options: SendInputOptions): Promise<void> {
-    if (this.commandGuard) {
-      await this.commandGuard(options.input);
-    }
-
     const session = this.sessions.get(options.sessionId);
     if (!session) {
       throw new Error(`Session ${options.sessionId} not found`);
@@ -132,9 +131,35 @@ export class InteractiveSessionManager {
       throw new Error(`Session ${options.sessionId} is not running (status: ${session.status})`);
     }
 
+    const resultingCwd = this.commandGuard
+      ? await this.commandGuard(options.input, session.cwd, session.env)
+      : undefined;
+
+    // Writing to a child that closed (or never opened) its stdin raises EPIPE. Without this
+    // guard + the 'error' listener in setupProcessHandlers it surfaces as an uncaught
+    // exception and takes the whole server down.
+    const stdin: Writable | null | undefined = session.process.stdin;
+    if (!stdin || stdin.destroyed || !stdin.writable) {
+      throw new Error(`Session ${options.sessionId} stdin is closed`);
+    }
+
     // Send input to the process
     const input = options.addNewline !== false ? options.input + '\n' : options.input;
-    session.process.stdin?.write(input);
+    await new Promise<void>((resolve, reject) => {
+      const settle = (error?: Error | null) => {
+        clearTimeout(graceTimer);
+        if (error) reject(error); else resolve();
+      };
+      // Use a bounded wait for the flush. A child that never reads its stdin can leave a
+      // backpressured write pending forever, so we stop waiting after the grace period; a late
+      // EPIPE still lands on the stdin 'error' handler and fails the next sendInput.
+      const graceTimer = setTimeout(() => settle(), 50);
+      stdin.write(input, settle);
+    });
+    if (resultingCwd && options.addNewline !== false) {
+      session.cwd = resultingCwd;
+      session.env.PWD = resultingCwd;
+    }
     session.lastActivity = new Date();
   }
 
@@ -173,16 +198,20 @@ export class InteractiveSessionManager {
       throw new Error(`Session ${sessionId} not found`);
     }
 
-    if (session.status === 'running') {
+    // Check liveness, not status: a stdin EPIPE flips status to 'error' while the child is
+    // still alive, and keying off status would leak that process.
+    const isAlive = () => session.process.exitCode === null && session.process.signalCode === null;
+
+    if (isAlive()) {
       // Try graceful termination first
       session.process.kill('SIGTERM');
-      
+
       // Force kill after 5 seconds if still running
       setTimeout(() => {
-        if (session.status === 'running') {
+        if (isAlive()) {
           session.process.kill('SIGKILL');
         }
-      }, 5000);
+      }, 5000).unref();
     }
 
     // Remove from active sessions
@@ -242,7 +271,16 @@ export class InteractiveSessionManager {
       }
     });
 
-    // Handle process exit
+    // Handle stdin errors (EPIPE when the child closed its stdin or already exited).
+    // Without a listener Node rethrows these as uncaught exceptions, which crashes the server.
+    childProcess.stdin?.on('error', (error: Error) => {
+      session.status = 'error';
+      session.errorBuffer.push(`stdin error: ${error.message}`);
+      session.lastActivity = new Date();
+    });
+
+    // A child can exit while a descendant still holds its stdout/stderr pipes open. Keep the
+    // session readable until 'close', which fires only after those streams have drained.
     childProcess.on('close', (code: number | null) => {
       session.status = code === 0 ? 'finished' : 'error';
       session.lastActivity = new Date();
