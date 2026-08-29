@@ -200,7 +200,7 @@ async function run() {
     });
     const permissiveResult = await client.callTool('execute_command', {
       command: 'sudo',
-      args: ['--version'],
+      args: ['-n', 'true'],
     });
     if (/blocked by security policy/i.test(permissiveResult.text)) {
       throw new Error(`Live executor did not adopt permissive security config:\n${permissiveResult.text}`);
@@ -258,7 +258,7 @@ async function run() {
     await assertStillListed(client, ids, 'after full reset');
     const strictResult = await client.callTool('execute_command', {
       command: 'sudo',
-      args: ['--version'],
+      args: ['-n', 'true'],
     });
     if (!/blocked by security policy/i.test(strictResult.text)) {
       throw new Error(`Live executor kept stale permissive security after reset:\n${strictResult.text}`);
@@ -280,8 +280,12 @@ async function run() {
 
     await client.callTool('update_terminal_viewer', { bufferSize: 2 });
     const truncated = await readTerminalOutput(client, terminalId);
-    if (truncated.bufferLines > 2) {
-      throw new Error(`Retained PTY buffer was not truncated to 2 lines: ${truncated.bufferLines}`);
+    const truncatedBytes = Buffer.byteLength(truncated.recentOutput, 'utf8');
+    if (truncatedBytes > 200) {
+      throw new Error(`Retained PTY buffer exceeded its 200-byte capacity: ${truncatedBytes}`);
+    }
+    if (truncated.recentOutput.includes('before-viewer-restart-0')) {
+      throw new Error('Lowering the retained PTY capacity did not evict its oldest output');
     }
     if (!truncated.terminalViewerUrl) {
       throw new Error('Retained PTY lost its viewer URL after viewer restart');
@@ -310,8 +314,8 @@ async function run() {
       return output;
     }, 'terminal output after viewer restart');
     const afterRestart = await readTerminalOutput(client, terminalId);
-    if (afterRestart.bufferLines > 20) {
-      throw new Error(`Updated PTY buffer limit was not enforced: ${afterRestart.bufferLines}`);
+    if (Buffer.byteLength(afterRestart.recentOutput, 'utf8') > 2000) {
+      throw new Error('Updated PTY buffer exceeded its 2,000-byte capacity');
     }
     const markerOccurrences = afterRestart.recentOutput.split(afterRestartMarker).length - 1;
     if (markerOccurrences > 2) {
