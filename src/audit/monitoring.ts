@@ -2,8 +2,12 @@
  * Monitoring and alerting system for audit events
  */
 
-import { LogEntry } from '../types/index';
+import { LogEntry, SecurityCategory } from '../types/index';
 import notifier from 'node-notifier';
+
+function hasSecurityCategory(log: LogEntry, category: SecurityCategory): boolean {
+  return log.securityCheck.category === category || log.securityCheck.categories?.includes(category) === true;
+}
 
 export interface AlertRule {
   id: string;
@@ -312,7 +316,7 @@ export class MonitoringSystem {
       id: 'privileged-command',
       name: 'Privileged Command Executed',
       description: 'Command executed with elevated privileges',
-      condition: (log) => log.command.toLowerCase().includes('sudo') || log.command.toLowerCase().includes('su '),
+      condition: (log) => hasSecurityCategory(log, 'privilege-escalation'),
       severity: 'medium',
       enabled: true,
       cooldownMinutes: 10,
@@ -334,10 +338,8 @@ export class MonitoringSystem {
       id: 'suspicious-file-ops',
       name: 'Suspicious File Operations',
       description: 'Potentially dangerous file operations detected',
-      condition: (log) => {
-        const cmd = log.command.toLowerCase();
-        return cmd.includes('rm -rf') || cmd.includes('del /f /s') || cmd.includes('format');
-      },
+      condition: (log) =>
+        hasSecurityCategory(log, 'destructive') && log.securityCheck.riskLevel === 'high',
       severity: 'critical',
       enabled: true,
       cooldownMinutes: 1,

@@ -78,11 +78,21 @@ export interface FileSystemDiff {
   commandId: string;
 }
 
+/** Why a command was flagged; monitoring alert rules key off this. */
+export type SecurityCategory =
+  | 'destructive'
+  | 'privilege-escalation'
+  | 'system-control'
+  | 'remote-execution';
+
 export interface ValidationResult {
   allowed: boolean;
   reason?: string;
   suggestions?: string[];
   riskLevel: 'low' | 'medium' | 'high';
+  category?: SecurityCategory;
+  /** All classifications when a command has more than one security concern. */
+  categories?: SecurityCategory[];
   // Set with allowed: false when the command is only blocked pending an
   // explicit confirm_command call (see ConfirmationManager).
   requiresConfirmation?: boolean;

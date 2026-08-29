@@ -14,9 +14,10 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
-// Matches a dangerous pattern (/shutdown/) but is completely harmless.
-const DANGEROUS_COMMAND = 'echo';
-const DANGEROUS_ARGS = ['shutdown-confirmation-marker'];
+// A genuinely destructive command, scoped to the test's temporary cwd.
+const DANGEROUS_COMMAND = 'rm';
+const DANGEROUS_TARGET = 'confirmation-flow-target';
+const DANGEROUS_ARGS = ['-rf', DANGEROUS_TARGET];
 
 class McpClient {
   constructor(logDir) {
@@ -122,6 +123,9 @@ function extractConfirmationId(text) {
 
 async function run() {
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-confirm-'));
+  const target = path.join(logDir, DANGEROUS_TARGET);
+  fs.mkdirSync(target);
+  fs.writeFileSync(path.join(target, 'marker.txt'), 'pending confirmation');
   const client = new McpClient(logDir);
 
   try {
@@ -162,10 +166,7 @@ async function run() {
       confirmed.text.includes('Confirmed:'),
       `expected a confirmed execution, got:\n${confirmed.text}`
     );
-    assert.ok(
-      confirmed.text.includes(DANGEROUS_ARGS[0]),
-      `expected real command output in:\n${confirmed.text}`
-    );
+    assert.ok(!fs.existsSync(target), 'confirmed command did not remove its scoped test target');
     assert.ok(
       !confirmed.text.includes('blocked by security policy'),
       `confirmed command should not be blocked:\n${confirmed.text}`

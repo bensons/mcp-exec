@@ -103,7 +103,7 @@ async function testTerminalGuardReceivesConfirmationBypass() {
   try {
     const guard = server.terminalSessionManager.commandGuard;
     assert.strictEqual(typeof guard, 'function', 'terminal command guard was not installed');
-    await guard('echo shutdown-terminal-guard', { skipConfirmation: true });
+    await guard('rm -rf confirmation-terminal-guard-target', { skipConfirmation: true });
   } finally {
     await closeServer(server);
   }
@@ -122,7 +122,7 @@ async function testViewerInputIsRevalidatedAtConfirmationTime() {
       },
     };
 
-    const command = 'echo shutdown-viewer > /tmp/mcp-exec-confirmation-must-not-write';
+    const command = 'rm -rf confirmation-viewer-target';
     const requested = resultText(await callTool(server, 'send_to_session', {
       sessionId: 'viewer-session',
       input: command,
