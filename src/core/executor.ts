@@ -116,6 +116,17 @@ export class ShellExecutor {
         ...options.env,
       };
 
+      const shell = resolveShellOption(options.shell, {
+        cwd: workingDirectory,
+        env: environment,
+      });
+
+      if (typeof shell === 'string') {
+        await assertCommandAllowed(this.securityManager, shell, this.auditLogger, {
+          source: 'execute_command_shell',
+        });
+      }
+
       // Execute command
       await this.auditLogger.debug('Starting command execution', {
         commandId,
@@ -129,7 +140,7 @@ export class ShellExecutor {
         {
           cwd: workingDirectory,
           env: environment,
-          shell: resolveShellOption(options.shell),
+          shell,
           timeout: options.timeout || this.config.security.timeout,
         }
       );

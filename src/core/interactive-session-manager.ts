@@ -50,14 +50,7 @@ export class InteractiveSessionManager {
       throw new Error(`Maximum number of interactive sessions (${this.config.maxInteractiveSessions}) reached`);
     }
 
-    const sessionId = uuidv4();
-    const startTime = new Date();
-
-    // shell: true/undefined -> platform default shell, false -> no shell at all,
-    // string -> the requested shell executable.
-    const shell = resolveShellOption(options.shell);
-
-    // Spawn the process
+    const workingDirectory = options.cwd || process.cwd();
     const environment: Record<string, string> = {
       ...Object.fromEntries(
         Object.entries(process.env).filter(([_, value]) => value !== undefined)
@@ -65,8 +58,24 @@ export class InteractiveSessionManager {
       ...options.env,
     };
 
+    // shell: true/undefined -> platform default shell, false -> no shell at all,
+    // string -> the requested shell executable resolved in the child context.
+    const shell = resolveShellOption(options.shell, {
+      cwd: workingDirectory,
+      env: environment,
+    });
+
+    // A custom shell can execute arbitrary behavior before the requested command,
+    // so it must pass the same policy as the command itself.
+    if (this.commandGuard && typeof shell === 'string') {
+      await this.commandGuard(shell);
+    }
+
+    const sessionId = uuidv4();
+    const startTime = new Date();
+
     const childProcess = spawn(options.command, options.args || [], {
-      cwd: options.cwd || process.cwd(),
+      cwd: workingDirectory,
       env: environment,
       shell,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -80,7 +89,7 @@ export class InteractiveSessionManager {
       process: childProcess,
       startTime,
       lastActivity: startTime,
-      cwd: options.cwd || process.cwd(),
+      cwd: workingDirectory,
       env: environment,
       status: 'running',
       outputBuffer: [],

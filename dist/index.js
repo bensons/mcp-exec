@@ -163,7 +163,7 @@ const ExecuteCommandSchema = zod_1.z.object({
     cwd: zod_1.z.string().optional().describe('Working directory for command execution'),
     env: zod_1.z.record(zod_1.z.string()).optional().describe('Environment variables'),
     timeout: zod_1.z.number().optional().describe('Timeout in milliseconds'),
-    shell: zod_1.z.union([zod_1.z.boolean(), zod_1.z.string()]).optional().describe('Shell to use for execution'),
+    shell: zod_1.z.union([zod_1.z.boolean(), zod_1.z.string()]).optional().describe('Shell to use for execution: true (default) runs the command through the platform shell, false runs it directly with args passed verbatim (no shell parsing), or the path/name of a specific shell such as "/bin/zsh"'),
     aiContext: zod_1.z.string().optional().describe('AI context/intent for this command'),
     enableTerminalViewer: zod_1.z.boolean().optional().describe('Create a terminal session with browser viewer instead of regular execution'),
     terminalSize: zod_1.z.object({
@@ -176,7 +176,7 @@ const StartInteractiveSessionSchema = zod_1.z.object({
     args: zod_1.z.array(zod_1.z.string()).optional().describe('Command arguments'),
     cwd: zod_1.z.string().optional().describe('Working directory for the session'),
     env: zod_1.z.record(zod_1.z.string()).optional().describe('Environment variables'),
-    shell: zod_1.z.union([zod_1.z.boolean(), zod_1.z.string()]).optional().describe('Shell to use for execution'),
+    shell: zod_1.z.union([zod_1.z.boolean(), zod_1.z.string()]).optional().describe('Shell to use for execution: true (default) runs the command through the platform shell, false runs it directly with args passed verbatim (no shell parsing), or the path/name of a specific shell such as "/bin/zsh"'),
     aiContext: zod_1.z.string().optional().describe('AI context/intent for this session'),
 });
 const StartTerminalSessionSchema = zod_1.z.object({
@@ -489,7 +489,7 @@ class MCPShellServer {
                                 cwd: { type: 'string', description: 'Working directory for command execution' },
                                 env: { type: 'object', description: 'Environment variables' },
                                 timeout: { type: 'number', description: 'Timeout in milliseconds' },
-                                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution' },
+                                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution: true (default) runs the command through the platform shell, false runs it directly with args passed verbatim (no shell parsing), or the path/name of a specific shell such as "/bin/zsh"' },
                                 aiContext: { type: 'string', description: 'AI context/intent for this command' },
                                 enableTerminalViewer: { type: 'boolean', description: 'Create a terminal session with browser viewer instead of regular execution' },
                                 terminalSize: {
@@ -521,7 +521,7 @@ class MCPShellServer {
                                 args: { type: 'array', items: { type: 'string' }, description: 'Command arguments' },
                                 cwd: { type: 'string', description: 'Working directory for the session' },
                                 env: { type: 'object', description: 'Environment variables' },
-                                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution' },
+                                shell: { type: ['boolean', 'string'], description: 'Shell to use for execution: true (default) runs the command through the platform shell, false runs it directly with args passed verbatim (no shell parsing), or the path/name of a specific shell such as "/bin/zsh"' },
                                 aiContext: { type: 'string', description: 'AI context/intent for this session' },
                             },
                         },
@@ -1361,6 +1361,7 @@ class MCPShellServer {
                                     args: parsed.args,
                                     cwd: parsed.cwd,
                                     env: parsed.env,
+                                    shell: parsed.shell,
                                     enableTerminalViewer: true,
                                     terminalSize: parsed.terminalSize || { cols: 80, rows: 24 },
                                     aiContext: parsed.aiContext,
@@ -1372,11 +1373,14 @@ class MCPShellServer {
                                 }
                                 // Get viewer URL
                                 const viewerUrl = this.terminalViewerService?.getSessionUrl(sessionId) || 'Service not available';
+                                const behavior = parsed.shell === false
+                                    ? `• **Direct Process**: The command is running without shell parsing, so arguments are passed verbatim\n• **Session Lifetime**: The terminal session ends when the command exits`
+                                    : `• **Persistent Environment**: This terminal session will continue running even after individual commands exit\n• **Shell Persistence**: When you send \`exit\` to a command like \`bash\`, it exits that command but returns to the parent shell`;
                                 return {
                                     content: [
                                         {
                                             type: 'text',
-                                            text: `🖥️ **Terminal Session Started**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Terminal (PTY-based)\n**Viewer URL:** ${viewerUrl}\n\n**Important - Terminal Session Behavior:**\n• **Persistent Environment**: This terminal session will continue running even after individual commands exit\n• **Shell Persistence**: When you send \`exit\` to a command like \`bash\`, it exits that command but returns to the parent shell\n• **Session Termination**: Use \`kill_session\` to terminate the entire terminal session\n• **Live Viewing**: Monitor the session in real-time via the browser viewer\n\n**Usage:**\n• Use \`send_to_session\` to send commands\n• Use \`read_session_output\` to read terminal output\n• Use \`kill_session\` to terminate when done`,
+                                            text: `🖥️ **Terminal Session Started**\n\n**Command:** \`${fullCommand}\`\n**Session ID:** \`${sessionId}\`\n**Type:** Terminal (PTY-based)\n**Viewer URL:** ${viewerUrl}\n\n**Important - Terminal Session Behavior:**\n${behavior}\n• **Session Termination**: Use \`kill_session\` to terminate the entire terminal session\n• **Live Viewing**: Monitor the session in real-time via the browser viewer\n\n**Usage:**\n• Use \`send_to_session\` to send commands\n• Use \`read_session_output\` to read terminal output\n• Use \`kill_session\` to terminate when done`,
                                         },
                                     ],
                                 };

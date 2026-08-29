@@ -9,6 +9,7 @@ import { TerminalSession, TerminalBuffer } from './types';
 import { InteractiveSessionManager, StartSessionOptions, SendInputOptions } from '../core/interactive-session-manager';
 import { ServerConfig } from '../types/index';
 import { CommandGuard, buildFullCommand } from '../security/command-policy';
+import { resolveShellOption } from '../core/shell-option';
 
 export interface TerminalStartSessionOptions extends Omit<StartSessionOptions, 'command'> {
   command?: string; // Optional for terminal sessions - defaults to system shell
@@ -66,24 +67,41 @@ export class TerminalSessionManager {
       throw new Error(`Maximum number of terminal sessions (${this.terminalViewerConfig.maxSessions}) reached`);
     }
 
+    const workingDirectory = options.cwd || process.cwd();
+    const environment: Record<string, string> = {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([_, value]) => value !== undefined)
+      ) as Record<string, string>,
+      ...options.env,
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+    };
+    const shell = resolveShellOption(options.shell, {
+      cwd: workingDirectory,
+      env: environment,
+    });
+
+    if (this.commandGuard && typeof shell === 'string') {
+      await this.commandGuard(shell);
+    }
+
+    if (shell === false && !options.command) {
+      throw new Error('shell:false requires a command for terminal-viewer execution');
+    }
+
     const sessionId = uuidv4();
     const startTime = new Date();
 
     // Create PTY process
-    const ptyProcess = this.createPtyProcess(options);
+    const ptyProcess = this.createPtyProcess(options, shell, workingDirectory, environment);
 
     // Create terminal session
     const session: TerminalSession = {
       sessionId,
       command: options.command || 'system shell',
       args: options.args || [],
-      cwd: options.cwd || process.cwd(),
-      env: {
-        ...Object.fromEntries(
-          Object.entries(process.env).filter(([_, value]) => value !== undefined)
-        ) as Record<string, string>,
-        ...options.env,
-      },
+      cwd: workingDirectory,
+      env: environment,
       startTime,
       lastActivity: startTime,
       status: 'running',
@@ -114,27 +132,29 @@ export class TerminalSessionManager {
     return sessionId;
   }
 
-  private createPtyProcess(options: TerminalStartSessionOptions): any {
-    const shell = this.getShell();
+  private createPtyProcess(
+    options: TerminalStartSessionOptions,
+    shellOption: boolean | string,
+    workingDirectory: string,
+    environment: Record<string, string>
+  ): any {
+    const executable = shellOption === false
+      ? options.command!
+      : typeof shellOption === 'string'
+        ? shellOption
+        : this.getShell();
+    const executableArgs = shellOption === false ? options.args || [] : [];
     const size = options.terminalSize || { cols: 80, rows: 24 };
 
-    console.error(`[DEBUG] Creating PTY with shell: ${shell}`);
-    
-    // Prepare environment
-    const environment = {
-      ...process.env,
-      ...options.env,
-      TERM: 'xterm-256color',
-      COLORTERM: 'truecolor',
-    };
+    console.error(`[DEBUG] Creating PTY with executable: ${executable}`);
 
     try {
       // Create PTY process
-      const ptyProcess = pty.spawn(shell, [], {
+      const ptyProcess = pty.spawn(executable, executableArgs, {
         name: 'xterm-color',
         cols: size.cols,
         rows: size.rows,
-        cwd: options.cwd || process.cwd(),
+        cwd: workingDirectory,
         env: environment,
         encoding: 'utf8',
       });
@@ -142,13 +162,13 @@ export class TerminalSessionManager {
       console.error(`[DEBUG] PTY process created successfully with PID: ${ptyProcess.pid}`);
 
       // Send initial command if provided
-      if (options.command) {
+      if (options.command && shellOption !== false) {
         const fullCommand = options.args && options.args.length > 0
           ? `${options.command} ${options.args.join(' ')}`
           : options.command;
         console.error(`[DEBUG] Sending initial command to PTY: "${fullCommand}"`);
         ptyProcess.write(fullCommand + '\r');
-      } else {
+      } else if (!options.command) {
         console.error(`[DEBUG] No initial command provided, PTY will start with default shell`);
       }
 

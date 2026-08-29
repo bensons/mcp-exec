@@ -10,6 +10,7 @@ const command_policy_1 = require("../security/command-policy");
 const output_processor_1 = require("../utils/output-processor");
 const intent_tracker_1 = require("../utils/intent-tracker");
 const interactive_session_manager_1 = require("./interactive-session-manager");
+const shell_option_1 = require("./shell-option");
 class ShellExecutor {
     securityManager;
     contextManager;
@@ -78,6 +79,15 @@ class ShellExecutor {
                 ...context.environmentVariables,
                 ...options.env,
             };
+            const shell = (0, shell_option_1.resolveShellOption)(options.shell, {
+                cwd: workingDirectory,
+                env: environment,
+            });
+            if (typeof shell === 'string') {
+                await (0, command_policy_1.assertCommandAllowed)(this.securityManager, shell, this.auditLogger, {
+                    source: 'execute_command_shell',
+                });
+            }
             // Execute command
             await this.auditLogger.debug('Starting command execution', {
                 commandId,
@@ -87,7 +97,7 @@ class ShellExecutor {
             const result = await this.executeWithTimeout(options.command, options.args || [], {
                 cwd: workingDirectory,
                 env: environment,
-                shell: options.shell !== undefined ? options.shell : true,
+                shell,
                 timeout: options.timeout || this.config.security.timeout,
             });
             await this.auditLogger.info('Command executed successfully', {
@@ -182,27 +192,9 @@ class ShellExecutor {
     async executeWithTimeout(command, args, options) {
         return new Promise((resolve, reject) => {
             const { timeout, ...spawnOptions } = options;
-            // Determine execution method based on shell option
-            let execCommand;
-            let execArgs;
-            if (spawnOptions.shell) {
-                // When shell=true, let Node.js handle the shell execution
-                execCommand = command;
-                execArgs = args;
-            }
-            else {
-                // When shell=false, manually construct shell command
-                if (process.platform === 'win32') {
-                    execCommand = 'cmd.exe';
-                    execArgs = ['/c', command, ...args];
-                }
-                else {
-                    execCommand = '/bin/sh';
-                    const fullCommand = args.length > 0 ? `${command} ${args.join(' ')}` : command;
-                    execArgs = ['-c', fullCommand];
-                }
-            }
-            const child = (0, child_process_1.spawn)(execCommand, execArgs, {
+            // spawnOptions.shell is already resolved: true/string spawns through a shell,
+            // false spawns the command directly with args kept separate.
+            const child = (0, child_process_1.spawn)(command, args, {
                 ...spawnOptions,
                 stdio: ['pipe', 'pipe', 'pipe'],
             });
