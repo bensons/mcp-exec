@@ -20,9 +20,45 @@ import { InteractiveSessionManager, StartSessionOptions, SendInputOptions } from
 const SIGKILL_GRACE_MS = 2000;
 /** How long after SIGKILL we wait for 'close' before settling anyway. */
 const SIGKILL_SETTLE_MS = 500;
+/** How often to check whether a SIGKILLed process group has disappeared. */
+const PROCESS_GROUP_POLL_MS = 25;
 
 function signalNumber(signal: NodeJS.Signals): number {
   return (os.constants.signals as unknown as Record<string, number>)[signal] ?? 0;
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+function terminateWindowsProcessTree(pid: number): Promise<void> {
+  return new Promise((resolve) => {
+    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+    const taskkill = spawn(
+      path.join(systemRoot, 'System32', 'taskkill.exe'),
+      ['/pid', String(pid), '/t', '/f'],
+      {
+        shell: false,
+        stdio: 'ignore',
+        windowsHide: true,
+      }
+    );
+
+    let completed = false;
+    const complete = () => {
+      if (completed) return;
+      completed = true;
+      resolve();
+    };
+
+    taskkill.once('error', complete);
+    taskkill.once('close', complete);
+  });
 }
 
 export interface ExecuteCommandOptions {
@@ -308,32 +344,65 @@ export class ShellExecutor {
         timeoutMs: timeout,
       });
 
-      const killTree = (signal: NodeJS.Signals) => {
+      const killProcessGroup = (pid: number, signal: NodeJS.Signals) => {
         try {
-          if (child.pid !== undefined && process.platform !== 'win32') {
-            process.kill(-child.pid, signal);
-          } else {
-            child.kill(signal);
-          }
+          process.kill(-pid, signal);
         } catch {
           // Process (group) already gone
         }
+      };
+
+      const waitForProcessGroupExit = (pid: number, deadline: number) => {
+        if (!processGroupExists(pid) || Date.now() >= deadline) {
+          settle(timeoutResult());
+          return;
+        }
+
+        const poll = setTimeout(
+          () => waitForProcessGroupExit(pid, deadline),
+          PROCESS_GROUP_POLL_MS
+        );
+        timers.push(poll);
       };
 
       // Set up timeout
       if (timeout > 0) {
         timers.push(setTimeout(() => {
           timedOut = true;
-          killTree('SIGTERM');
 
-          const sigkill = setTimeout(() => {
-            killTree('SIGKILL');
-            // Hard fallback: settle even if 'close' never arrives
-            const giveUp = setTimeout(() => settle(timeoutResult()), SIGKILL_SETTLE_MS);
+          if (child.pid === undefined) {
+            child.kill('SIGKILL');
+            settle(timeoutResult());
+            return;
+          }
+
+          const pid = child.pid;
+          if (process.platform === 'win32') {
+            // Use taskkill directly (without a shell) so the wrapping cmd.exe and
+            // every descendant are terminated without interpolating user input.
+            void terminateWindowsProcessTree(pid).then(() => settle(timeoutResult()));
+
+            // Do not let a malfunctioning system utility leave execution pending.
+            const giveUp = setTimeout(() => {
+              child.kill('SIGKILL');
+              settle(timeoutResult());
+            }, SIGKILL_GRACE_MS + SIGKILL_SETTLE_MS);
             giveUp.unref();
             timers.push(giveUp);
+            return;
+          }
+
+          killProcessGroup(pid, 'SIGTERM');
+
+          const sigkill = setTimeout(() => {
+            // The shell may already have emitted 'close', but descendants can
+            // still be alive in its process group. Always preserve this
+            // escalation until that group has gone away.
+            if (processGroupExists(pid)) {
+              killProcessGroup(pid, 'SIGKILL');
+            }
+            waitForProcessGroupExit(pid, Date.now() + SIGKILL_SETTLE_MS);
           }, SIGKILL_GRACE_MS);
-          sigkill.unref();
           timers.push(sigkill);
         }, timeout));
       }
@@ -350,8 +419,15 @@ export class ShellExecutor {
       // Handle completion
       child.on('close', (code, signal) => {
         if (timedOut) {
-          // Return the partial output collected before the timeout
-          settle(timeoutResult());
+          if (
+            process.platform !== 'win32' &&
+            child.pid !== undefined &&
+            !processGroupExists(child.pid)
+          ) {
+            // The whole process group exited during the SIGTERM grace period.
+            settle(timeoutResult());
+          }
+          // Otherwise the timeout path remains responsible for tree cleanup.
           return;
         }
 

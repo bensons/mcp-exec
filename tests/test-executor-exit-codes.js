@@ -10,7 +10,6 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execSync } = require('child_process');
 
 const { ShellExecutor } = require('../dist/core/executor');
 const { SecurityManager } = require('../dist/security/manager');
@@ -79,24 +78,50 @@ function createExecutor() {
   );
 }
 
-function findLeftoverProcesses() {
+function nodeEvalCommand(source) {
+  const payload = Buffer.from(source, 'utf8').toString('base64');
+  return `node -e "eval(Buffer.from('${payload}','base64').toString())"`;
+}
+
+function processExists(pid) {
   try {
-    return execSync(`pgrep -f ${MARKER}`, { encoding: 'utf8' })
-      .split('\n')
-      .map(line => line.trim())
-      .filter(Boolean);
+    process.kill(pid, 0);
+    return true;
   } catch (error) {
-    return []; // pgrep exits 1 when nothing matches
+    return error.code !== 'ESRCH';
   }
+}
+
+async function waitForProcessExit(pid, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (processExists(pid) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  return !processExists(pid);
 }
 
 async function testTimeout(executor) {
   console.log('📝 timed-out command returns 124 and kills the process tree');
 
-  // Compound command: the shell forks a child, so killing only the shell
-  // (the pre-fix behaviour) leaves the child running as an orphan.
-  const command =
-    `echo started-${MARKER}; node -e "setTimeout(() => {}, 5000)" ${MARKER}-orphan`;
+  // The grandchild closes its stdio and ignores SIGTERM on POSIX. This makes
+  // the wrapping shell emit `close` while the process group is still alive,
+  // which used to cancel the pending SIGKILL escalation.
+  const childSource = `
+    if (process.platform !== 'win32') process.on('SIGTERM', () => {});
+    setInterval(() => {}, 1000);
+  `;
+  const parentSource = `
+    const { spawn } = require('child_process');
+    const child = spawn(
+      process.execPath,
+      ['-e', ${JSON.stringify(childSource)}, ${JSON.stringify(`${MARKER}-orphan`)}],
+      { stdio: 'ignore' }
+    );
+    console.log('started-${MARKER}');
+    console.log('child-pid:' + child.pid);
+    setInterval(() => {}, 1000);
+  `;
+  const command = nodeEvalCommand(parentSource);
 
   const start = Date.now();
   const result = await executor.executeCommand({ command, timeout: 500, cwd: TMP_DIR });
@@ -113,22 +138,37 @@ async function testTimeout(executor) {
     result.stdout.includes(`started-${MARKER}`),
     `partial output should be preserved, got: ${JSON.stringify(result.stdout)}`
   );
-  assert.ok(elapsed < 4000, `expected a fast return, took ${elapsed}ms`);
+  assert.ok(elapsed < 5000, `expected a bounded return, took ${elapsed}ms`);
 
-  const leftovers = findLeftoverProcesses();
-  leftovers.forEach(pid => {
+  const pidMatch = result.stdout.match(/child-pid:(\d+)/);
+  assert.ok(pidMatch, `expected child PID in output, got: ${JSON.stringify(result.stdout)}`);
+  const childPid = Number(pidMatch[1]);
+  const childExited = await waitForProcessExit(childPid);
+  if (!childExited) {
     try {
-      process.kill(Number(pid), 'SIGKILL');
+      process.kill(childPid, 'SIGKILL');
     } catch (error) {
       // already gone
     }
-  });
-  assert.deepStrictEqual(leftovers, [], `timeout left orphaned process(es): ${leftovers}`);
+  }
+  assert.ok(childExited, `timeout left descendant process ${childPid} running`);
+
+  if (process.platform !== 'win32') {
+    assert.ok(
+      elapsed >= 1800,
+      `executor returned before the SIGKILL grace period elapsed (${elapsed}ms)`
+    );
+  }
 
   console.log(`✅ exit code 124 in ${elapsed}ms, no orphaned processes`);
 }
 
 async function testSignal(executor) {
+  if (process.platform === 'win32') {
+    console.log('⏭️  signal exit-code test is POSIX-only');
+    return;
+  }
+
   console.log('📝 signal-killed command reports 128 + signal, not success');
 
   const result = await executor.executeCommand({ command: 'kill -TERM $$', cwd: TMP_DIR });
@@ -140,10 +180,27 @@ async function testSignal(executor) {
   console.log('✅ exit code 143, success: false, mentions SIGTERM');
 }
 
+async function testNonzeroExit(executor) {
+  console.log('📝 non-zero exit code is preserved');
+
+  const result = await executor.executeCommand({
+    command: nodeEvalCommand('process.exit(7)'),
+    cwd: TMP_DIR,
+  });
+
+  assert.strictEqual(result.exitCode, 7, `expected exit code 7, got ${result.exitCode}`);
+  assert.strictEqual(result.summary.success, false, 'non-zero exit must not report success');
+
+  console.log('✅ exit code 7, success: false');
+}
+
 async function testSuccessStillWorks(executor) {
   console.log('📝 normal command still reports success');
 
-  const result = await executor.executeCommand({ command: `echo ok-${MARKER}`, cwd: TMP_DIR });
+  const result = await executor.executeCommand({
+    command: nodeEvalCommand(`console.log(${JSON.stringify(`ok-${MARKER}`)})`),
+    cwd: TMP_DIR,
+  });
 
   assert.strictEqual(result.exitCode, 0);
   assert.strictEqual(result.summary.success, true);
@@ -159,8 +216,10 @@ async function run() {
   try {
     await testTimeout(executor);
     await testSignal(executor);
+    await testNonzeroExit(executor);
     await testSuccessStillWorks(executor);
   } finally {
+    await executor.shutdown();
     fs.rmSync(TMP_DIR, { recursive: true, force: true });
   }
 
