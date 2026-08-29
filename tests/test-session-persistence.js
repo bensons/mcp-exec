@@ -1,225 +1,310 @@
 #!/usr/bin/env node
 
-/**
- * Test script for session-file persistence (issue #31).
- *
- * Verifies that the session snapshot:
- *  - lives next to the audit log (MCP_EXEC_LOG_DIR/session.json), not process.cwd()
- *  - is written a handful of times for 200 commands (debounced), not once per command
- *  - stays small (< 200 KB) with truncated output
- *  - never contains the inherited process environment (no SUPER_SECRET)
- *  - restores history (and its output cache) on the next server start
- */
+/** Deterministic regressions for scoped and durable session persistence. */
 
-const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
-const SERVER_PATH = path.resolve(__dirname, '..', 'dist', 'index.js');
-const COMMAND_COUNT = 200;
-const MAX_SESSION_FILE_BYTES = 200 * 1024;
-const MAX_WRITES = 20; // "a handful" -- one write per command would be ~200
+const { ContextManager } = require('../dist/context/manager.js');
 
-class Client {
-  constructor(logDir, extraEnv = {}) {
-    this.proc = spawn('node', [SERVER_PATH], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        MCP_EXEC_LOG_DIR: logDir,
-        MCP_EXEC_TERMINAL_VIEWER_ENABLED: 'false',
-        ...extraEnv,
-      },
-    });
-    this.nextId = 1;
-    this.pending = new Map();
-    this.buffer = '';
-    this.proc.stdout.on('data', (chunk) => this.onData(chunk));
-    this.proc.stderr.on('data', () => {}); // server logs progress to stderr
-  }
-
-  onData(chunk) {
-    this.buffer += chunk.toString();
-    let index;
-    while ((index = this.buffer.indexOf('\n')) >= 0) {
-      const line = this.buffer.slice(0, index).trim();
-      this.buffer = this.buffer.slice(index + 1);
-      if (!line) continue;
-      let message;
-      try {
-        message = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      const resolve = this.pending.get(message.id);
-      if (resolve) {
-        this.pending.delete(message.id);
-        resolve(message);
-      }
-    }
-  }
-
-  request(method, params) {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Timed out waiting for ${method} (id ${id})`));
-      }, 30000);
-      this.pending.set(id, (message) => {
-        clearTimeout(timer);
-        resolve(message);
-      });
-      this.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-    });
-  }
-
-  async initialize() {
-    await this.request('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: { name: 'session-persistence-test', version: '1.0.0' },
-    });
-  }
-
-  call(name, args) {
-    return this.request('tools/call', { name, arguments: args });
-  }
-
-  shutdown(signal = 'SIGTERM') {
-    return new Promise((resolve) => {
-      this.proc.on('close', resolve);
-      this.proc.kill(signal);
-      setTimeout(() => {
-        this.proc.kill('SIGKILL');
-        resolve();
-      }, 8000).unref();
-    });
-  }
-}
+const CONFIG = {
+  preserveWorkingDirectory: true,
+  sessionPersistence: true,
+  maxHistorySize: 1000,
+};
 
 function assert(condition, message) {
-  if (!condition) {
-    throw new Error(message);
-  }
+  if (!condition) throw new Error(message);
   console.log(`✅ ${message}`);
 }
 
-async function run() {
-  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-session-'));
-  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-cwd-'));
-  const sessionFile = path.join(logDir, 'session.json');
-  const legacyFile = path.join(workDir, '.mcp-exec-session.json');
+function logger(logDir, filename = 'audit.log') {
+  return {
+    getLogFilePath: () => path.join(logDir, filename),
+    notice: async () => {},
+    debug: async () => {},
+  };
+}
 
-  console.log('🧪 Testing session-file persistence (issue #31)');
-  console.log(`   log dir: ${logDir}`);
+function commandOutput(stdout = '', stderr = '', exitCode = 0, mainResult = stdout.trim()) {
+  return {
+    stdout,
+    stderr,
+    exitCode,
+    metadata: {
+      executionTime: 1,
+      commandType: 'test',
+      affectedResources: [],
+      warnings: [],
+      suggestions: [],
+    },
+    summary: {
+      success: exitCode === 0,
+      mainResult,
+      sideEffects: [],
+    },
+  };
+}
 
-  // Count distinct session-file writes while commands are running.
-  const seenMtimes = new Set();
-  const poller = setInterval(() => {
-    try {
-      seenMtimes.add(fs.statSync(sessionFile).mtimeMs);
-    } catch {
-      // not written yet
-    }
-  }, 25);
+async function add(manager, id, command, output = commandOutput()) {
+  await manager.updateAfterCommand({
+    id,
+    command,
+    workingDirectory: process.cwd(),
+    environment: {},
+    output,
+  });
+}
 
-  const client = new Client(logDir, { SUPER_SECRET: 'abc123', PWD: workDir });
-  try {
-    await client.initialize();
+async function testDebounceAndOversizedOutput(root) {
+  const logDir = fs.mkdtempSync(path.join(root, 'debounce-logs-'));
+  const workspace = fs.mkdtempSync(path.join(root, 'debounce-workspace-'));
+  let writes = 0;
+  let sessionFile;
+  const manager = new ContextManager(CONFIG, logger(logDir), {
+    workspaceDirectory: workspace,
+    onSessionPersisted: (file) => {
+      writes += 1;
+      sessionFile = file;
+    },
+  });
 
-    for (let i = 0; i < COMMAND_COUNT; i++) {
-      const response = await client.call('execute_command', {
-        command: 'true',
-        args: [],
-        cwd: workDir,
-      });
-      if (response.error) {
-        throw new Error(`execute_command failed: ${JSON.stringify(response.error)}`);
+  for (let index = 0; index < 200; index++) {
+    await add(manager, `command-${index}`, 'true');
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  await manager.flushSession();
+  assert(writes === 1, `counted exactly one completed write for 200 debounced commands (${writes})`);
+
+  const oversizedCommand = spawnSync(process.execPath, [
+    '-e',
+    "process.stdout.write('x'.repeat(4096)); process.stderr.write('y'.repeat(4096))",
+  ], { encoding: 'utf8' });
+  assert(oversizedCommand.stdout.length === 4096 && oversizedCommand.stderr.length === 4096,
+    'fixture command produces oversized output on both streams');
+  await add(manager, 'oversized', 'oversized-output', commandOutput(
+    oversizedCommand.stdout,
+    oversizedCommand.stderr,
+    0,
+    'z'.repeat(4096)
+  ));
+  await manager.flushSession();
+  const data = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+  const output = data.commandHistory.at(-1).output;
+  assert(output.stdout === 'x'.repeat(1024), 'actual oversized stdout is truncated to 1 KiB');
+  assert(output.stderr === 'y'.repeat(1024), 'actual oversized stderr is truncated to 1 KiB');
+  assert(output.summary.mainResult === 'z'.repeat(1024), 'actual oversized result is truncated to 1 KiB');
+  assert(data.commandHistory.length === 50, 'persisted history is capped at 50 entries');
+  await manager.dispose();
+}
+
+async function testIsolation(root) {
+  const logDir = fs.mkdtempSync(path.join(root, 'isolation-logs-'));
+  const workspaceA = fs.mkdtempSync(path.join(root, 'workspace-a-'));
+  const workspaceB = fs.mkdtempSync(path.join(root, 'workspace-b-'));
+  const files = {};
+  const managerA = new ContextManager(CONFIG, logger(logDir), {
+    workspaceDirectory: workspaceA,
+    onSessionPersisted: (file) => { files.workspaceA = file; },
+  });
+  const managerB = new ContextManager(CONFIG, logger(logDir), {
+    workspaceDirectory: workspaceB,
+    onSessionPersisted: (file) => { files.workspaceB = file; },
+  });
+  await add(managerA, 'a', 'workspace-a-command');
+  await add(managerB, 'b', 'workspace-b-command');
+  await Promise.all([managerA.flushSession(), managerB.flushSession()]);
+  assert(files.workspaceA !== files.workspaceB, 'shared log directory uses workspace-scoped files');
+  assert(JSON.parse(fs.readFileSync(files.workspaceA, 'utf8')).commandHistory[0].command === 'workspace-a-command',
+    'workspace A cannot restore workspace B history');
+
+  const auditA = new ContextManager(CONFIG, logger(logDir, 'audit-a.log'), {
+    workspaceDirectory: workspaceA,
+    onSessionPersisted: (file) => { files.auditA = file; },
+  });
+  const auditB = new ContextManager(CONFIG, logger(logDir, 'audit-b.log'), {
+    workspaceDirectory: workspaceA,
+    onSessionPersisted: (file) => { files.auditB = file; },
+  });
+  await add(auditA, 'audit-a', 'audit-a-command');
+  await add(auditB, 'audit-b', 'audit-b-command');
+  await Promise.all([auditA.flushSession(), auditB.flushSession()]);
+  assert(files.auditA !== files.auditB, 'distinct audit files in one directory use distinct session files');
+
+  const clientA = new ContextManager(CONFIG, logger(logDir), {
+    workspaceDirectory: workspaceA,
+    sessionScope: 'client-a',
+    onSessionPersisted: (file) => { files.clientA = file; },
+  });
+  const clientB = new ContextManager(CONFIG, logger(logDir), {
+    workspaceDirectory: workspaceA,
+    sessionScope: 'client-b',
+    onSessionPersisted: (file) => { files.clientB = file; },
+  });
+  await add(clientA, 'client-a', 'client-a-command');
+  await add(clientB, 'client-b', 'client-b-command');
+  await Promise.all([clientA.flushSession(), clientB.flushSession()]);
+  assert(files.clientA !== files.clientB, 'explicit server scopes isolate clients in one workspace');
+
+  await Promise.all([
+    managerA.dispose(), managerB.dispose(), auditA.dispose(), auditB.dispose(),
+    clientA.dispose(), clientB.dispose(),
+  ]);
+}
+
+async function testSerializationAndDisable(root) {
+  const logDir = fs.mkdtempSync(path.join(root, 'queue-logs-'));
+  const workspace = fs.mkdtempSync(path.join(root, 'queue-workspace-'));
+  let release;
+  let firstStarted;
+  const blocked = new Promise((resolve) => { firstStarted = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  let writes = 0;
+  let sessionFile;
+  const manager = new ContextManager(CONFIG, logger(logDir), {
+    workspaceDirectory: workspace,
+    onSessionPersisted: async (file) => {
+      writes += 1;
+      sessionFile = file;
+      if (writes === 1) {
+        firstStarted();
+        await gate;
       }
-    }
-    console.log(`   ran ${COMMAND_COUNT} commands`);
+    },
+  });
+  await add(manager, 'first', 'first-command');
+  const firstFlush = manager.flushSession();
+  await blocked;
+  await add(manager, 'second', 'second-command');
+  const secondFlush = manager.flushSession();
+  release();
+  await Promise.all([firstFlush, secondFlush]);
 
-    // Let the trailing debounce timer fire, then flush on shutdown.
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-  } finally {
-    clearInterval(poller);
-    await client.shutdown();
-  }
+  const commands = JSON.parse(fs.readFileSync(sessionFile, 'utf8')).commandHistory
+    .map((entry) => entry.command);
+  assert(writes === 2 && commands.join(',') === 'first-command,second-command',
+    'overlapping flushes serialize and publish the newest snapshot last');
+  assert(!fs.readdirSync(logDir).some((name) => name.endsWith('.tmp')),
+    'serialized publications leave no temporary files');
 
-  try {
-    seenMtimes.add(fs.statSync(sessionFile).mtimeMs);
-  } catch {
-    // handled by the assertion below
-  }
+  let disabledWrites = 0;
+  const disabled = new ContextManager(CONFIG, logger(logDir), {
+    workspaceDirectory: workspace,
+    sessionScope: 'disabled',
+    onSessionPersisted: () => { disabledWrites += 1; },
+  });
+  await add(disabled, 'queued', 'must-not-be-written');
+  await disabled.updateConfig({ ...CONFIG, sessionPersistence: false });
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  assert(disabledWrites === 0, 'disabling persistence cancels the queued debounce write');
 
-  assert(fs.existsSync(sessionFile), `session file written to the log directory (${sessionFile})`);
-  assert(!fs.existsSync(legacyFile), 'no .mcp-exec-session.json written to the working directory');
-  assert(!fs.existsSync(path.join(process.cwd(), '.mcp-exec-session.json')),
-    'no .mcp-exec-session.json written to the repo root');
+  await manager.dispose();
+  await disabled.dispose();
+}
 
-  const stats = fs.statSync(sessionFile);
-  assert(stats.size < MAX_SESSION_FILE_BYTES,
-    `session file stays under 200 KB (${(stats.size / 1024).toFixed(1)} KB)`);
-  assert(seenMtimes.size <= MAX_WRITES,
-    `session file written ${seenMtimes.size} times for ${COMMAND_COUNT} commands (<= ${MAX_WRITES})`);
+async function testDurableClearAndRestore(root) {
+  const logDir = fs.mkdtempSync(path.join(root, 'clear-logs-'));
+  const workspace = fs.mkdtempSync(path.join(root, 'clear-workspace-'));
+  let sessionFile;
+  const manager = new ContextManager(CONFIG, logger(logDir), {
+    workspaceDirectory: workspace,
+    onSessionPersisted: (file) => { sessionFile = file; },
+  });
+  await add(manager, 'success', 'printf result', commandOutput('result', '', 0, 'result'));
+  await manager.flushSession();
 
-  const raw = fs.readFileSync(sessionFile, 'utf-8');
-  assert(!raw.includes('abc123') && !raw.includes('SUPER_SECRET'),
-    'inherited secret env var (SUPER_SECRET=abc123) is absent from the session file');
+  const restored = new ContextManager(CONFIG, logger(logDir), { workspaceDirectory: workspace });
+  await restored.loadSession();
+  const entry = (await restored.getHistory())[0];
+  assert(entry.output.summary.success === true, 'restored output preserves success');
+  assert(entry.output.summary.mainResult === 'result', 'restored output preserves its result');
+  assert((await restored.getOutput('success')).summary.success === true,
+    'restored output cache contains complete summary data');
 
-  const data = JSON.parse(raw);
-  assert(typeof data.sessionId === 'string', 'session file records a sessionId');
-  assert(data.environmentVariables === undefined && typeof data.environmentOverrides === 'object',
-    'session file stores environmentOverrides only, not a full environment snapshot');
-  assert(data.commandHistory.length <= 50,
-    `command history capped at 50 entries (${data.commandHistory.length})`);
-  assert(data.commandHistory.every((e) => e.environment === undefined),
-    'history entries carry no per-command environment copy');
-  assert(data.commandHistory.every((e) => (e.output.stdout || '').length <= 1024 &&
-    (e.output.stderr || '').length <= 1024), 'history entry output truncated to 1 KB');
+  await manager.clearHistory();
+  assert(JSON.parse(fs.readFileSync(sessionFile, 'utf8')).commandHistory.length === 0,
+    'clearHistory publishes the empty snapshot before resolving');
+  const afterClear = new ContextManager(CONFIG, logger(logDir), { workspaceDirectory: workspace });
+  await afterClear.loadSession();
+  assert((await afterClear.getHistory()).length === 0, 'history stays cleared on immediate restart');
 
-  // Restart against the same log dir: history must come back.
-  const second = new Client(logDir, {});
-  try {
-    await second.initialize();
-    const history = await second.call('get_history', { limit: 5 });
-    const text = history.result.content[0].text;
-    assert(/Showing 5 command\(s\)/.test(text) && text.includes('`true`'),
-      'restored history is available after restart');
-  } finally {
-    await second.shutdown();
-  }
+  await manager.dispose();
+  await restored.dispose();
+  await afterClear.dispose();
+}
 
-  // loadSession must rebuild the output cache so get_output-style lookups hit.
-  const { ContextManager } = require(path.resolve(__dirname, '..', 'dist', 'context', 'manager.js'));
-  process.env.MCP_EXEC_LOG_DIR = logDir;
-  const manager = new ContextManager(
-    { preserveWorkingDirectory: true, sessionPersistence: true, maxHistorySize: 100 }
-  );
+async function testLegacyMigration(root) {
+  const logDir = fs.mkdtempSync(path.join(root, 'migration-logs-'));
+  const workspace = fs.mkdtempSync(path.join(root, 'migration-workspace-'));
+  const legacyFile = path.join(workspace, '.mcp-exec-session.json');
+  const legacy = {
+    sessionId: 'legacy',
+    currentDirectory: workspace,
+    environmentVariables: { SAFE_OVERRIDE: 'restored', SECRET_TOKEN: 'hidden' },
+    commandHistory: [{
+      id: 'legacy-command',
+      command: 'printf legacy',
+      timestamp: new Date().toISOString(),
+      workingDirectory: workspace,
+      environment: {},
+      relatedCommands: [],
+      output: { stdout: 'legacy', stderr: '', exitCode: 0 },
+    }],
+    fileSystemChanges: [],
+  };
+  fs.writeFileSync(legacyFile, JSON.stringify(legacy));
+  let sessionFile;
+  const manager = new ContextManager(CONFIG, logger(logDir), {
+    workspaceDirectory: workspace,
+    onSessionPersisted: (file) => { sessionFile = file; },
+  });
   await manager.loadSession();
-  const restoredId = data.commandHistory[data.commandHistory.length - 1].id;
-  const cached = await manager.getOutput(restoredId);
-  assert(cached !== undefined && cached.exitCode === 0,
-    'output cache rebuilt from restored history entries');
-  assert(process.env.PATH === undefined ||
-    (await manager.getCurrentContext()).environmentVariables.PATH === process.env.PATH,
-    'live process environment is preserved on load (overrides merged on top)');
+  assert(fs.existsSync(sessionFile) && !fs.existsSync(legacyFile),
+    'legacy workspace snapshot migrates to the scoped file');
+  const entry = (await manager.getHistory())[0];
+  assert(entry.output.summary.success && entry.output.summary.mainResult === 'legacy',
+    'legacy output receives complete restored summary fields');
+  const context = await manager.getCurrentContext();
+  assert(context.environmentVariables.SAFE_OVERRIDE === 'restored' &&
+    context.environmentVariables.SECRET_TOKEN === undefined,
+    'legacy migration keeps safe overrides and drops secret values');
 
-  fs.rmSync(logDir, { recursive: true, force: true });
-  fs.rmSync(workDir, { recursive: true, force: true });
+  const foreignWorkspace = fs.mkdtempSync(path.join(root, 'foreign-workspace-'));
+  const foreignLogs = fs.mkdtempSync(path.join(root, 'foreign-logs-'));
+  fs.writeFileSync(path.join(foreignLogs, 'session.json'), JSON.stringify({
+    ...legacy,
+    currentDirectory: foreignWorkspace,
+  }));
+  const isolated = new ContextManager(CONFIG, logger(foreignLogs), { workspaceDirectory: workspace });
+  await isolated.loadSession();
+  assert((await isolated.getHistory()).length === 0,
+    'directory-global legacy data from another workspace is not migrated');
+
+  await manager.dispose();
+  await isolated.dispose();
+}
+
+async function run() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-session-'));
+  try {
+    await testDebounceAndOversizedOutput(root);
+    await testIsolation(root);
+    await testSerializationAndDisable(root);
+    await testDurableClearAndRestore(root);
+    await testLegacyMigration(root);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 }
 
 if (require.main === module) {
   run()
-    .then(() => {
-      console.log('\n🎉 Session persistence test completed successfully!');
-      process.exit(0);
-    })
+    .then(() => console.log('\n🎉 Session persistence regressions passed'))
     .catch((error) => {
-      console.error('\n💥 Session persistence test failed:', error.message);
-      process.exit(1);
+      console.error('\n💥 Session persistence regressions failed:', error);
+      process.exitCode = 1;
     });
 }
 

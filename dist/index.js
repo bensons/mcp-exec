@@ -2848,8 +2848,9 @@ class MCPShellServer {
                         }
                         // Record configuration change
                         this.recordConfigurationChange('context', this.config.context, previousValues);
-                        // Recreate context manager
-                        this.contextManager = new manager_2.ContextManager(this.config.context, this.auditLogger);
+                        // Update the live manager so queued writes are cancelled safely and
+                        // the executor cannot retain an orphaned context-manager reference.
+                        await this.contextManager.updateConfig(this.config.context);
                         return {
                             content: [
                                 {
@@ -3312,9 +3313,9 @@ Please start by enabling the terminal viewer service.`,
                     uptime: process.uptime(),
                 },
             });
-            // Save session state
+            // Save session state (flushes any debounced write)
             if (this.config.context.sessionPersistence) {
-                await this.contextManager.persistSession();
+                await this.contextManager.flushSession();
                 console.error('💾 Session state saved');
             }
             // Shutdown terminal viewer service
@@ -3425,7 +3426,7 @@ Please start by enabling the terminal viewer service.`,
             this.securityManager = new manager_1.SecurityManager(this.config.security, this.auditLogger);
         }
         if (!section || section === 'context') {
-            this.contextManager = new manager_2.ContextManager(this.config.context, this.auditLogger);
+            await this.contextManager.updateConfig(this.config.context);
         }
         if (!section || section === 'mcpLogging') {
             this.mcpLogger = new mcp_logger_1.MCPLogger(this.config.mcpLogging || {
