@@ -11,13 +11,23 @@ const node_notifier_1 = __importDefault(require("node-notifier"));
 function hasSecurityCategory(log, category) {
     return log.securityCheck.category === category || log.securityCheck.categories?.includes(category) === true;
 }
+const DESKTOP_NOTIFICATION_TIMEOUT_MS = 5000;
 class MonitoringSystem {
     config;
     alertRules = new Map();
     alerts = [];
     lastAlertTime = new Map();
-    constructor(config) {
+    // ponytail: fixed-window rate limit, swap for a sliding window if burst shaping matters
+    alertWindowStart = Date.now();
+    alertsInWindow = 0;
+    desktopNotificationsDisabled = false;
+    desktopNotifier;
+    desktopNotificationTimeoutMs;
+    desktopNotificationInFlight;
+    constructor(config, desktopNotifier = node_notifier_1.default, desktopNotificationTimeoutMs = DESKTOP_NOTIFICATION_TIMEOUT_MS) {
         this.config = this.cloneConfig(config);
+        this.desktopNotifier = desktopNotifier;
+        this.desktopNotificationTimeoutMs = desktopNotificationTimeoutMs;
         this.initializeDefaultRules();
     }
     updateConfig(config) {
@@ -57,6 +67,15 @@ class MonitoringSystem {
     async processLogEntry(logEntry) {
         if (!this.config.enabled)
             return [];
+        // Enforce maxAlertsPerHour
+        const now = Date.now();
+        if (now - this.alertWindowStart >= 60 * 60 * 1000) {
+            this.alertWindowStart = now;
+            this.alertsInWindow = 0;
+        }
+        if (this.config.maxAlertsPerHour > 0 && this.alertsInWindow >= this.config.maxAlertsPerHour) {
+            return [];
+        }
         const triggeredAlerts = [];
         for (const rule of this.alertRules.values()) {
             if (!rule.enabled)
@@ -71,14 +90,18 @@ class MonitoringSystem {
             }
             // Check condition
             if (rule.condition(logEntry)) {
-                const alert = await this.createAlert(rule, logEntry);
+                const alert = this.createAlert(rule, logEntry);
                 triggeredAlerts.push(alert);
+                this.alertsInWindow += 1;
                 this.lastAlertTime.set(rule.id, new Date());
+                if (this.config.maxAlertsPerHour > 0 && this.alertsInWindow >= this.config.maxAlertsPerHour) {
+                    break;
+                }
             }
         }
         return triggeredAlerts;
     }
-    async createAlert(rule, logEntry) {
+    createAlert(rule, logEntry) {
         const alert = {
             id: this.generateAlertId(),
             ruleId: rule.id,
@@ -98,7 +121,8 @@ class MonitoringSystem {
             acknowledged: false,
         };
         this.alerts.push(alert);
-        await this.sendNotification(alert);
+        // Fire-and-forget: webhooks and desktop notifiers must never block the command response.
+        void this.sendNotification(alert);
         return alert;
     }
     generateAlertMessage(rule, logEntry) {
@@ -159,21 +183,68 @@ class MonitoringSystem {
         }
     }
     async sendDesktopNotification(title, message) {
-        return new Promise((resolve, reject) => {
-            node_notifier_1.default.notify({
-                title,
-                message,
-                wait: false,
-            }, (err, response, metadata) => {
-                if (err) {
-                    console.error('Error sending desktop notification:', err);
-                    reject(err);
+        if (this.desktopNotificationsDisabled) {
+            return;
+        }
+        if (this.desktopNotificationInFlight) {
+            return this.desktopNotificationInFlight;
+        }
+        const attempt = new Promise((resolve, reject) => {
+            let settled = false;
+            let notificationProcess;
+            // node-notifier spawns terminal-notifier/notify-send, which can hang
+            // indefinitely when no display or notification daemon is available.
+            const timer = setTimeout(() => {
+                if (settled)
+                    return;
+                settled = true;
+                this.desktopNotificationsDisabled = true;
+                try {
+                    notificationProcess?.kill('SIGTERM');
                 }
-                else {
-                    resolve();
+                catch (error) {
+                    console.error('Failed to terminate timed-out desktop notifier:', error);
                 }
-            });
+                console.error(`Desktop notification timed out after ${this.desktopNotificationTimeoutMs}ms; ` +
+                    'desktop notifications are disabled for this session');
+                resolve();
+            }, this.desktopNotificationTimeoutMs);
+            try {
+                const result = this.desktopNotifier.notify({
+                    title,
+                    message,
+                    wait: false,
+                }, (err) => {
+                    clearTimeout(timer);
+                    if (settled)
+                        return;
+                    settled = true;
+                    if (err) {
+                        console.error('Error sending desktop notification:', err);
+                        reject(err);
+                    }
+                    else {
+                        resolve();
+                    }
+                });
+                if (result && typeof result.kill === 'function') {
+                    notificationProcess = result;
+                }
+            }
+            catch (error) {
+                clearTimeout(timer);
+                settled = true;
+                reject(error);
+            }
         });
+        let trackedAttempt;
+        trackedAttempt = attempt.finally(() => {
+            if (this.desktopNotificationInFlight === trackedAttempt) {
+                this.desktopNotificationInFlight = undefined;
+            }
+        });
+        this.desktopNotificationInFlight = trackedAttempt;
+        return trackedAttempt;
     }
     acknowledgeAlert(alertId, acknowledgedBy) {
         const alert = this.alerts.find(a => a.id === alertId);

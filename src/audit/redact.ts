@@ -40,12 +40,16 @@ export function redactSecrets<T>(
   value: T,
   patterns: RegExp[] = [DEFAULT_REDACT_PATTERN]
 ): T {
-  return redact(value, patterns) as T;
+  return redact(value, patterns, new WeakSet<object>()) as T;
 }
 
-function redact(value: unknown, patterns: RegExp[]): unknown {
+function redact(value: unknown, patterns: RegExp[], seen: WeakSet<object>): unknown {
   if (Array.isArray(value)) {
-    return value.map(item => redact(item, patterns));
+    if (seen.has(value)) {
+      return '[Circular]';
+    }
+    seen.add(value);
+    return value.map(item => redact(item, patterns, seen));
   }
 
   if (value === null || typeof value !== 'object' || value instanceof Date) {
@@ -59,11 +63,16 @@ function redact(value: unknown, patterns: RegExp[]): unknown {
     return value;
   }
 
+  if (seen.has(value)) {
+    return '[Circular]';
+  }
+  seen.add(value);
+
   const result: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
     result[key] = patterns.some(pattern => pattern.test(key))
       ? REDACTED
-      : redact(item, patterns);
+      : redact(item, patterns, seen);
   }
   return result;
 }

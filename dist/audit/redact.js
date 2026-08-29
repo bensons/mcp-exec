@@ -37,11 +37,15 @@ function compileRedactPatterns(sources) {
  * only object/array structure is walked.
  */
 function redactSecrets(value, patterns = [exports.DEFAULT_REDACT_PATTERN]) {
-    return redact(value, patterns);
+    return redact(value, patterns, new WeakSet());
 }
-function redact(value, patterns) {
+function redact(value, patterns, seen) {
     if (Array.isArray(value)) {
-        return value.map(item => redact(item, patterns));
+        if (seen.has(value)) {
+            return '[Circular]';
+        }
+        seen.add(value);
+        return value.map(item => redact(item, patterns, seen));
     }
     if (value === null || typeof value !== 'object' || value instanceof Date) {
         return value;
@@ -52,11 +56,15 @@ function redact(value, patterns) {
     if (proto !== Object.prototype && proto !== null) {
         return value;
     }
+    if (seen.has(value)) {
+        return '[Circular]';
+    }
+    seen.add(value);
     const result = {};
     for (const [key, item] of Object.entries(value)) {
         result[key] = patterns.some(pattern => pattern.test(key))
             ? exports.REDACTED
-            : redact(item, patterns);
+            : redact(item, patterns, seen);
     }
     return result;
 }

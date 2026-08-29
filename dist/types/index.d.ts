@@ -261,6 +261,7 @@ export interface ServerConfig {
         retention: number;
         logFile?: string;
         logDirectory?: string;
+        maxPendingWriteBytes?: number;
         maxOutputBytes?: number;
         maxInMemoryEntries?: number;
         redactPatterns?: string[];

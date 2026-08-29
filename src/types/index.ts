@@ -343,6 +343,7 @@ export interface ServerConfig {
     retention: number;
     logFile?: string; // Full path to log file
     logDirectory?: string; // Directory for log files
+    maxPendingWriteBytes?: number; // Maximum memory used by queued audit writes
     maxOutputBytes?: number; // truncate stdout/stderr in audit entries (default 4096)
     maxInMemoryEntries?: number; // hot-cache/startup cap; queries still read full durable history (default 1000)
     redactPatterns?: string[]; // key patterns whose values are redacted before writing

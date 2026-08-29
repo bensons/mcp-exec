@@ -50,12 +50,25 @@ export interface MonitoringConfig {
         enabled: boolean;
     };
 }
+interface DesktopNotifier {
+    notify(options: {
+        title: string;
+        message: string;
+        wait: boolean;
+    }, callback: (error: Error | null) => void): unknown;
+}
 export declare class MonitoringSystem {
     private config;
     private alertRules;
     private alerts;
     private lastAlertTime;
-    constructor(config: MonitoringConfig);
+    private alertWindowStart;
+    private alertsInWindow;
+    private desktopNotificationsDisabled;
+    private readonly desktopNotifier;
+    private readonly desktopNotificationTimeoutMs;
+    private desktopNotificationInFlight?;
+    constructor(config: MonitoringConfig, desktopNotifier?: DesktopNotifier, desktopNotificationTimeoutMs?: number);
     updateConfig(config: MonitoringConfig): void;
     private cloneConfig;
     addAlertRule(rule: AlertRule): void;
@@ -79,4 +92,5 @@ export declare class MonitoringSystem {
     private generateAlertId;
     cleanup(): void;
 }
+export {};
 //# sourceMappingURL=monitoring.d.ts.map

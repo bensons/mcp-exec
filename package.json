@@ -20,6 +20,7 @@
     "test:config-regressions": "node tests/test-configuration-regressions.js",
     "test:command-policy": "node tests/test-command-policy.js",
     "test:session-policy": "node tests/test-session-command-policy.js",
+    "test:audit-stream": "node tests/test-audit-stream.js",
     "test:output-cap": "node tests/test-executor-output-cap.js",
     "test:risk": "node tests/test-risk-assessment.js",
     "test:audit-entry-size": "node tests/test-audit-entry-size.js",
@@ -37,7 +38,7 @@
     "test:terminal-buffer": "node tests/test-terminal-buffer.js",
     "test:viewer-replay": "node tests/test-websocket-buffering.js",
     "test:session-persistence": "node tests/test-session-persistence.js",
-    "test:all": "npm run test && npm run test:server && npm run test:ssh && npm run test:lifecycle && npm run test:annotations && npm run test:dynamic-config && npm run test:config-regressions && npm run test:command-policy && npm run test:session-policy && npm run test:output-cap && npm run test:risk && npm run test:audit-entry-size && npm run test:config-sessions && npm run test:confirmation && npm run test:confirmation-security && npm run test:session-cleanup && npm run test:session-stdin && npm run test:exit-codes && npm run test:debug-log-level && npm run test:shell && npm run test:session-output && npm run test:intent && npm run test:terminal-viewer-auth && npm run test:session-persistence && npm run test:terminal-buffer && npm run test:viewer-replay",
+    "test:all": "npm run test && npm run test:server && npm run test:ssh && npm run test:lifecycle && npm run test:annotations && npm run test:dynamic-config && npm run test:config-regressions && npm run test:command-policy && npm run test:session-policy && npm run test:audit-stream && npm run test:output-cap && npm run test:risk && npm run test:audit-entry-size && npm run test:config-sessions && npm run test:confirmation && npm run test:confirmation-security && npm run test:session-cleanup && npm run test:session-stdin && npm run test:exit-codes && npm run test:debug-log-level && npm run test:shell && npm run test:session-output && npm run test:intent && npm run test:terminal-viewer-auth && npm run test:session-persistence && npm run test:terminal-buffer && npm run test:viewer-replay",
     "clean": "rm -rf dist",
     "setup-claude": "node tests/setup-claude-desktop.js",
     "postbuild": "chmod +x dist/index.js"

@@ -6,6 +6,7 @@
 
 const assert = require('assert');
 const { spawn } = require('child_process');
+const net = require('net');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -99,6 +100,39 @@ class McpClient {
   }
 }
 
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      server.close(error => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
+
+function assertPortClosed(port, label) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port });
+    socket.setTimeout(500);
+    socket.once('connect', () => {
+      socket.destroy();
+      reject(new Error(`${label}: terminal viewer unexpectedly started on port ${port}`));
+    });
+    socket.once('timeout', () => {
+      socket.destroy();
+      reject(new Error(`${label}: timed out checking viewer port ${port}`));
+    });
+    socket.once('error', error => {
+      if (error.code === 'ECONNREFUSED') {
+        resolve();
+      } else {
+        reject(error);
+      }
+    });
+  });
+}
+
 function assertBlocked(text, label) {
   if (!text.includes('blocked by security policy')) {
     throw new Error(`${label}: expected security-policy block, got:\n${text}`);
@@ -115,7 +149,11 @@ function extractSessionId(text) {
 }
 
 async function run() {
-  const client = new McpClient();
+  const viewerPort = await getFreePort();
+  const client = new McpClient({
+    MCP_EXEC_BLOCKED_COMMANDS: 'rm -rf /,echo reset-policy-marker',
+    MCP_EXEC_TERMINAL_VIEWER_PORT: String(viewerPort),
+  });
   let directoryClient;
   let fixtureRoot;
   let failures = 0;
@@ -135,6 +173,8 @@ async function run() {
         aiContext: 'Regression: terminal-viewer policy bypass',
       });
       assertBlocked(text, 'execute_command enableTerminalViewer');
+      await assertPortClosed(viewerPort, 'execute_command enableTerminalViewer');
+      console.log('✅ execute_command rejected before starting the viewer');
     }
 
     console.log('📝 start_terminal_session rejects blocked commands');
@@ -144,6 +184,22 @@ async function run() {
         aiContext: 'Regression: start_terminal_session policy bypass',
       });
       assertBlocked(text, 'start_terminal_session');
+      await assertPortClosed(viewerPort, 'start_terminal_session');
+      console.log('✅ start_terminal_session rejected before starting the viewer');
+    }
+
+    console.log('📝 security reset refreshes the interactive-session policy');
+    {
+      await client.callTool('update_configuration', {
+        section: 'security',
+        settings: { blockedCommands: [] },
+      });
+      await client.callTool('reset_configuration', { section: 'security' });
+      const { text } = await client.callTool('start_interactive_session', {
+        command: 'echo reset-policy-marker',
+        aiContext: 'Regression: reset must replace stale session policy',
+      });
+      assertBlocked(text, 'start_interactive_session after security reset');
     }
 
     console.log('📝 start_interactive_session rejects blocked commands');
@@ -284,9 +340,10 @@ async function run() {
     console.log('✅ regular session cwd is scoped and updated');
 
     console.log('\n🎉 Session command-policy regression tests passed');
-  } catch {
+  } catch (error) {
     failures += 1;
     console.error('💥 Session command-policy tests failed');
+    console.error(error);
   } finally {
     client.stop();
     directoryClient?.stop();

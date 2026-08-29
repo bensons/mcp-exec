@@ -135,6 +135,7 @@ const DEFAULT_CONFIG = {
         enabled: process.env.MCP_EXEC_AUDIT_ENABLED !== 'false', // Enabled by default
         logLevel: process.env.MCP_EXEC_AUDIT_LOG_LEVEL || 'debug',
         retention: parseInt(process.env.MCP_EXEC_AUDIT_RETENTION || '30'),
+        maxPendingWriteBytes: parseInt(process.env.MCP_EXEC_AUDIT_MAX_PENDING_BYTES || `${8 * 1024 * 1024}`),
         maxOutputBytes: (0, logger_1.parseAuditLimit)(process.env.MCP_EXEC_AUDIT_MAX_OUTPUT_BYTES, 4096),
         maxInMemoryEntries: (0, logger_1.parseAuditLimit)(process.env.MCP_EXEC_AUDIT_MAX_IN_MEMORY_ENTRIES, 1000),
         redactPatterns: process.env.MCP_EXEC_AUDIT_REDACT_PATTERNS
@@ -3423,9 +3424,9 @@ Please start by enabling the terminal viewer service.`,
                 await this.shellExecutor.cleanup();
                 console.error('🔧 Shell executor cleaned up');
             }
-            // Cleanup audit logger (flush any pending logs)
-            if (this.auditLogger && typeof this.auditLogger.flush === 'function') {
-                await this.auditLogger.flush();
+            // Cleanup audit logger (flush pending logs and release maintenance resources)
+            if (this.auditLogger && typeof this.auditLogger.close === 'function') {
+                await this.auditLogger.close();
                 console.error('📝 Audit logs flushed');
             }
             // Clear any pending confirmations (and stop their cleanup timer)

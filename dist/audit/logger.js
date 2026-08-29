@@ -59,11 +59,22 @@ function parseAuditLimit(value, fallback) {
     const parsed = typeof value === 'number' ? value : Number(value);
     return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
+const MAINTENANCE_INTERVAL_MS = 60 * 60 * 1000; // hourly
+const DEFAULT_MAX_PENDING_WRITE_BYTES = 8 * 1024 * 1024;
+const MAX_WRITE_BATCH_BYTES = 64 * 1024;
+const QUEUE_WARNING_INTERVAL_MS = 60 * 1000;
 class AuditLogger {
     config;
     logFile;
     logs;
     monitoringSystem;
+    maintenanceTimer;
+    pendingLines = [];
+    pendingWriteBytes = 0;
+    drainPromise;
+    closed = false;
+    maxPendingWriteBytes;
+    lastQueueWarningAt = 0;
     redactPatterns;
     maxOutputBytes;
     maxInMemoryEntries;
@@ -72,6 +83,10 @@ class AuditLogger {
         this.config = this.cloneConfig(config);
         this.logFile = this.resolveLogFilePath(this.config);
         this.logs = [];
+        this.maxPendingWriteBytes = Number.isFinite(config.maxPendingWriteBytes) &&
+            (config.maxPendingWriteBytes ?? 0) > 0
+            ? config.maxPendingWriteBytes
+            : DEFAULT_MAX_PENDING_WRITE_BYTES;
         this.redactPatterns = (0, redact_1.compileRedactPatterns)(config.redactPatterns);
         this.maxOutputBytes = parseAuditLimit(config.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
         this.maxInMemoryEntries = parseAuditLimit(config.maxInMemoryEntries, DEFAULT_MAX_IN_MEMORY_ENTRIES);
@@ -83,6 +98,101 @@ class AuditLogger {
         if (this.config.monitoring) {
             this.monitoringSystem = new monitoring_1.MonitoringSystem(this.config.monitoring);
         }
+        if (this.config.enabled) {
+            this.startMaintenance();
+        }
+    }
+    startMaintenance() {
+        if (this.maintenanceTimer || this.closed) {
+            return;
+        }
+        // Retention/alert pruning used to run on every command; do it on a timer instead.
+        this.maintenanceTimer = setInterval(() => {
+            this.enforceRetention();
+            this.monitoringSystem?.cleanup();
+        }, MAINTENANCE_INTERVAL_MS);
+        this.maintenanceTimer.unref();
+    }
+    stopMaintenance() {
+        if (this.maintenanceTimer) {
+            clearInterval(this.maintenanceTimer);
+            this.maintenanceTimer = undefined;
+        }
+    }
+    writeLine(line) {
+        if (this.closed || !this.config.enabled) {
+            return;
+        }
+        const bytes = Buffer.byteLength(line);
+        if (bytes > this.maxPendingWriteBytes ||
+            this.pendingWriteBytes + bytes > this.maxPendingWriteBytes) {
+            const now = Date.now();
+            if (now - this.lastQueueWarningAt >= QUEUE_WARNING_INTERVAL_MS) {
+                this.lastQueueWarningAt = now;
+                console.error(`Audit write queue reached ${this.maxPendingWriteBytes} bytes; dropping records until storage catches up`);
+            }
+            return;
+        }
+        this.pendingLines.push({ line, bytes });
+        this.pendingWriteBytes += bytes;
+        this.startDrain();
+    }
+    startDrain() {
+        if (this.drainPromise || this.pendingLines.length === 0) {
+            return;
+        }
+        this.drainPromise = this.drainWrites().finally(() => {
+            this.drainPromise = undefined;
+            if (this.pendingLines.length > 0) {
+                this.startDrain();
+            }
+        });
+    }
+    async drainWrites() {
+        await this.initialization;
+        while (this.pendingLines.length > 0) {
+            const batch = [];
+            let batchBytes = 0;
+            while (this.pendingLines.length > 0) {
+                const next = this.pendingLines[0];
+                if (batch.length > 0 && batchBytes + next.bytes > MAX_WRITE_BATCH_BYTES) {
+                    break;
+                }
+                batch.push(this.pendingLines.shift());
+                batchBytes += next.bytes;
+            }
+            try {
+                if (this.config.enabled) {
+                    // Open the configured path for every bounded batch. This preserves
+                    // ordering without holding an inode open across external rotation.
+                    await fs.appendFile(this.logFile, batch.map(item => item.line).join(''));
+                }
+            }
+            catch (error) {
+                console.error('Failed to write to audit log:', error);
+            }
+            finally {
+                this.pendingWriteBytes = Math.max(0, this.pendingWriteBytes - batchBytes);
+            }
+        }
+    }
+    /**
+     * Wait for all accepted records to reach storage.
+     */
+    async flush() {
+        await this.initialization;
+        while (this.drainPromise || this.pendingLines.length > 0) {
+            this.startDrain();
+            await this.drainPromise;
+        }
+    }
+    /**
+     * Stop maintenance and reject future records after draining accepted writes.
+     */
+    async close() {
+        this.closed = true;
+        this.stopMaintenance();
+        await this.flush();
     }
     /**
      * Apply configuration changes in place. Callers must use this instead of
@@ -105,6 +215,10 @@ class AuditLogger {
         this.redactPatterns = (0, redact_1.compileRedactPatterns)(this.config.redactPatterns);
         this.maxOutputBytes = parseAuditLimit(this.config.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
         this.maxInMemoryEntries = parseAuditLimit(this.config.maxInMemoryEntries, DEFAULT_MAX_IN_MEMORY_ENTRIES);
+        this.maxPendingWriteBytes = Number.isFinite(this.config.maxPendingWriteBytes) &&
+            (this.config.maxPendingWriteBytes ?? 0) > 0
+            ? this.config.maxPendingWriteBytes
+            : DEFAULT_MAX_PENDING_WRITE_BYTES;
         if (!this.config.monitoring) {
             this.monitoringSystem = undefined;
         }
@@ -118,6 +232,12 @@ class AuditLogger {
         if (this.config.enabled && (!wasEnabled || this.logFile !== previousLogFile)) {
             this.logs = [];
             this.initialization = this.initializeLogging();
+        }
+        if (this.config.enabled) {
+            this.startMaintenance();
+        }
+        else {
+            this.stopMaintenance();
         }
     }
     cloneConfig(config) {
@@ -158,13 +278,16 @@ class AuditLogger {
             securityCheck: options.securityCheck,
             aiIntent: options.context.aiIntent,
         });
-        await this.writeLogEntry(logEntry);
+        this.writeLogEntry(logEntry);
         this.appendToMemory(logEntry);
-        // Process monitoring alerts
+        // Command records are the durable audit trail. Callers already await this
+        // method, so preserve that contract while lower-priority log lines drain in
+        // the same bounded queue.
+        await this.flush();
+        // Process monitoring alerts (notifications are dispatched in the background)
         if (this.monitoringSystem) {
             await this.monitoringSystem.processLogEntry(logEntry);
         }
-        await this.enforceRetention();
     }
     async logError(options) {
         await this.initialization;
@@ -202,8 +325,9 @@ class AuditLogger {
                 riskLevel: 'medium',
             },
         });
-        await this.writeLogEntry(logEntry);
+        this.writeLogEntry(logEntry);
         this.appendToMemory(logEntry);
+        await this.flush();
     }
     async log(options) {
         await this.initialization;
@@ -224,12 +348,7 @@ class AuditLogger {
             pid: process.pid,
             severity: index_1.LOG_LEVELS[normalizedLevel], // RFC 5424 numeric severity
         };
-        try {
-            await fs.appendFile(this.logFile, JSON.stringify(logLine) + '\n');
-        }
-        catch (error) {
-            console.error('Failed to write to audit log:', error);
-        }
+        this.writeSerialized(logLine, 'audit log entry');
     }
     // Convenience methods for RFC 5424 log levels
     async emergency(message, context, logger) {
@@ -683,13 +802,15 @@ class AuditLogger {
             return [];
         }
     }
-    async writeLogEntry(entry) {
+    writeLogEntry(entry) {
+        this.writeSerialized(entry, 'command audit entry');
+    }
+    writeSerialized(value, description) {
         try {
-            const logLine = JSON.stringify(entry) + '\n';
-            await fs.appendFile(this.logFile, logLine);
+            this.writeLine(JSON.stringify(value) + '\n');
         }
         catch (error) {
-            console.error('Failed to write log entry:', error);
+            console.error(`Failed to serialize ${description}:`, error);
         }
     }
     shouldLog(level) {
@@ -719,7 +840,7 @@ class AuditLogger {
                 return 'info'; // Safe default
         }
     }
-    async enforceRetention() {
+    enforceRetention() {
         if (this.config.retention <= 0) {
             return;
         }

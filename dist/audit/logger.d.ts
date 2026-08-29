@@ -11,6 +11,7 @@ export interface AuditConfig {
     retention: number;
     logFile?: string;
     logDirectory?: string;
+    maxPendingWriteBytes?: number;
     maxOutputBytes?: number;
     maxInMemoryEntries?: number;
     redactPatterns?: string[];
@@ -41,11 +42,31 @@ export declare class AuditLogger {
     private logFile;
     private logs;
     private monitoringSystem?;
+    private maintenanceTimer?;
+    private pendingLines;
+    private pendingWriteBytes;
+    private drainPromise?;
+    private closed;
+    private maxPendingWriteBytes;
+    private lastQueueWarningAt;
     private redactPatterns;
     private maxOutputBytes;
     private maxInMemoryEntries;
     private initialization;
     constructor(config: AuditConfig);
+    private startMaintenance;
+    private stopMaintenance;
+    private writeLine;
+    private startDrain;
+    private drainWrites;
+    /**
+     * Wait for all accepted records to reach storage.
+     */
+    flush(): Promise<void>;
+    /**
+     * Stop maintenance and reject future records after draining accepted writes.
+     */
+    close(): Promise<void>;
     /**
      * Apply configuration changes in place. Callers must use this instead of
      * constructing a replacement logger, otherwise components that captured this
@@ -102,6 +123,7 @@ export declare class AuditLogger {
     /** Read and sanitize every durable command record for explicit queries. */
     private readAllExistingLogs;
     private writeLogEntry;
+    private writeSerialized;
     private shouldLog;
     private normalizeLogLevel;
     private enforceRetention;
