@@ -25,7 +25,7 @@ import { ShellExecutor } from './core/executor';
 import { SecurityManager } from './security/manager';
 import { assertCommandAllowed, buildFullCommand } from './security/command-policy';
 import { ContextManager } from './context/manager';
-import { AuditLogger } from './audit/logger';
+import { AuditLogger, parseAuditLimit } from './audit/logger';
 import { ConfirmationManager } from './security/confirmation';
 import { DisplayFormatter } from './utils/display-formatter';
 import { TerminalViewerService } from './terminal/viewer-service';
@@ -102,8 +102,11 @@ const DEFAULT_CONFIG: ServerConfig = {
     enabled: process.env.MCP_EXEC_AUDIT_ENABLED !== 'false', // Enabled by default
     logLevel: (process.env.MCP_EXEC_AUDIT_LOG_LEVEL as LogLevel | LegacyLogLevel) || 'debug',
     retention: parseInt(process.env.MCP_EXEC_AUDIT_RETENTION || '30'),
-    maxOutputBytes: parseInt(process.env.MCP_EXEC_AUDIT_MAX_OUTPUT_BYTES || '4096'),
-    maxInMemoryEntries: parseInt(process.env.MCP_EXEC_AUDIT_MAX_IN_MEMORY_ENTRIES || '1000'),
+    maxOutputBytes: parseAuditLimit(process.env.MCP_EXEC_AUDIT_MAX_OUTPUT_BYTES, 4096),
+    maxInMemoryEntries: parseAuditLimit(
+      process.env.MCP_EXEC_AUDIT_MAX_IN_MEMORY_ENTRIES,
+      1000
+    ),
     redactPatterns: process.env.MCP_EXEC_AUDIT_REDACT_PATTERNS
       ? process.env.MCP_EXEC_AUDIT_REDACT_PATTERNS.split(',').map(p => p.trim()).filter(Boolean)
       : undefined,

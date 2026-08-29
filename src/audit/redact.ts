@@ -18,11 +18,7 @@ export const DEFAULT_REDACT_PATTERN =
  * crashing startup, and the `g` flag is never set so `.test()` stays stateless.
  */
 export function compileRedactPatterns(sources?: string[]): RegExp[] {
-  if (!sources || sources.length === 0) {
-    return [DEFAULT_REDACT_PATTERN];
-  }
-
-  const patterns = sources.reduce<RegExp[]>((acc, source) => {
+  const patterns = (sources || []).reduce<RegExp[]>((acc, source) => {
     try {
       acc.push(new RegExp(source, 'i'));
     } catch {
@@ -31,7 +27,8 @@ export function compileRedactPatterns(sources?: string[]): RegExp[] {
     return acc;
   }, []);
 
-  return patterns.length > 0 ? patterns : [DEFAULT_REDACT_PATTERN];
+  // Custom rules extend the built-in protection; they must never replace it.
+  return [DEFAULT_REDACT_PATTERN, ...patterns];
 }
 
 /**

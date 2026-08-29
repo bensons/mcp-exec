@@ -321,7 +321,7 @@ export interface ServerConfig {
     logFile?: string; // Full path to log file
     logDirectory?: string; // Directory for log files
     maxOutputBytes?: number; // truncate stdout/stderr in audit entries (default 4096)
-    maxInMemoryEntries?: number; // cap on entries kept in memory / loaded at startup (default 1000)
+    maxInMemoryEntries?: number; // hot-cache/startup cap; queries still read full durable history (default 1000)
     redactPatterns?: string[]; // key patterns whose values are redacted before writing
     monitoring?: {
       enabled: boolean;

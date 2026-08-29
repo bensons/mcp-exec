@@ -12,9 +12,13 @@ const path = require('path');
 
 const { SecurityManager } = require('../dist/security/manager');
 const { ContextManager } = require('../dist/context/manager');
-const { AuditLogger } = require('../dist/audit/logger');
+const { AuditLogger, parseAuditLimit } = require('../dist/audit/logger');
 const { ShellExecutor } = require('../dist/core/executor');
-const { redactSecrets, REDACTED } = require('../dist/audit/redact');
+const {
+  compileRedactPatterns,
+  redactSecrets,
+  REDACTED,
+} = require('../dist/audit/redact');
 
 const SECRET_VALUE = 'abc123-super-secret-value';
 const MAX_ENTRY_BYTES = 2048;
@@ -121,6 +125,16 @@ async function run() {
   assert.strictEqual(redacted.command, 'echo hi');
   console.log('✅ redactSecrets');
 
+  console.log('📝 custom redaction extends built-in rules');
+  const customRedacted = redactSecrets(
+    { password: SECRET_VALUE, customerCode: SECRET_VALUE, ordinary: SECRET_VALUE },
+    compileRedactPatterns(['customerCode'])
+  );
+  assert.strictEqual(customRedacted.password, REDACTED, 'built-in rule must remain active');
+  assert.strictEqual(customRedacted.customerCode, REDACTED, 'custom rule must be active');
+  assert.strictEqual(customRedacted.ordinary, SECRET_VALUE);
+  console.log('✅ built-in and custom redaction rules are combined');
+
   console.log('📝 running 50 commands');
   for (let i = 0; i < 50; i++) {
     const result = await executor.executeCommand({ command: 'echo', args: ['hi'] });
@@ -198,28 +212,139 @@ async function run() {
   assert.match(storedStdout, /truncated to 4096 bytes/, 'expected truncation marker');
   console.log(`✅ stdout truncated to ${storedStdout.length} bytes`);
 
-  console.log('📝 in-memory entry count is capped');
-  const capped = new AuditLogger({ ...config.audit, maxInMemoryEntries: 5 });
-  for (let i = 0; i < 12; i++) {
-    await capped.logCommand({
-      commandId: `cmd-${i}`,
-      command: `echo ${i}`,
-      context: { sessionId: 's', workingDirectory: '/tmp', previousCommands: [] },
-      result: {
-        stdout: `${i}`,
-        stderr: '',
-        exitCode: 0,
-        metadata: { executionTime: 1, commandType: 'test', affectedResources: [], warnings: [], suggestions: [] },
-        summary: { success: true, mainResult: 'ok', sideEffects: [] },
+  console.log('📝 output-derived copies cannot bypass the audit byte cap');
+  const derivedLogFile = path.join(logDirectory, 'derived-output.log');
+  const derived = new AuditLogger({
+    ...config.audit,
+    logFile: derivedLogFile,
+    maxOutputBytes: 64,
+  });
+  const copiedOutput = `prefix-${'y'.repeat(10000)}-forbidden-tail`;
+  await derived.logCommand({
+    commandId: 'derived-output',
+    command: 'emit-large-structured-output',
+    context: { sessionId: 'derived', workingDirectory: '/tmp', previousCommands: [] },
+    result: {
+      stdout: copiedOutput,
+      stderr: copiedOutput,
+      exitCode: 0,
+      structuredOutput: {
+        format: 'json',
+        data: { payload: copiedOutput },
+        schema: { description: copiedOutput },
       },
-      securityCheck: { allowed: true, riskLevel: 'low' },
-      executionTime: 1,
-    });
+      metadata: {
+        executionTime: 1,
+        commandType: 'test',
+        affectedResources: Array(1000).fill(copiedOutput),
+        warnings: Array(1000).fill(copiedOutput),
+        suggestions: Array(1000).fill(copiedOutput),
+      },
+      summary: {
+        success: true,
+        mainResult: copiedOutput,
+        sideEffects: Array(1000).fill(copiedOutput),
+        nextSteps: Array(1000).fill(copiedOutput),
+      },
+    },
+    securityCheck: { allowed: true, riskLevel: 'low' },
+    executionTime: 1,
+  });
+  const [derivedEntry] = readCommandEntries(derivedLogFile).map(record => record.entry);
+  assert.ok(derivedEntry, 'expected derived-output audit entry');
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(derivedEntry), 'utf-8') < MAX_ENTRY_BYTES,
+    'derived-output entry must remain bounded'
+  );
+  assert.ok(!JSON.stringify(derivedEntry).includes('forbidden-tail'));
+  assert.ok(!('structuredOutput' in derivedEntry.result));
+  assert.strictEqual(derivedEntry.result.summary.mainResult, '');
+  assert.deepStrictEqual(derivedEntry.result.summary.sideEffects, []);
+  assert.deepStrictEqual(derivedEntry.result.metadata.affectedResources, []);
+  assert.deepStrictEqual(derivedEntry.result.metadata.warnings, []);
+  assert.deepStrictEqual(derivedEntry.result.metadata.suggestions, []);
+  console.log('✅ all output-derived representations are bounded or omitted');
+
+  console.log('📝 legacy entries are sanitized and full history survives the memory cap');
+  const legacyLogFile = path.join(logDirectory, 'legacy.log');
+  const legacyEntries = Array.from({ length: 6 }, (_, index) => ({
+    id: `legacy-${index}`,
+    timestamp: new Date(Date.now() - (6 - index) * 1000).toISOString(),
+    sessionId: 'legacy-session',
+    userId: 'legacy-user',
+    command: `legacy-command-${index}`,
+    context: {
+      sessionId: 'legacy-session',
+      workingDirectory: '/tmp',
+      previousCommands: [],
+      password: SECRET_VALUE,
+    },
+    result: {
+      stdout: index === 0 ? copiedOutput : `legacy-${index}`,
+      stderr: '',
+      exitCode: index === 5 ? 1 : 0,
+      structuredOutput: { format: 'json', data: { apiToken: SECRET_VALUE } },
+      metadata: {
+        executionTime: 1,
+        commandType: 'test',
+        affectedResources: [copiedOutput],
+        warnings: [copiedOutput],
+        suggestions: [copiedOutput],
+      },
+      summary: {
+        success: index !== 5,
+        mainResult: copiedOutput,
+        sideEffects: [copiedOutput],
+      },
+    },
+    securityCheck: {
+      allowed: index !== 5,
+      reason: index === 5 ? 'legacy violation' : undefined,
+      riskLevel: index === 5 ? 'high' : 'low',
+    },
+  }));
+  fs.writeFileSync(legacyLogFile, legacyEntries.map(entry => JSON.stringify(entry)).join('\n') + '\n');
+
+  const migrated = new AuditLogger({
+    ...config.audit,
+    logFile: legacyLogFile,
+    maxOutputBytes: 64,
+    maxInMemoryEntries: 2,
+  });
+  const migratedLogs = await migrated.queryLogs({});
+  assert.strictEqual(migrated.logs.length, 2, 'startup hot cache must honor its configured cap');
+  assert.strictEqual(migratedLogs.length, 6, 'query must read history beyond the two-entry cache');
+  assert.ok(!JSON.stringify(migratedLogs).includes(SECRET_VALUE), 'legacy query leaked a secret');
+  assert.ok(!JSON.stringify(migratedLogs).includes('forbidden-tail'), 'legacy query leaked output copies');
+
+  const migratedExport = await migrated.exportLogs('json', {});
+  assert.strictEqual(JSON.parse(migratedExport).length, 6, 'export must include full history');
+  assert.ok(!migratedExport.includes(SECRET_VALUE), 'legacy export leaked a secret');
+
+  const report = await migrated.generateReport({
+    start: new Date(Date.now() - 60_000),
+    end: new Date(Date.now() + 60_000),
+  });
+  assert.strictEqual(report.totalCommands, 6, 'report must include full history');
+  assert.strictEqual(report.successfulCommands, 5);
+  assert.strictEqual(report.failedCommands, 1);
+  assert.strictEqual(report.securityViolations, 1);
+  const complianceReport = await migrated.generateComplianceReport({
+    start: new Date(Date.now() - 60_000),
+    end: new Date(Date.now() + 60_000),
+  });
+  assert.strictEqual(complianceReport.summary.totalCommands, 6);
+  assert.strictEqual(complianceReport.summary.securityViolations, 1);
+  console.log('✅ legacy migration, reports, and exports use sanitized full history');
+
+  console.log('📝 invalid numeric audit limits fall back safely');
+  for (const invalid of [undefined, null, '', 'abc', '12px', -1, 1.5, NaN, Infinity]) {
+    assert.strictEqual(parseAuditLimit(invalid, 4096), 4096, `accepted invalid limit: ${invalid}`);
   }
-  const kept = await capped.queryLogs({});
-  assert.strictEqual(kept.length, 5, `expected 5 in-memory entries, got ${kept.length}`);
-  assert.strictEqual(kept[kept.length - 1].command, 'echo 11', 'newest entry should be retained');
-  console.log('✅ in-memory cap enforced');
+  assert.strictEqual(parseAuditLimit('0', 4096), 0);
+  assert.strictEqual(parseAuditLimit('128', 4096), 128);
+  assert.strictEqual(parseAuditLimit(128, 4096), 128);
+  console.log('✅ numeric audit limit validation');
 
   fs.rmSync(logDirectory, { recursive: true, force: true });
   console.log('\n🎉 audit entry size and redaction tests passed');

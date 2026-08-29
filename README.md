@@ -275,7 +275,7 @@ MCP_EXEC_AUDIT_ENABLED=true                 # Enable audit logging
 MCP_EXEC_AUDIT_LOG_LEVEL=debug              # emergency|alert|critical|error|warning|notice|info|debug
 MCP_EXEC_AUDIT_RETENTION=30                 # Days to retain logs
 MCP_EXEC_AUDIT_MAX_OUTPUT_BYTES=4096        # Max stdout/stderr bytes stored per audit entry
-MCP_EXEC_AUDIT_MAX_IN_MEMORY_ENTRIES=1000   # Entries kept in memory / loaded from the log tail
+MCP_EXEC_AUDIT_MAX_IN_MEMORY_ENTRIES=1000   # Hot-cache entries; reports/exports still read full log history
 MCP_EXEC_AUDIT_REDACT_PATTERNS=             # Extra comma-separated regexes for secret-bearing keys
 
 # MCP Client Logging
