@@ -49,6 +49,14 @@ export class InteractiveSessionManager {
     this.cleanupInterval.unref();
   }
 
+  /**
+   * Swap in a new sessions config without recreating the manager (which would
+   * orphan every running child process). Limits/timeouts are read at call time.
+   */
+  updateConfig(config: ServerConfig['sessions']): void {
+    this.config = config;
+  }
+
   async startSession(options: StartSessionOptions): Promise<string> {
     const cwd = path.resolve(options.cwd || process.cwd());
     const environment: Record<string, string> = {

@@ -6,6 +6,8 @@
 import { TerminalBuffer } from './types';
 export declare function createTerminalBuffer(bufferSize: number): TerminalBuffer;
 export declare function appendToBuffer(buffer: TerminalBuffer, data: string): void;
+/** Apply a new configured capacity to a live buffer and trim it immediately. */
+export declare function resizeTerminalBuffer(buffer: TerminalBuffer, bufferSize: number): void;
 /** The buffered output exactly as the PTY emitted it. */
 export declare function bufferText(buffer: TerminalBuffer): string;
 /**

@@ -23,6 +23,7 @@ export interface RawCommandResult {
 export declare class OutputProcessor {
     private config;
     constructor(config: OutputConfig);
+    updateConfig(config: OutputConfig): void;
     process(rawOutput: RawCommandResult, command?: string): Promise<CommandOutput>;
     static stripAnsiCodes(text: string): string;
     private optimizeForAI;

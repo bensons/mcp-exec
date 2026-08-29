@@ -7,6 +7,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createTerminalBuffer = createTerminalBuffer;
 exports.appendToBuffer = appendToBuffer;
+exports.resizeTerminalBuffer = resizeTerminalBuffer;
 exports.bufferText = bufferText;
 exports.bufferLines = bufferLines;
 const output_processor_1 = require("../utils/output-processor");
@@ -20,6 +21,14 @@ function appendToBuffer(buffer, data) {
         return;
     buffer.chunks.push(data);
     buffer.bytes += Buffer.byteLength(data, 'utf8');
+    trimBuffer(buffer);
+}
+/** Apply a new configured capacity to a live buffer and trim it immediately. */
+function resizeTerminalBuffer(buffer, bufferSize) {
+    buffer.maxBytes = Math.max(bufferSize, 1) * BYTES_PER_LINE;
+    trimBuffer(buffer);
+}
+function trimBuffer(buffer) {
     while (buffer.bytes > buffer.maxBytes && buffer.chunks.length > 1) {
         buffer.bytes -= Buffer.byteLength(buffer.chunks.shift(), 'utf8');
     }

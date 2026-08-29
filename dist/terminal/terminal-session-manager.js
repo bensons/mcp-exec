@@ -64,6 +64,18 @@ class TerminalSessionManager {
         this.cleanupInterval.unref();
     }
     /**
+     * Swap in new config without recreating the manager (which would orphan every
+     * running PTY / child process). Limits/timeouts are read at call time.
+     */
+    updateConfig(config, terminalViewerConfig) {
+        this.config = config;
+        this.terminalViewerConfig = terminalViewerConfig;
+        this.fallbackSessionManager.updateConfig(config);
+        for (const session of this.sessions.values()) {
+            (0, buffer_1.resizeTerminalBuffer)(session.buffer, terminalViewerConfig.bufferSize);
+        }
+    }
+    /**
      * Register a callback invoked whenever a terminal session is removed from this manager
      * (kill, terminate or sweep). Used to keep the terminal viewer service in sync.
      */
@@ -296,6 +308,9 @@ class TerminalSessionManager {
     }
     getSession(sessionId) {
         return this.sessions.get(sessionId);
+    }
+    getTerminalSessions() {
+        return Array.from(this.sessions.values());
     }
     getSessionInfo(sessionId) {
         const session = this.sessions.get(sessionId);

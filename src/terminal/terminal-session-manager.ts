@@ -7,7 +7,7 @@ import * as path from 'path';
 import * as pty from 'node-pty';
 import { v4 as uuidv4 } from 'uuid';
 import { TerminalSession, TerminalBuffer } from './types';
-import { createTerminalBuffer, appendToBuffer, bufferLines } from './buffer';
+import { createTerminalBuffer, appendToBuffer, bufferLines, resizeTerminalBuffer } from './buffer';
 import { InteractiveSessionManager, StartSessionOptions, SendInputOptions, FINISHED_SESSION_GRACE_MS } from '../core/interactive-session-manager';
 import { ServerConfig } from '../types/index';
 import { CommandGuard, buildFullCommand } from '../security/command-policy';
@@ -43,6 +43,23 @@ export class TerminalSessionManager {
       this.cleanupExpiredSessions();
     }, 60000); // Check every minute
     this.cleanupInterval.unref();
+  }
+
+  /**
+   * Swap in new config without recreating the manager (which would orphan every
+   * running PTY / child process). Limits/timeouts are read at call time.
+   */
+  updateConfig(
+    config: ServerConfig['sessions'],
+    terminalViewerConfig: ServerConfig['terminalViewer']
+  ): void {
+    this.config = config;
+    this.terminalViewerConfig = terminalViewerConfig;
+    this.fallbackSessionManager.updateConfig(config);
+
+    for (const session of this.sessions.values()) {
+      resizeTerminalBuffer(session.buffer, terminalViewerConfig.bufferSize);
+    }
   }
 
   /**
@@ -319,6 +336,10 @@ export class TerminalSessionManager {
 
   getSession(sessionId: string): TerminalSession | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  getTerminalSessions(): TerminalSession[] {
+    return Array.from(this.sessions.values());
   }
 
   getSessionInfo(sessionId: string): any {

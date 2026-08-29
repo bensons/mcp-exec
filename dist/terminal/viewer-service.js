@@ -58,6 +58,7 @@ class TerminalViewerService {
     config;
     sessions;
     connections;
+    sessionListeners;
     isRunning = false;
     startTime;
     websocketAuthFailures = new Map();
@@ -67,6 +68,7 @@ class TerminalViewerService {
         this.config = { ...config };
         this.sessions = new Map();
         this.connections = new Map();
+        this.sessionListeners = new Map();
         this.app = (0, express_1.default)();
         this.setupRoutes();
     }
@@ -337,7 +339,9 @@ class TerminalViewerService {
         });
     }
     async stop() {
+        this.detachAllSessionListeners();
         if (!this.isRunning) {
+            this.sessions.clear();
             return;
         }
         return new Promise((resolve) => {
@@ -348,6 +352,8 @@ class TerminalViewerService {
                 }
             });
             this.connections.clear();
+            this.sessions.forEach(session => session.viewers.clear());
+            this.sessions.clear();
             this.websocketAuthFailures.clear();
             // Close WebSocket server
             if (this.wss) {
@@ -457,19 +463,20 @@ class TerminalViewerService {
     // Public methods for session management
     addSession(session) {
         console.error(`[DEBUG] TerminalViewerService.addSession called for session: ${session.sessionId}`);
+        this.detachSessionListeners(session.sessionId);
         this.sessions.set(session.sessionId, session);
         console.error(`[DEBUG] Session ${session.sessionId} added to terminal viewer, total sessions: ${this.sessions.size}`);
         // Set up PTY data handlers if available
         if (session.pty) {
-            session.pty.onData((data) => {
-                // Immediately broadcast data to prevent buffering delays
-                this.broadcastToSession(session.sessionId, data);
-                // Add to buffer for new connections
-                (0, buffer_1.appendToBuffer)(session.buffer, data);
-                session.lastActivity = new Date();
-            });
+            const listeners = [session.pty.onData((data) => {
+                    // Immediately broadcast data to prevent buffering delays
+                    this.broadcastToSession(session.sessionId, data);
+                    // Add to buffer for new connections
+                    (0, buffer_1.appendToBuffer)(session.buffer, data);
+                    session.lastActivity = new Date();
+                })];
             // Handle process exit - PTY onExit receives (exitCode, signal) as separate parameters
-            session.pty.onExit((exitCode, signal) => {
+            listeners.push(session.pty.onExit((exitCode, signal) => {
                 console.error(`[DEBUG] PTY process exited in viewer service for session ${session.sessionId}:`);
                 console.error(`[DEBUG]   exitCode: ${JSON.stringify(exitCode)} (type: ${typeof exitCode})`);
                 console.error(`[DEBUG]   signal: ${JSON.stringify(signal)} (type: ${typeof signal})`);
@@ -505,7 +512,8 @@ class TerminalViewerService {
                 // otherwise be eligible for cleanup as soon as they exit.
                 session.lastActivity = new Date();
                 this.broadcastStatusToSession(session.sessionId, session.status);
-            });
+            }));
+            this.sessionListeners.set(session.sessionId, listeners.filter((listener) => !!listener && typeof listener.dispose === 'function'));
         }
     }
     removeSession(sessionId) {
@@ -518,7 +526,20 @@ class TerminalViewerService {
                     ws.close();
                 }
             });
+            this.detachSessionListeners(sessionId);
             this.sessions.delete(sessionId);
+        }
+    }
+    detachSessionListeners(sessionId) {
+        const listeners = this.sessionListeners.get(sessionId) || [];
+        for (const listener of listeners) {
+            listener.dispose();
+        }
+        this.sessionListeners.delete(sessionId);
+    }
+    detachAllSessionListeners() {
+        for (const sessionId of this.sessionListeners.keys()) {
+            this.detachSessionListeners(sessionId);
         }
     }
     // Check if a session exists in the viewer service

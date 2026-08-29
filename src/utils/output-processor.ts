@@ -31,6 +31,10 @@ export class OutputProcessor {
     this.config = config;
   }
 
+  updateConfig(config: OutputConfig): void {
+    this.config = config;
+  }
+
   async process(rawOutput: RawCommandResult, command?: string): Promise<CommandOutput> {
     let { stdout, stderr, exitCode } = rawOutput;
 

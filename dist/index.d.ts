@@ -57,6 +57,7 @@ declare class MCPShellServer {
     private formatHistoryDisplay;
     private recordConfigurationChange;
     private reinitializeComponents;
+    private registerTerminalSessionsWithViewer;
     private restartTerminalViewerService;
     private formatSecurityStatusDisplay;
 }

@@ -521,6 +521,30 @@ export class ShellExecutor {
     return await this.sessionManager.readOutput(sessionId);
   }
 
+  /**
+   * Apply a new config to the live components instead of recreating the
+   * executor, which would orphan every running interactive session.
+   */
+  updateConfig(config: ServerConfig): void {
+    this.config = config;
+    this.outputProcessor.updateConfig(config.output);
+    this.sessionManager.updateConfig(config.sessions);
+  }
+
+  /**
+   * Rebind services that can be recreated by dynamic configuration without
+   * replacing this executor (and orphaning its interactive sessions).
+   */
+  updateDependencies(
+    securityManager: SecurityManager,
+    contextManager: ContextManager,
+    auditLogger: AuditLogger
+  ): void {
+    this.securityManager = securityManager;
+    this.contextManager = contextManager;
+    this.auditLogger = auditLogger;
+  }
+
   async shutdown(): Promise<void> {
     await this.sessionManager.shutdown();
   }

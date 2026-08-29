@@ -12,6 +12,7 @@ export declare class TerminalViewerService {
     private config;
     private sessions;
     private connections;
+    private sessionListeners;
     private isRunning;
     private startTime?;
     private websocketAuthFailures;
@@ -42,6 +43,8 @@ export declare class TerminalViewerService {
     private handleWebSocketMessage;
     addSession(session: TerminalSession): void;
     removeSession(sessionId: string): void;
+    private detachSessionListeners;
+    private detachAllSessionListeners;
     hasSession(sessionId: string): boolean;
     sendInput(sessionId: string, input: string, addNewline?: boolean): void;
     private broadcastToSession;

@@ -3,6 +3,7 @@ const {
   bufferLines,
   bufferText,
   createTerminalBuffer,
+  resizeTerminalBuffer,
 } = require('../dist/terminal/buffer.js');
 
 function assert(condition, message) {
@@ -49,6 +50,23 @@ function testWholeChunkEviction() {
   console.log('OK complete chunks are evicted using encoded byte sizes');
 }
 
+function testLiveResize() {
+  const buffer = createTerminalBuffer(10);
+  appendToBuffer(buffer, 'a'.repeat(150));
+  appendToBuffer(buffer, 'b'.repeat(150));
+
+  resizeTerminalBuffer(buffer, 2);
+  assert(buffer.maxBytes === 200, `expected a 200-byte resized capacity, got ${buffer.maxBytes}`);
+  assert(buffer.bytes === 150, `expected oldest chunk eviction after resize, got ${buffer.bytes} bytes`);
+  assert(bufferText(buffer) === 'b'.repeat(150), 'resize did not evict the oldest complete chunk');
+
+  resizeTerminalBuffer(buffer, 1);
+  assert(buffer.maxBytes === 100, `expected a 100-byte resized capacity, got ${buffer.maxBytes}`);
+  assert(buffer.bytes === 100, `expected an immediate 100-byte trim, got ${buffer.bytes}`);
+  assert(bufferText(buffer) === 'b'.repeat(100), 'resize did not keep the newest valid tail');
+  console.log('OK live buffer resizing updates capacity and trims immediately');
+}
+
 function testTerminalLineRendering() {
   const buffer = createTerminalBuffer(10);
   appendToBuffer(buffer, 'one\r\n\u001b[32mtwo\u001b[0m\r\n');
@@ -74,6 +92,7 @@ function testRawReplayIsUnchanged() {
 testEmptyBuffer();
 testByteCapAndUnicodeBoundaries();
 testWholeChunkEviction();
+testLiveResize();
 testTerminalLineRendering();
 testRawReplayIsUnchanged();
 console.log('\nAll terminal buffer tests passed');

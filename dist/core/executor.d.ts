@@ -50,6 +50,16 @@ export declare class ShellExecutor {
     startInteractiveSession(options: StartSessionOptions): Promise<string>;
     sendInputToSession(options: SendInputOptions): Promise<void>;
     readSessionOutput(sessionId: string): Promise<SessionOutput>;
+    /**
+     * Apply a new config to the live components instead of recreating the
+     * executor, which would orphan every running interactive session.
+     */
+    updateConfig(config: ServerConfig): void;
+    /**
+     * Rebind services that can be recreated by dynamic configuration without
+     * replacing this executor (and orphaning its interactive sessions).
+     */
+    updateDependencies(securityManager: SecurityManager, contextManager: ContextManager, auditLogger: AuditLogger): void;
     shutdown(): Promise<void>;
 }
 //# sourceMappingURL=executor.d.ts.map

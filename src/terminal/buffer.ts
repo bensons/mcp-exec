@@ -20,6 +20,16 @@ export function appendToBuffer(buffer: TerminalBuffer, data: string): void {
   buffer.chunks.push(data);
   buffer.bytes += Buffer.byteLength(data, 'utf8');
 
+  trimBuffer(buffer);
+}
+
+/** Apply a new configured capacity to a live buffer and trim it immediately. */
+export function resizeTerminalBuffer(buffer: TerminalBuffer, bufferSize: number): void {
+  buffer.maxBytes = Math.max(bufferSize, 1) * BYTES_PER_LINE;
+  trimBuffer(buffer);
+}
+
+function trimBuffer(buffer: TerminalBuffer): void {
   while (buffer.bytes > buffer.maxBytes && buffer.chunks.length > 1) {
     buffer.bytes -= Buffer.byteLength(buffer.chunks.shift()!, 'utf8');
   }
