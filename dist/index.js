@@ -49,6 +49,7 @@ const mcp_logger_1 = require("./audit/mcp-logger");
 const executor_1 = require("./core/executor");
 const manager_1 = require("./security/manager");
 const command_policy_1 = require("./security/command-policy");
+const tokenize_1 = require("./security/tokenize");
 const manager_2 = require("./context/manager");
 const logger_1 = require("./audit/logger");
 const confirmation_1 = require("./security/confirmation");
@@ -64,7 +65,7 @@ const DEFAULT_CONFIG = {
             ? process.env.MCP_EXEC_ALLOWED_DIRECTORIES.split(',').map(dir => dir.trim())
             : [process.cwd(), '/tmp'].filter(dir => dir !== ''),
         blockedCommands: process.env.MCP_EXEC_BLOCKED_COMMANDS
-            ? process.env.MCP_EXEC_BLOCKED_COMMANDS.split(',').map(cmd => cmd.trim())
+            ? (0, tokenize_1.parseBlockedCommandsEnvironment)(process.env.MCP_EXEC_BLOCKED_COMMANDS)
             : [
                 'rm -rf /',
                 'format',

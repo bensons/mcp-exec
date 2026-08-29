@@ -6,7 +6,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { ValidationResult, LogLevel } from '../types/index';
 import { AuditLogger } from '../audit/logger';
-import { tokenizeCommand, matchesPattern, SubCommand } from './tokenize';
+import { parseCommand, tokenizeCommand, matchesPattern, SubCommand } from './tokenize';
 
 /** A dangerous-command check. `RegExp` satisfies this structurally. */
 interface DangerousCheck {
@@ -383,7 +383,7 @@ export class SecurityManager {
       }
     }
 
-    const pattern = tokenizeCommand(entry)[0];
+    const pattern = parseCommand(entry).subCommands[0];
     if (!pattern) {
       return false;
     }
@@ -399,7 +399,22 @@ export class SecurityManager {
     }, 'security-validator');
 
     // Check blocked commands first
-    const subCommands = tokenizeCommand(command);
+    const parsedCommand = parseCommand(command);
+    if (!parsedCommand.complete) {
+      const parseError = parsedCommand.error || 'Unable to identify every executable';
+      this.auditLogger?.warning('Command blocked because policy parsing was incomplete', {
+        command: command.substring(0, 100),
+        parseError,
+        securityLevel: this.config.level,
+      }, 'security-validator');
+      return {
+        allowed: false,
+        reason: `Unable to safely parse command: ${parseError}`,
+        riskLevel: 'high',
+        suggestions: ['Use explicit command names and supported shell syntax'],
+      };
+    }
+    const subCommands = parsedCommand.subCommands;
     for (const blocked of this.config.blockedCommands) {
       if (this.matchesBlockedCommand(command, subCommands, blocked)) {
         this.auditLogger?.warning('Command blocked by explicit block list', {

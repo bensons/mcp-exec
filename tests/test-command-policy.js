@@ -7,7 +7,12 @@
 const assert = require('assert');
 const { SecurityManager } = require('../dist/security/manager');
 const { assertCommandAllowed, buildFullCommand } = require('../dist/security/command-policy');
-const { tokenizeCommand } = require('../dist/security/tokenize');
+const {
+  matchesPattern,
+  parseBlockedCommandsEnvironment,
+  parseCommand,
+  tokenizeCommand,
+} = require('../dist/security/tokenize');
 
 function createSecurityManager(overrides = {}) {
   return new SecurityManager({
@@ -107,6 +112,73 @@ async function run() {
   }
   console.log('✅ blocked-command pattern matching');
 
+  console.log('📝 nested interpreters, groups, and control syntax cannot bypass blocking');
+  const publishManager = createSecurityManager({ blockedCommands: ['npm publish'] });
+  const nestedBlocked = [
+    "sh -c 'npm publish'",
+    "bash -lc 'echo preparing; npm publish'",
+    '(npm publish)',
+    '{ npm publish; }',
+    'if npm publish; then echo unexpected; fi',
+    'echo ready || npm publish',
+    'echo "$(npm publish)"',
+    "eval 'npm publish'",
+  ];
+  for (const command of nestedBlocked) {
+    await expectBlocked(assertCommandAllowed(publishManager, command, auditLogger), command);
+  }
+  console.log('✅ nested and control syntax');
+
+  console.log('📝 transparent wrappers consume options and positional arguments safely');
+  const wrappedBlocked = [
+    'timeout 5 npm publish',
+    'timeout -sKILL 5 npm publish',
+    'timeout --signal KILL 5 npm publish',
+    'env -u FOO npm publish',
+    'env -uFOO npm publish',
+    'env --unset=FOO MODE=release npm publish',
+    'sudo -uroot npm publish',
+    'sudo --user=root npm publish',
+    'nice -n5 npm publish',
+    'stdbuf --output=L npm publish',
+    'xargs -I{} npm publish',
+  ];
+  for (const command of wrappedBlocked) {
+    await expectBlocked(assertCommandAllowed(publishManager, command, auditLogger), command);
+  }
+  await expectBlocked(
+    assertCommandAllowed(publishManager, 'timeout --future-option npm publish', auditLogger),
+    'unknown wrapper option fails closed'
+  );
+  console.log('✅ wrapper parsing');
+
+  console.log('📝 wrappers can themselves be explicitly blocked');
+  const sudoManager = createSecurityManager({ blockedCommands: ['sudo'] });
+  await expectBlocked(assertCommandAllowed(sudoManager, 'sudo -u root echo safe', auditLogger), 'sudo wrapper');
+  await assertCommandAllowed(sudoManager, 'echo sudo', auditLogger);
+  console.log('✅ explicit wrapper blocking');
+
+  console.log('📝 attached long-option values and positional order remain significant');
+  const namespaceManager = createSecurityManager({
+    blockedCommands: ['kubectl delete pod api --namespace=prod'],
+  });
+  await expectBlocked(
+    assertCommandAllowed(namespaceManager, 'kubectl --namespace=prod delete pod api', auditLogger),
+    'matching attached option value'
+  );
+  await assertCommandAllowed(
+    namespaceManager,
+    'kubectl delete pod api --namespace=staging',
+    auditLogger
+  );
+  const copyManager = createSecurityManager({ blockedCommands: ['cp secret.txt public.txt'] });
+  await expectBlocked(
+    assertCommandAllowed(copyManager, 'cp secret.txt public.txt', auditLogger),
+    'matching positional order'
+  );
+  await assertCommandAllowed(copyManager, 'cp public.txt secret.txt', auditLogger);
+  console.log('✅ option values and positional order');
+
   console.log('📝 re: entries are treated as raw regexes');
   const regexManager = createSecurityManager({ blockedCommands: ['re:^npm\\s+run\\s+format$'] });
   await expectBlocked(
@@ -114,6 +186,18 @@ async function run() {
     're:npm run format'
   );
   await assertCommandAllowed(regexManager, 'npm run format:check', auditLogger);
+
+  const regexEntries = parseBlockedCommandsEnvironment(
+    'rm -rf /,re:^echo\\s+\\d{1,3}$,re:^echo foo\\,bar$'
+  );
+  assert.deepStrictEqual(regexEntries, [
+    'rm -rf /',
+    're:^echo\\s+\\d{1,3}$',
+    're:^echo foo,bar$',
+  ]);
+  const envRegexManager = createSecurityManager({ blockedCommands: regexEntries });
+  await expectBlocked(assertCommandAllowed(envRegexManager, 'echo 123', auditLogger), 'regex quantifier comma');
+  await expectBlocked(assertCommandAllowed(envRegexManager, 'echo foo,bar', auditLogger), 'escaped regex comma');
   console.log('✅ re: escape hatch');
 
   console.log('📝 tokenizer splits sub-commands and expands flags');
@@ -123,6 +207,30 @@ async function run() {
   assert.strictEqual(subs[1].argv0, 'rm');
   assert.deepStrictEqual([...subs[1].flags].sort(), ['f', 'r', 'v']);
   assert.deepStrictEqual(subs[1].operands, ['/some dir']);
+
+  const windowsPattern = tokenizeCommand('del /f /s /q C:\\', 'win32')[0];
+  const windowsCandidate = tokenizeCommand('del /F /S /Q c:\\', 'win32')[0];
+  assert.ok(matchesPattern(windowsCandidate, windowsPattern));
+  assert.ok(
+    tokenizeCommand("echo ' & format C: & echo '", 'win32').some(sub => sub.argv0 === 'format'),
+    'cmd.exe single quotes must not hide command separators'
+  );
+  assert.ok(
+    !tokenizeCommand("echo ' & format C: & echo '", 'posix').some(sub => sub.argv0 === 'format'),
+    'POSIX single quotes must continue to protect separators'
+  );
+  assert.ok(
+    tokenizeCommand('cmd /c "format C:"', 'win32').some(sub => sub.argv0 === 'format'),
+    'cmd.exe /c payload must be inspected'
+  );
+  console.log('✅ Windows-aware quoting and comparison');
+
+  console.log('📝 ambiguous executable parsing fails closed');
+  for (const command of ["echo 'unterminated", '$COMMAND --flag', 'sudo --unknown value echo']) {
+    assert.strictEqual(parseCommand(command).complete, false, `${command}: expected incomplete parse`);
+    await expectBlocked(assertCommandAllowed(publishManager, command, auditLogger), command);
+  }
+  console.log('✅ fail-closed parsing');
   console.log('✅ tokenizer');
 
   assert.ok(warnings.length >= 1, 'expected at least one audit warning');

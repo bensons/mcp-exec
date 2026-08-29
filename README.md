@@ -279,10 +279,18 @@ actually being run:
   `mkfs.ext4 /dev/sda1` and `/sbin/mkfs`, but no longer blocks `npm run format` or `ls src/formatters`.
 - A multi-word entry (`rm -rf /`) matches when the same command runs with at least those flags and
   operands. Flag order and clustering are irrelevant (`rm -fr /`, `rm -r -f /`, `rm -vrf /` all match),
-  and path operands are compared by resolved path, so `rm -rf /` blocks `rm -rf //` and `rm -rf /*` but
-  not `rm -rf /tmp/build-cache`.
+  attached long-option values remain significant, and positional operand order is preserved. Path
+  operands are compared by resolved path, so `rm -rf /` blocks `rm -rf //` and `rm -rf /*` but not
+  `rm -rf /tmp/build-cache`.
 - An entry prefixed with `re:` is treated as a raw case-insensitive regex against the whole command
   line, e.g. `re:^git\s+push\s+--force` — the escape hatch for patterns the matcher above cannot express.
+  In `MCP_EXEC_BLOCKED_COMMANDS`, commas inside regex quantifiers and character classes are preserved;
+  escape any other literal comma as `\,`.
+
+Shell interpreter payloads, grouped/control commands, and transparent wrappers are inspected before
+matching. POSIX and `cmd.exe` quoting rules are handled separately. If policy parsing cannot safely
+identify an executable (for example, because of an unterminated quote or an unknown wrapper option),
+the command is rejected rather than allowed without a complete block-list check.
 
 #### Logging Configuration
 

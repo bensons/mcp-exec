@@ -24,6 +24,7 @@ import { LogLevel, LegacyLogLevel } from './types/index';
 import { ShellExecutor } from './core/executor';
 import { SecurityManager } from './security/manager';
 import { assertCommandAllowed, buildFullCommand } from './security/command-policy';
+import { parseBlockedCommandsEnvironment } from './security/tokenize';
 import { ContextManager } from './context/manager';
 import { AuditLogger } from './audit/logger';
 import { ConfirmationManager } from './security/confirmation';
@@ -41,7 +42,7 @@ const DEFAULT_CONFIG: ServerConfig = {
       ? process.env.MCP_EXEC_ALLOWED_DIRECTORIES.split(',').map(dir => dir.trim())
       : [process.cwd(), '/tmp'].filter(dir => dir !== ''),
     blockedCommands: process.env.MCP_EXEC_BLOCKED_COMMANDS
-      ? process.env.MCP_EXEC_BLOCKED_COMMANDS.split(',').map(cmd => cmd.trim())
+      ? parseBlockedCommandsEnvironment(process.env.MCP_EXEC_BLOCKED_COMMANDS)
       : [
           'rm -rf /',
           'format',
