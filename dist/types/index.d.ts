@@ -202,7 +202,7 @@ export interface ServerConfig {
     sessions: {
         maxInteractiveSessions: number;
         sessionTimeout: number;
-        outputBufferSize: number;
+        outputBufferBytes: number;
     };
     lifecycle: {
         inactivityTimeout: number;
@@ -260,6 +260,15 @@ export interface ServerConfig {
         authToken?: string;
     };
 }
+export interface SessionOutputBuffer {
+    chunks: Buffer[];
+    head: number;
+    headOffset: number;
+    startByte: number;
+    endByte: number;
+    lineBreaks: number[];
+    lineBreakHead: number;
+}
 export interface InteractiveSession {
     sessionId: string;
     command: string;
@@ -270,8 +279,9 @@ export interface InteractiveSession {
     cwd: string;
     env: Record<string, string>;
     status: 'running' | 'finished' | 'error';
-    outputBuffer: string[];
-    errorBuffer: string[];
+    outputBuffer: SessionOutputBuffer;
+    errorBuffer: SessionOutputBuffer;
+    droppedBytes: number;
     aiContext?: string;
 }
 export interface SessionOutput {
@@ -280,6 +290,7 @@ export interface SessionOutput {
     stderr: string;
     hasMore: boolean;
     status: 'running' | 'finished' | 'error';
+    droppedBytes: number;
 }
 export interface SessionInfo {
     sessionId: string;

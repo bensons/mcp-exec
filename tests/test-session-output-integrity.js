@@ -79,8 +79,9 @@ const tests = {
   async 'multibyte characters split across chunks are rejoined'() {
     // Write one CJK character one byte at a time so every data chunk cuts a code point.
     const bytes = Buffer.from('日本語', 'utf8');
-    const escaped = [...bytes].map(b => `\\x${b.toString(16).padStart(2, '0')}`).join('');
-    const parts = escaped.match(/(\\x..){1}/g).map(part => `printf '${part}'; sleep 0.02;`).join(' ');
+    // POSIX printf requires octal byte escapes; dash does not support \xNN.
+    const escaped = [...bytes].map(b => `\\${b.toString(8).padStart(3, '0')}`);
+    const parts = escaped.map(part => `printf '${part}'; sleep 0.02;`).join(' ');
     const { stdout } = await run(`${parts} printf '\\n'`);
     assert.strictEqual(stdout, '日本語\n');
   },
@@ -117,6 +118,50 @@ const tests = {
     assert.ok(droppedBytes > 0, 'expected droppedBytes > 0');
     assert.ok(!stdout.includes('�'), 'replacement character after front-trim');
     assert.strictEqual(stdout.replace(/\n$/, ''), '日'.repeat(stdout.replace(/\n$/, '').length));
+  },
+
+  async 'single oversized newline-terminated chunk keeps its newest tail'() {
+    const manager = newManager({ outputBufferBytes: 64 });
+    try {
+      const buffer = manager.createOutputBuffer();
+      const droppedBytes = manager.appendCapped(buffer, `${'x'.repeat(600)}\n`);
+      const stdout = manager.consumeBuffer(buffer);
+
+      assert.strictEqual(stdout, `${'x'.repeat(63)}\n`);
+      assert.strictEqual(droppedBytes, 537);
+      assert.strictEqual(Buffer.byteLength(stdout), 64);
+    } finally {
+      await manager.shutdown();
+    }
+  },
+
+  async 'small hot-path appends encode only the new chunks'() {
+    const manager = newManager({ outputBufferBytes: 64 });
+    const originalFrom = Buffer.from;
+    let largestEncodedString = 0;
+    try {
+      const buffer = manager.createOutputBuffer();
+      Buffer.from = function(value, ...args) {
+        if (typeof value === 'string') {
+          largestEncodedString = Math.max(largestEncodedString, value.length);
+        }
+        return Reflect.apply(originalFrom, Buffer, [value, ...args]);
+      };
+
+      let droppedBytes = 0;
+      for (let i = 0; i < 2000; i++) {
+        droppedBytes += manager.appendCapped(buffer, 'abcd');
+      }
+      Buffer.from = originalFrom;
+
+      const stdout = manager.consumeBuffer(buffer);
+      assert.strictEqual(largestEncodedString, 4, 'append re-encoded retained history');
+      assert.strictEqual(stdout, 'abcd'.repeat(16));
+      assert.strictEqual(droppedBytes, (2000 - 16) * 4);
+    } finally {
+      Buffer.from = originalFrom;
+      await manager.shutdown();
+    }
   },
 
   async 'readOutput clears the buffer and resets droppedBytes'() {

@@ -336,6 +336,16 @@ export interface ServerConfig {
 }
 
 // Interactive Session Types
+export interface SessionOutputBuffer {
+  chunks: Buffer[];
+  head: number;
+  headOffset: number;
+  startByte: number;
+  endByte: number;
+  lineBreaks: number[];
+  lineBreakHead: number;
+}
+
 export interface InteractiveSession {
   sessionId: string;
   command: string;
@@ -346,8 +356,8 @@ export interface InteractiveSession {
   cwd: string;
   env: Record<string, string>;
   status: 'running' | 'finished' | 'error';
-  outputBuffer: string;
-  errorBuffer: string;
+  outputBuffer: SessionOutputBuffer;
+  errorBuffer: SessionOutputBuffer;
   droppedBytes: number; // Bytes discarded from the front of the buffers to stay under outputBufferBytes
   aiContext?: string;
 }
