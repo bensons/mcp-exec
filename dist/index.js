@@ -424,7 +424,7 @@ class MCPShellServer {
             mcpLogLevel: this.config.mcpLogging?.minLevel
         });
         // Initialize terminal components
-        this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer, (command) => this.assertCommandAllowed(command, 'terminal-session'));
+        this.terminalSessionManager = this.createTerminalSessionManager();
         // Auto-start terminal viewer service if enabled in config
         if (this.config.terminalViewer.enabled) {
             try {
@@ -472,6 +472,17 @@ class MCPShellServer {
             source,
             ...extraContext,
         });
+    }
+    /**
+     * Create a TerminalSessionManager wired so that any session removal (kill, terminate,
+     * or the inactivity/finished sweep) also drops the session from the terminal viewer service.
+     */
+    createTerminalSessionManager() {
+        const manager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer, (command) => this.assertCommandAllowed(command, 'terminal-session'));
+        manager.onSessionRemoved((sessionId) => {
+            this.terminalViewerService?.removeSession(sessionId);
+        });
+        return manager;
     }
     setupHandlers() {
         // List available tools
@@ -2682,7 +2693,7 @@ class MCPShellServer {
                         // Record configuration change
                         this.recordConfigurationChange('sessions', this.config.sessions, previousValues);
                         // Recreate terminal session manager
-                        this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer, (command) => this.assertCommandAllowed(command, 'terminal-session'));
+                        this.terminalSessionManager = this.createTerminalSessionManager();
                         return {
                             content: [
                                 {
@@ -2726,7 +2737,7 @@ class MCPShellServer {
                         // Record configuration change
                         this.recordConfigurationChange('terminalViewer', this.config.terminalViewer, previousValues);
                         // Recreate terminal session manager
-                        this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer, (command) => this.assertCommandAllowed(command, 'terminal-session'));
+                        this.terminalSessionManager = this.createTerminalSessionManager();
                         // Restart terminal viewer service if enabled
                         if (this.config.terminalViewer.enabled && this.terminalViewerService) {
                             await this.terminalViewerService.stop();
@@ -3443,7 +3454,7 @@ Please start by enabling the terminal viewer service.`,
             this.displayFormatter = new display_formatter_1.DisplayFormatter(this.config.display);
         }
         if (!section || section === 'sessions' || section === 'terminalViewer') {
-            this.terminalSessionManager = new terminal_session_manager_1.TerminalSessionManager(this.config.sessions, this.config.terminalViewer, (command) => this.assertCommandAllowed(command, 'terminal-session'));
+            this.terminalSessionManager = this.createTerminalSessionManager();
         }
         if (!section || section === 'output') {
             this.shellExecutor = new executor_1.ShellExecutor(this.securityManager, this.contextManager, this.auditLogger, this.config);

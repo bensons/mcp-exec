@@ -382,6 +382,10 @@ export class TerminalViewerService {
         }
 
         session.status = newStatus;
+        // Start the finished-session grace period from process exit, not from
+        // the last input/output activity. Quiet, long-running sessions may
+        // otherwise be eligible for cleanup as soon as they exit.
+        session.lastActivity = new Date();
         this.broadcastStatusToSession(session.sessionId, session.status);
       });
     }

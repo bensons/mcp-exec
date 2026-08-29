@@ -10,6 +10,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { TerminalViewerService } = require('../dist/terminal/viewer-service.js');
 
 const SERVER_PATH = path.resolve(__dirname, '..', 'dist', 'index.js');
 const MAX_SESSIONS = 10;
@@ -20,6 +21,7 @@ class McpClient {
     this.nextId = 1;
     this.pending = new Map();
     this.buffer = '';
+    this.stderr = '';
     this.server = spawn('node', [SERVER_PATH], {
       cwd: workDir,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -35,7 +37,9 @@ class McpClient {
     });
 
     this.server.stdout.on('data', (chunk) => this.onData(chunk));
-    this.server.stderr.on('data', () => {}); // server is very chatty on stderr
+    this.server.stderr.on('data', (chunk) => {
+      this.stderr = (this.stderr + chunk.toString()).slice(-8000);
+    });
   }
 
   onData(chunk) {
@@ -64,7 +68,7 @@ class McpClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Timed out waiting for ${method}`));
+        reject(new Error(`Timed out waiting for ${method}\nServer stderr:\n${this.stderr}`));
       }, 20000);
       this.pending.set(id, (message) => {
         clearTimeout(timer);
@@ -104,8 +108,54 @@ function extractSessionId(text) {
   return match ? match[1] : null;
 }
 
+function testViewerExitStartsGracePeriod() {
+  console.log('\n1️⃣  Viewer-backed PTY exit starts the finished-session grace period');
+
+  let exitHandler;
+  const viewer = new TerminalViewerService({
+    enabled: true,
+    port: 0,
+    host: '127.0.0.1',
+    maxSessions: 1,
+    sessionTimeout: 60_000,
+    bufferSize: 100,
+    enableAuth: false,
+  });
+  const session = {
+    sessionId: 'quiet-viewer-session',
+    command: 'quiet-command',
+    args: [],
+    cwd: process.cwd(),
+    env: {},
+    startTime: new Date(Date.now() - 10 * 60_000),
+    lastActivity: new Date(Date.now() - 10 * 60_000),
+    status: 'running',
+    pty: {
+      onData() {},
+      onExit(handler) {
+        exitHandler = handler;
+      },
+    },
+    buffer: { lines: [], cursor: { x: 0, y: 0 }, scrollback: 0, maxLines: 100 },
+    viewers: new Set(),
+  };
+
+  viewer.addSession(session);
+  assert(typeof exitHandler === 'function', 'Viewer should register a PTY exit handler');
+
+  const exitStartedAt = Date.now();
+  exitHandler(0);
+
+  assert(session.status === 'finished', `Expected finished status, got ${session.status}`);
+  assert(
+    session.lastActivity.getTime() >= exitStartedAt,
+    `PTY exit should refresh lastActivity, got ${session.lastActivity.toISOString()}`
+  );
+  console.log('   ✅ Quiet session grace period begins when the PTY exits');
+}
+
 async function testFinishedSessionsFreeSlots(client) {
-  console.log(`\n1️⃣  Starting ${SESSION_COUNT} short-lived sessions with maxInteractiveSessions=${MAX_SESSIONS}`);
+  console.log(`\n2️⃣  Starting ${SESSION_COUNT} short-lived sessions with maxInteractiveSessions=${MAX_SESSIONS}`);
   const sessionIds = [];
 
   for (let i = 0; i < SESSION_COUNT; i++) {
@@ -131,7 +181,7 @@ async function testFinishedSessionsFreeSlots(client) {
 }
 
 async function testTerminalViewerCleanup(client) {
-  console.log('\n2️⃣  Terminal session viewer cleanup on terminate_terminal_session');
+  console.log('\n3️⃣  Terminal session viewer cleanup on terminate_terminal_session');
 
   const startText = await client.callTool('start_terminal_session', { command: 'echo hello' });
   const sessionId = extractSessionId(startText);
@@ -157,6 +207,8 @@ async function main() {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-cleanup-'));
   console.log('🧪 Testing finished-session cleanup (issue #34)');
   console.log(`Work directory: ${workDir}`);
+
+  testViewerExitStartsGracePeriod();
 
   const client = new McpClient(workDir);
   try {
