@@ -69,6 +69,60 @@ function testClassifyIsPure() {
   console.log('✅ classify is side-effect free');
 }
 
+function testSuggestionsIncludeRelatedCommands() {
+  console.log('📝 suggestNextCommands() keeps the current intent\'s related commands');
+  // Regression guard for review feedback on PR #45: making suggestNextCommands
+  // side-effect-free removed the just-recorded history entry it used to read its
+  // own relatedCommands back from, silently shrinking suggestions from 5 to 3.
+  const tracker = new IntentTracker();
+  const suggestions = tracker.suggestNextCommands('ls -la');
+
+  assert.deepStrictEqual(
+    suggestions,
+    ['cd <directory>', 'cat <file>', 'less <file>', 'cd', 'pwd'],
+    'a fresh tracker must still suggest the exploration intent\'s related commands'
+  );
+  // Still pure.
+  assert.strictEqual(tracker.getIntentSummary().totalCommands, 0);
+  console.log('✅ related commands preserved without recording');
+}
+
+function testClassifyReturnsDetachedIntent() {
+  console.log('📝 classify() returns a detached intent, not the pattern-table entry');
+  // Regression guard for review feedback on PR #45: classify() handed out the
+  // object stored in intentPatterns, so a caller's edit rewrote every later
+  // classification and every recorded history entry.
+  const tracker = new IntentTracker();
+
+  const first = tracker.classify('ls -la');
+  first.category = 'MUTATED';
+  first.purpose = 'MUTATED';
+  first.relatedCommands.push('INJECTED');
+  first.suggestedFollowups.push('INJECTED');
+
+  const second = tracker.classify('ls -la');
+  assert.notStrictEqual(first, second, 'classify must not return a shared instance');
+  assert.strictEqual(second.category, 'exploration', 'category must survive a caller mutation');
+  assert.strictEqual(second.purpose, 'List directory contents');
+  assert.ok(!second.relatedCommands.includes('INJECTED'), 'relatedCommands must be cloned');
+  assert.ok(!second.suggestedFollowups.includes('INJECTED'), 'suggestedFollowups must be cloned');
+
+  // The same leak reached recorded history through analyzeIntent().
+  const recorded = tracker.analyzeIntent('ls -la');
+  recorded.purpose = 'CORRUPTED';
+  assert.strictEqual(
+    tracker.getRecentIntents(1)[0].intent.purpose,
+    'List directory contents',
+    'mutating a returned intent must not corrupt recorded history'
+  );
+
+  // Context-enhanced results are detached too (they were a shallow spread).
+  const withContext = tracker.classify('ls -la', 'debug this');
+  withContext.relatedCommands.push('INJECTED');
+  assert.ok(!tracker.classify('ls -la').relatedCommands.includes('INJECTED'));
+  console.log('✅ detached intents');
+}
+
 async function testExecutorRecordsOnce() {
   console.log('📝 executeCommand records exactly one intent');
   const config = {
@@ -131,6 +185,8 @@ async function run() {
   console.log('🧪 Testing IntentTracker...\n');
   testClassification();
   testClassifyIsPure();
+  testSuggestionsIncludeRelatedCommands();
+  testClassifyReturnsDetachedIntent();
   await testExecutorRecordsOnce();
   console.log('\n🎉 All intent tracker tests passed');
 }

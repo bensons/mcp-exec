@@ -20,6 +20,9 @@ export class IntentTracker {
 
   /**
    * Pure classification - no side effects, safe to call for suggestions/previews.
+   * Always returns a detached intent (cloned arrays included): the pattern table
+   * holds long-lived objects, so handing one out would let a caller's edit rewrite
+   * every future classification and every already-recorded history entry.
    */
   classify(command: string, aiContext?: string): CommandIntent {
     const normalizedCommand = command.toLowerCase().trim();
@@ -27,12 +30,20 @@ export class IntentTracker {
     // Check for explicit patterns first
     for (const [pattern, intent] of this.intentPatterns) {
       if (pattern.test(normalizedCommand)) {
-        return this.enhanceIntentWithContext(intent, aiContext);
+        return this.cloneIntent(this.enhanceIntentWithContext(intent, aiContext));
       }
     }
 
     // Fallback to heuristic analysis
-    return this.analyzeHeuristically(normalizedCommand, aiContext);
+    return this.cloneIntent(this.analyzeHeuristically(normalizedCommand, aiContext));
+  }
+
+  private cloneIntent(intent: CommandIntent): CommandIntent {
+    return {
+      ...intent,
+      relatedCommands: [...intent.relatedCommands],
+      suggestedFollowups: [...intent.suggestedFollowups],
+    };
   }
 
   /**
@@ -40,7 +51,9 @@ export class IntentTracker {
    */
   analyzeIntent(command: string, aiContext?: string): CommandIntent {
     const intent = this.classify(command, aiContext);
-    this.recordIntent(command, intent);
+    // Record a separate copy: the returned intent escapes into command output
+    // metadata, and a consumer editing it there must not rewrite history.
+    this.recordIntent(command, this.cloneIntent(intent));
     return intent;
   }
 
@@ -50,7 +63,10 @@ export class IntentTracker {
 
   suggestNextCommands(currentCommand: string): string[] {
     const intent = this.classify(currentCommand);
-    const suggestions = [...intent.suggestedFollowups];
+    // The current intent's own related commands, then history. Before classify()
+    // was made side-effect-free these arrived via the just-recorded history entry;
+    // adding them explicitly keeps the suggestions while keeping the call pure.
+    const suggestions = [...intent.suggestedFollowups, ...intent.relatedCommands];
 
     // Add context-aware suggestions based on recent history
     const recentIntents = this.getRecentIntents(5);
