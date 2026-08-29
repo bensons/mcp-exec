@@ -7,6 +7,7 @@
  */
 
 const assert = require('assert');
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -17,8 +18,9 @@ const { ContextManager } = require('../dist/context/manager');
 const { AuditLogger } = require('../dist/audit/logger');
 
 // Unique per run so concurrent test runs never see each other's processes
-const MARKER = `mcpexec25-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+const MARKER = `mcpexec25-${process.pid}-${crypto.randomUUID()}`;
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-exit-codes-'));
+const FIXTURE = path.join('tests', 'fixtures', 'executor-command.js');
 
 function createExecutor() {
   const config = {
@@ -78,11 +80,6 @@ function createExecutor() {
   );
 }
 
-function nodeEvalCommand(source) {
-  const payload = Buffer.from(source, 'utf8').toString('base64');
-  return `node -e "eval(Buffer.from('${payload}','base64').toString())"`;
-}
-
 function processExists(pid) {
   try {
     process.kill(pid, 0);
@@ -106,25 +103,13 @@ async function testTimeout(executor) {
   // The grandchild closes its stdio and ignores SIGTERM on POSIX. This makes
   // the wrapping shell emit `close` while the process group is still alive,
   // which used to cancel the pending SIGKILL escalation.
-  const childSource = `
-    if (process.platform !== 'win32') process.on('SIGTERM', () => {});
-    setInterval(() => {}, 1000);
-  `;
-  const parentSource = `
-    const { spawn } = require('child_process');
-    const child = spawn(
-      process.execPath,
-      ['-e', ${JSON.stringify(childSource)}, ${JSON.stringify(`${MARKER}-orphan`)}],
-      { stdio: 'ignore' }
-    );
-    console.log('started-${MARKER}');
-    console.log('child-pid:' + child.pid);
-    setInterval(() => {}, 1000);
-  `;
-  const command = nodeEvalCommand(parentSource);
-
   const start = Date.now();
-  const result = await executor.executeCommand({ command, timeout: 500, cwd: TMP_DIR });
+  const result = await executor.executeCommand({
+    command: 'node',
+    args: [FIXTURE, 'timeout-tree', MARKER],
+    timeout: 500,
+    cwd: process.cwd(),
+  });
   const elapsed = Date.now() - start;
 
   assert.strictEqual(result.exitCode, 124, `expected exit code 124, got ${result.exitCode}`);
@@ -184,8 +169,9 @@ async function testNonzeroExit(executor) {
   console.log('📝 non-zero exit code is preserved');
 
   const result = await executor.executeCommand({
-    command: nodeEvalCommand('process.exit(7)'),
-    cwd: TMP_DIR,
+    command: 'node',
+    args: [FIXTURE, 'exit', '7'],
+    cwd: process.cwd(),
   });
 
   assert.strictEqual(result.exitCode, 7, `expected exit code 7, got ${result.exitCode}`);
@@ -198,8 +184,9 @@ async function testSuccessStillWorks(executor) {
   console.log('📝 normal command still reports success');
 
   const result = await executor.executeCommand({
-    command: nodeEvalCommand(`console.log(${JSON.stringify(`ok-${MARKER}`)})`),
-    cwd: TMP_DIR,
+    command: 'node',
+    args: [FIXTURE, 'output', `ok-${MARKER}`],
+    cwd: process.cwd(),
   });
 
   assert.strictEqual(result.exitCode, 0);
