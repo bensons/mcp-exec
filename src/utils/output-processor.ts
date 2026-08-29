@@ -12,6 +12,18 @@ export interface OutputConfig {
   maxOutputLength: number;
 }
 
+/** Raw result of a spawned command, before AI-friendly processing. */
+export interface RawCommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  /** Set when the process was terminated by a signal (e.g. 'SIGTERM'). */
+  signal?: string;
+  /** Set when the process was killed because it exceeded its timeout. */
+  timedOut?: boolean;
+  timeoutMs?: number;
+}
+
 export class OutputProcessor {
   private config: OutputConfig;
 
@@ -19,7 +31,7 @@ export class OutputProcessor {
     this.config = config;
   }
 
-  async process(rawOutput: { stdout: string; stderr: string; exitCode: number }, command?: string): Promise<CommandOutput> {
+  async process(rawOutput: RawCommandResult, command?: string): Promise<CommandOutput> {
     let { stdout, stderr, exitCode } = rawOutput;
 
     // Strip ANSI codes if configured
@@ -47,9 +59,16 @@ export class OutputProcessor {
 
     // Generate metadata
     const metadata = this.generateMetadata(stdout, stderr, exitCode, command);
+    if (rawOutput.timedOut) {
+      metadata.warnings.push(
+        rawOutput.timeoutMs
+          ? `Command timed out after ${rawOutput.timeoutMs}ms and was terminated`
+          : 'Command timed out and was terminated'
+      );
+    }
 
     // Generate AI-friendly summary
-    const summary = this.generateSummary(stdout, stderr, exitCode, metadata);
+    const summary = this.generateSummary(stdout, stderr, exitCode, metadata, rawOutput);
 
     return {
       stdout,
@@ -476,18 +495,28 @@ export class OutputProcessor {
   }
 
   private generateSummary(
-    stdout: string, 
-    stderr: string, 
-    exitCode: number, 
-    metadata: CommandOutput['metadata']
+    stdout: string,
+    stderr: string,
+    exitCode: number,
+    metadata: CommandOutput['metadata'],
+    status: { signal?: string; timedOut?: boolean; timeoutMs?: number } = {}
   ): CommandOutput['summary'] {
-    const success = exitCode === 0;
+    // A signal-killed or timed-out command never succeeded, whatever the exit code says
+    const success = exitCode === 0 && !status.signal && !status.timedOut;
     const hasOutput = stdout.trim().length > 0;
     const hasErrors = stderr.trim().length > 0;
 
     let mainResult: string;
     if (!success) {
-      mainResult = `Command failed with exit code ${exitCode}`;
+      if (status.timedOut) {
+        mainResult = status.timeoutMs
+          ? `Command timed out after ${status.timeoutMs}ms and was terminated (exit code ${exitCode})`
+          : `Command timed out and was terminated (exit code ${exitCode})`;
+      } else if (status.signal) {
+        mainResult = `Command terminated by signal ${status.signal} (exit code ${exitCode})`;
+      } else {
+        mainResult = `Command failed with exit code ${exitCode}`;
+      }
       if (hasErrors) {
         const firstErrorLine = stderr.split('\n')[0].trim();
         mainResult += `: ${firstErrorLine}`;
@@ -517,7 +546,9 @@ export class OutputProcessor {
     }
 
     const nextSteps: string[] = [];
-    if (!success) {
+    if (status.timedOut) {
+      nextSteps.push('Increase the timeout or run the command in an interactive session');
+    } else if (!success) {
       nextSteps.push('Review error message and correct the command');
     }
     if (metadata.suggestions.length > 0) {
