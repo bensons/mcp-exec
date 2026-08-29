@@ -3,6 +3,8 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
+import * as path from 'path';
+import { Writable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
 import {
   InteractiveSession,
@@ -12,6 +14,7 @@ import {
   ServerConfig,
 } from '../types/index';
 import { CommandGuard, buildFullCommand } from '../security/command-policy';
+import { resolveShellOption } from './shell-option';
 
 export interface StartSessionOptions {
   command: string;
@@ -20,13 +23,20 @@ export interface StartSessionOptions {
   env?: Record<string, string>;
   shell?: boolean | string;
   aiContext?: string;
+  /** Set when the command was already approved via confirm_command. */
+  skipConfirmation?: boolean;
 }
 
 export interface SendInputOptions {
   sessionId: string;
   input: string;
   addNewline?: boolean;
+  /** Set when the input was already approved via confirm_command. */
+  skipConfirmation?: boolean;
 }
+
+/** How long a finished/errored session is kept around so its output can still be drained. */
+export const FINISHED_SESSION_GRACE_MS = 5 * 60 * 1000;
 
 export class InteractiveSessionManager {
   private sessions: Map<string, InteractiveSession>;
@@ -43,44 +53,19 @@ export class InteractiveSessionManager {
     this.cleanupInterval = setInterval(() => {
       this.cleanupExpiredSessions();
     }, 60000); // Check every minute
+    this.cleanupInterval.unref();
+  }
+
+  /**
+   * Swap in a new sessions config without recreating the manager (which would
+   * orphan every running child process). Limits/timeouts are read at call time.
+   */
+  updateConfig(config: ServerConfig['sessions']): void {
+    this.config = config;
   }
 
   async startSession(options: StartSessionOptions): Promise<string> {
-    if (this.commandGuard) {
-      await this.commandGuard(buildFullCommand(options.command, options.args));
-    }
-
-    // Check session limit
-    if (this.sessions.size >= this.config.maxInteractiveSessions) {
-      throw new Error(`Maximum number of interactive sessions (${this.config.maxInteractiveSessions}) reached`);
-    }
-
-    const sessionId = uuidv4();
-    const startTime = new Date();
-
-    // Determine execution method based on shell option
-    let execCommand: string;
-    let execArgs: string[];
-
-    if (options.shell !== false) {
-      // When shell=true or undefined, let Node.js handle the shell execution
-      execCommand = options.command;
-      execArgs = options.args || [];
-    } else {
-      // When shell=false, manually construct shell command
-      if (process.platform === 'win32') {
-        execCommand = 'cmd.exe';
-        execArgs = ['/c', options.command, ...(options.args || [])];
-      } else {
-        execCommand = '/bin/sh';
-        const fullCommand = options.args && options.args.length > 0 
-          ? `${options.command} ${options.args.join(' ')}` 
-          : options.command;
-        execArgs = ['-c', fullCommand];
-      }
-    }
-
-    // Spawn the process
+    const cwd = path.resolve(options.cwd || process.cwd());
     const environment: Record<string, string> = {
       ...Object.fromEntries(
         Object.entries(process.env).filter(([_, value]) => value !== undefined)
@@ -88,10 +73,43 @@ export class InteractiveSessionManager {
       ...options.env,
     };
 
-    const childProcess = spawn(execCommand, execArgs, {
-      cwd: options.cwd || process.cwd(),
+    if (this.commandGuard) {
+      await this.commandGuard(buildFullCommand(options.command, options.args), {
+        skipConfirmation: options.skipConfirmation,
+        cwd,
+        env: environment,
+      });
+    }
+
+    // Check session limit - only sessions that are still running occupy a slot
+    if (this.countRunningSessions() >= this.config.maxInteractiveSessions) {
+      throw new Error(`Maximum number of interactive sessions (${this.config.maxInteractiveSessions}) reached`);
+    }
+
+    // shell: true/undefined -> platform default shell, false -> no shell at all,
+    // string -> the requested shell executable resolved in the child context.
+    const shell = resolveShellOption(options.shell, {
+      cwd,
       env: environment,
-      shell: options.shell !== false,
+    });
+
+    // A custom shell can execute arbitrary behavior before the requested command,
+    // so it must pass the same policy as the command itself.
+    if (this.commandGuard && typeof shell === 'string') {
+      await this.commandGuard(shell, {
+        skipConfirmation: options.skipConfirmation,
+        cwd,
+        env: environment,
+      });
+    }
+
+    const sessionId = uuidv4();
+    const startTime = new Date();
+
+    const childProcess = spawn(options.command, options.args || [], {
+      cwd,
+      env: environment,
+      shell,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -103,7 +121,7 @@ export class InteractiveSessionManager {
       process: childProcess,
       startTime,
       lastActivity: startTime,
-      cwd: options.cwd || process.cwd(),
+      cwd,
       env: environment,
       status: 'running',
       outputBuffer: this.createOutputBuffer(),
@@ -122,10 +140,6 @@ export class InteractiveSessionManager {
   }
 
   async sendInput(options: SendInputOptions): Promise<void> {
-    if (this.commandGuard) {
-      await this.commandGuard(options.input);
-    }
-
     const session = this.sessions.get(options.sessionId);
     if (!session) {
       throw new Error(`Session ${options.sessionId} not found`);
@@ -135,9 +149,39 @@ export class InteractiveSessionManager {
       throw new Error(`Session ${options.sessionId} is not running (status: ${session.status})`);
     }
 
+    const resultingCwd = this.commandGuard
+      ? await this.commandGuard(options.input, {
+          skipConfirmation: options.skipConfirmation,
+          cwd: session.cwd,
+          env: session.env,
+        })
+      : undefined;
+
+    // Writing to a child that closed (or never opened) its stdin raises EPIPE. Without this
+    // guard + the 'error' listener in setupProcessHandlers it surfaces as an uncaught
+    // exception and takes the whole server down.
+    const stdin: Writable | null | undefined = session.process.stdin;
+    if (!stdin || stdin.destroyed || !stdin.writable) {
+      throw new Error(`Session ${options.sessionId} stdin is closed`);
+    }
+
     // Send input to the process
     const input = options.addNewline !== false ? options.input + '\n' : options.input;
-    session.process.stdin?.write(input);
+    await new Promise<void>((resolve, reject) => {
+      const settle = (error?: Error | null) => {
+        clearTimeout(graceTimer);
+        if (error) reject(error); else resolve();
+      };
+      // Use a bounded wait for the flush. A child that never reads its stdin can leave a
+      // backpressured write pending forever, so we stop waiting after the grace period; a late
+      // EPIPE still lands on the stdin 'error' handler and fails the next sendInput.
+      const graceTimer = setTimeout(() => settle(), 50);
+      stdin.write(input, settle);
+    });
+    if (resultingCwd && options.addNewline !== false) {
+      session.cwd = resultingCwd;
+      session.env.PWD = resultingCwd;
+    }
     session.lastActivity = new Date();
   }
 
@@ -155,6 +199,12 @@ export class InteractiveSessionManager {
     // The raw buffers were cleared by consumeBuffer; reset loss accounting too.
     session.droppedBytes = 0;
 
+    // The process is gone and its output has now been handed over: drop the session
+    // so it stops occupying a slot and holding on to its buffers.
+    if (session.status !== 'running') {
+      this.sessions.delete(sessionId);
+    }
+
     return {
       sessionId,
       stdout,
@@ -171,16 +221,20 @@ export class InteractiveSessionManager {
       throw new Error(`Session ${sessionId} not found`);
     }
 
-    if (session.status === 'running') {
+    // Check liveness, not status: a stdin EPIPE flips status to 'error' while the child is
+    // still alive, and keying off status would leak that process.
+    const isAlive = () => session.process.exitCode === null && session.process.signalCode === null;
+
+    if (isAlive()) {
       // Try graceful termination first
       session.process.kill('SIGTERM');
-      
+
       // Force kill after 5 seconds if still running
       setTimeout(() => {
-        if (session.status === 'running') {
+        if (isAlive()) {
           session.process.kill('SIGKILL');
         }
-      }, 5000);
+      }, 5000).unref();
     }
 
     // Remove from active sessions
@@ -203,6 +257,16 @@ export class InteractiveSessionManager {
     return this.sessions.get(sessionId);
   }
 
+  countRunningSessions(): number {
+    let count = 0;
+    for (const session of this.sessions.values()) {
+      if (session.status === 'running') {
+        count++;
+      }
+    }
+    return count;
+  }
+
   private setupProcessHandlers(session: InteractiveSession): void {
     const { process: childProcess } = session;
 
@@ -222,7 +286,19 @@ export class InteractiveSessionManager {
       session.lastActivity = new Date();
     });
 
-    // Handle process exit
+    // Handle stdin errors (EPIPE when the child closed its stdin or already exited).
+    // Without a listener Node rethrows these as uncaught exceptions, which crashes the server.
+    childProcess.stdin?.on('error', (error: Error) => {
+      session.status = 'error';
+      session.droppedBytes += this.appendCapped(
+        session.errorBuffer,
+        `stdin error: ${error.message}\n`
+      );
+      session.lastActivity = new Date();
+    });
+
+    // A child can exit while a descendant still holds its stdout/stderr pipes open. Keep the
+    // session readable until 'close', which fires only after those streams have drained.
     childProcess.on('close', (code: number | null) => {
       session.status = code === 0 ? 'finished' : 'error';
       session.lastActivity = new Date();
@@ -404,8 +480,12 @@ export class InteractiveSessionManager {
 
     for (const [sessionId, session] of this.sessions.entries()) {
       const timeSinceActivity = now.getTime() - session.lastActivity.getTime();
-      
-      if (timeSinceActivity > this.config.sessionTimeout) {
+      // Finished sessions are reaped after a short grace period, independent of sessionTimeout
+      const maxIdle = session.status === 'running'
+        ? this.config.sessionTimeout
+        : Math.min(this.config.sessionTimeout, FINISHED_SESSION_GRACE_MS);
+
+      if (timeSinceActivity > maxIdle) {
         expiredSessions.push(sessionId);
       }
     }

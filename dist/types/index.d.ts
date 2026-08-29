@@ -62,10 +62,16 @@ export interface ValidationResult {
     reason?: string;
     suggestions?: string[];
     riskLevel: 'low' | 'medium' | 'high';
+    requiresConfirmation?: boolean;
+    /** Deterministic cwd after a validated stateful-shell input such as `cd`. */
+    resultingCwd?: string;
 }
 export interface SecurityProvider {
     securityLevel: 'strict' | 'moderate' | 'permissive';
-    validateCommand(command: string): ValidationResult;
+    validateCommand(command: string, options?: {
+        cwd?: string;
+        env?: Record<string, string | undefined>;
+    }): ValidationResult | Promise<ValidationResult>;
     resourceLimits: {
         maxExecutionTime: number;
         maxMemoryUsage: number;
@@ -117,7 +123,7 @@ export interface AuditLogger {
         sessionId: string;
         userId?: string;
         command: string;
-        context: CommandContext;
+        context: AuditContext;
         result: CommandOutput;
         securityCheck: ValidationResult;
         aiIntent?: string;
@@ -142,6 +148,19 @@ export interface CommandContext {
     previousCommands: string[];
     aiIntent?: string;
 }
+/**
+ * Slim, non-recursive context recorded on every audit entry. Deliberately
+ * excludes commandHistory / outputCache / fileSystemChanges / environment maps:
+ * embedding the full CommandContext made entry N contain entries 1..N-1 and put
+ * the whole process environment on disk. See issue #30.
+ */
+export interface AuditContext {
+    sessionId: string;
+    workingDirectory: string;
+    previousCommands: string[];
+    aiIntent?: string;
+    userId?: string;
+}
 export interface LogFilters {
     sessionId?: string;
     userId?: string;
@@ -159,7 +178,7 @@ export interface LogEntry {
     sessionId: string;
     userId?: string;
     command: string;
-    context: CommandContext;
+    context: AuditContext;
     result: CommandOutput;
     securityCheck: ValidationResult;
     aiIntent?: string;
@@ -232,6 +251,9 @@ export interface ServerConfig {
         retention: number;
         logFile?: string;
         logDirectory?: string;
+        maxOutputBytes?: number;
+        maxInMemoryEntries?: number;
+        redactPatterns?: string[];
         monitoring?: {
             enabled: boolean;
             alertRetention: number;

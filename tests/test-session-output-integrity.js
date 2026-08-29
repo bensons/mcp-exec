@@ -37,12 +37,10 @@ async function drain(manager, sessionId, timeoutMs = 10000) {
     droppedBytes += out.droppedBytes;
 
     if (out.status !== 'running') {
-      // One last read to pick up data delivered alongside the exit
-      const tail = await manager.readOutput(sessionId);
       return {
-        stdout: stdout + tail.stdout,
-        stderr: stderr + tail.stderr,
-        droppedBytes: droppedBytes + tail.droppedBytes,
+        stdout,
+        stderr,
+        droppedBytes,
         status: out.status,
       };
     }
@@ -167,12 +165,16 @@ const tests = {
   async 'readOutput clears the buffer and resets droppedBytes'() {
     const manager = newManager();
     try {
-      const sessionId = await manager.startSession({ command: `printf 'x\\n'` });
-      await drain(manager, sessionId);
+      const sessionId = await manager.startSession({ command: 'cat' });
+      await manager.sendInput({ sessionId, input: 'x' });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const first = await manager.readOutput(sessionId);
+      assert.strictEqual(first.stdout, 'x\n');
       const second = await manager.readOutput(sessionId);
       assert.strictEqual(second.stdout, '');
       assert.strictEqual(second.stderr, '');
       assert.strictEqual(second.droppedBytes, 0);
+      await manager.killSession(sessionId);
     } finally {
       await manager.shutdown();
     }
