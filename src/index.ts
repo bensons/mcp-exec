@@ -38,9 +38,13 @@ const DEFAULT_CONFIG: ServerConfig = {
   security: {
     level: (process.env.MCP_EXEC_SECURITY_LEVEL as 'strict' | 'moderate' | 'permissive') || 'permissive',
     confirmDangerous: process.env.MCP_EXEC_CONFIRM_DANGEROUS === 'true',
+    // Empty = no directory restriction. The old default ([process.cwd(), '/tmp'])
+    // silently allowed everything when the server was launched from `/`, and now
+    // that the check actually works it would block ordinary relative paths.
+    // Set MCP_EXEC_ALLOWED_DIRECTORIES to opt in to an allowlist.
     allowedDirectories: process.env.MCP_EXEC_ALLOWED_DIRECTORIES
-      ? process.env.MCP_EXEC_ALLOWED_DIRECTORIES.split(',').map(dir => dir.trim())
-      : [process.cwd(), '/tmp'].filter(dir => dir !== ''),
+      ? process.env.MCP_EXEC_ALLOWED_DIRECTORIES.split(',').map(dir => dir.trim()).filter(dir => dir !== '')
+      : [],
     blockedCommands: process.env.MCP_EXEC_BLOCKED_COMMANDS
       ? parseBlockedCommandsEnvironment(process.env.MCP_EXEC_BLOCKED_COMMANDS)
       : [
@@ -467,7 +471,7 @@ class MCPShellServer {
     this.terminalSessionManager = new TerminalSessionManager(
       this.config.sessions,
       this.config.terminalViewer,
-      (command) => this.assertCommandAllowed(command, 'terminal-session')
+      (command, cwd, env) => this.assertCommandAllowed(command, 'terminal-session', {}, cwd, env)
     );
 
     // Auto-start terminal viewer service if enabled in config
@@ -519,15 +523,34 @@ class MCPShellServer {
     }
   }
 
+  /**
+   * Effective working directory a command will run in: explicit cwd, else the
+   * session context directory, else the server's cwd. Relative and `~` paths in
+   * the command are validated against this, not against process.cwd().
+   */
+  private async getEffectiveCwd(cwd?: string): Promise<string> {
+    if (cwd) {
+      return path.resolve(cwd);
+    }
+    const context = await this.contextManager.getCurrentContext();
+    return path.resolve(context.currentDirectory || process.cwd());
+  }
+
   private async assertCommandAllowed(
     command: string,
     source: string,
-    extraContext: Record<string, unknown> = {}
-  ): Promise<void> {
-    await assertCommandAllowed(this.securityManager, command, this.auditLogger, {
-      source,
-      ...extraContext,
-    });
+    extraContext: Record<string, unknown> = {},
+    cwd?: string,
+    env?: Record<string, string | undefined>
+  ): Promise<string | undefined> {
+    return await assertCommandAllowed(
+      this.securityManager,
+      command,
+      this.auditLogger,
+      { source, ...extraContext },
+      await this.getEffectiveCwd(cwd),
+      env
+    );
   }
 
   private setupHandlers(): void {
@@ -1408,9 +1431,22 @@ class MCPShellServer {
 
               try {
                 const fullCommand = buildFullCommand(parsed.command, parsed.args);
-                await this.assertCommandAllowed(fullCommand, 'execute_command', {
-                  enableTerminalViewer: true,
-                });
+                const context = await this.contextManager.getCurrentContext();
+                const workingDirectory = await this.getEffectiveCwd(parsed.cwd);
+                const environment: Record<string, string> = {
+                  ...Object.fromEntries(
+                    Object.entries(process.env).filter(([_, value]) => value !== undefined)
+                  ) as Record<string, string>,
+                  ...context.environmentVariables,
+                  ...parsed.env,
+                };
+                await this.assertCommandAllowed(
+                  fullCommand,
+                  'execute_command',
+                  { enableTerminalViewer: true },
+                  workingDirectory,
+                  environment
+                );
 
                 // Ensure terminal viewer service is available
                 if (!this.terminalViewerService) {
@@ -1425,8 +1461,8 @@ class MCPShellServer {
                 const sessionId = await this.terminalSessionManager!.startSession({
                   command: parsed.command,
                   args: parsed.args,
-                  cwd: parsed.cwd,
-                  env: parsed.env,
+                  cwd: workingDirectory,
+                  env: environment,
                   enableTerminalViewer: true,
                   terminalSize: parsed.terminalSize || { cols: 80, rows: 24 },
                   aiContext: parsed.aiContext,
@@ -1503,15 +1539,9 @@ class MCPShellServer {
             });
 
             try {
-              const sessionCommand = parsed.command || this.getDefaultShell();
-              await this.assertCommandAllowed(
-                buildFullCommand(sessionCommand, parsed.args),
-                'start_interactive_session'
-              );
-
               // Use the session manager directly to create an interactive session
               const context = await this.contextManager.getCurrentContext();
-              const workingDirectory = parsed.cwd || context.currentDirectory || process.cwd();
+              const workingDirectory = await this.getEffectiveCwd(parsed.cwd);
               const environment: Record<string, string> = {
                 ...Object.fromEntries(
                   Object.entries(process.env).filter(([_, value]) => value !== undefined)
@@ -1566,12 +1596,22 @@ class MCPShellServer {
             });
 
             try {
-              if (parsed.command) {
-                await this.assertCommandAllowed(
-                  buildFullCommand(parsed.command, parsed.args),
-                  'start_terminal_session'
-                );
-              }
+              const context = await this.contextManager.getCurrentContext();
+              const workingDirectory = await this.getEffectiveCwd(parsed.cwd);
+              const environment: Record<string, string> = {
+                ...Object.fromEntries(
+                  Object.entries(process.env).filter(([_, value]) => value !== undefined)
+                ) as Record<string, string>,
+                ...context.environmentVariables,
+                ...parsed.env,
+              };
+              await this.assertCommandAllowed(
+                buildFullCommand(parsed.command, parsed.args),
+                'start_terminal_session',
+                {},
+                workingDirectory,
+                environment
+              );
 
               // Ensure terminal viewer service is available
               if (!this.terminalViewerService) {
@@ -1586,8 +1626,8 @@ class MCPShellServer {
               const sessionId = await this.terminalSessionManager!.startSession({
                 command: parsed.command, // Don't default to shell - let PTY spawn the shell directly
                 args: parsed.args,
-                cwd: parsed.cwd,
-                env: parsed.env,
+                cwd: workingDirectory,
+                env: environment,
                 enableTerminalViewer: true,
                 terminalSize: parsed.terminalSize || { cols: 80, rows: 24 },
                 aiContext: parsed.aiContext,
@@ -1638,25 +1678,16 @@ class MCPShellServer {
             });
 
             try {
-              await this.assertCommandAllowed(parsed.input, 'send_to_session', {
-                sessionId: parsed.sessionId,
-              });
-
               // Try terminal session manager first
               const terminalSession = this.terminalSessionManager?.getSession(parsed.sessionId);
               if (terminalSession) {
-                // If terminal viewer service is available and has this session, use it for input
-                // This ensures proper WebSocket broadcasting
-                if (this.terminalViewerService && this.terminalViewerService.hasSession(parsed.sessionId)) {
-                  this.terminalViewerService.sendInput(parsed.sessionId, parsed.input, parsed.addNewline);
-                } else {
-                  // Fallback to direct terminal session manager
-                  await this.terminalSessionManager!.sendInput({
-                    sessionId: parsed.sessionId,
-                    input: parsed.input,
-                    addNewline: parsed.addNewline,
-                  });
-                }
+                // The manager owns policy validation and live cwd tracking. The
+                // viewer observes the same PTY, so direct writes still broadcast.
+                await this.terminalSessionManager!.sendInput({
+                  sessionId: parsed.sessionId,
+                  input: parsed.input,
+                  addNewline: parsed.addNewline,
+                });
 
                 return {
                   content: [
@@ -2930,7 +2961,7 @@ class MCPShellServer {
             this.terminalSessionManager = new TerminalSessionManager(
               this.config.sessions,
               this.config.terminalViewer,
-              (command) => this.assertCommandAllowed(command, 'terminal-session')
+              (command, cwd, env) => this.assertCommandAllowed(command, 'terminal-session', {}, cwd, env)
             );
 
             return {
@@ -2966,7 +2997,7 @@ class MCPShellServer {
             this.terminalSessionManager = new TerminalSessionManager(
               this.config.sessions,
               this.config.terminalViewer,
-              (command) => this.assertCommandAllowed(command, 'terminal-session')
+              (command, cwd, env) => this.assertCommandAllowed(command, 'terminal-session', {}, cwd, env)
             );
 
             // Apply authentication and bind changes to a running viewer immediately.
@@ -3817,7 +3848,7 @@ Please start by enabling the terminal viewer service.`,
       this.terminalSessionManager = new TerminalSessionManager(
         this.config.sessions,
         this.config.terminalViewer,
-        (command) => this.assertCommandAllowed(command, 'terminal-session')
+        (command, cwd, env) => this.assertCommandAllowed(command, 'terminal-session', {}, cwd, env)
       );
     }
     if (!section || section === 'terminalViewer') {

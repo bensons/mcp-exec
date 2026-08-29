@@ -37,6 +37,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TerminalSessionManager = void 0;
+const path = __importStar(require("path"));
 const pty = __importStar(require("node-pty"));
 const uuid_1 = require("uuid");
 const interactive_session_manager_1 = require("../core/interactive-session-manager");
@@ -61,15 +62,23 @@ class TerminalSessionManager {
     }
     async startSession(options) {
         console.error(`[DEBUG] TerminalSessionManager.startSession called with enableTerminalViewer: ${options.enableTerminalViewer}`);
-        if (this.commandGuard && options.command) {
-            await this.commandGuard((0, command_policy_1.buildFullCommand)(options.command, options.args));
+        const cwd = path.resolve(options.cwd || process.cwd());
+        const environment = {
+            ...Object.fromEntries(Object.entries(process.env).filter(([_, value]) => value !== undefined)),
+            ...options.env,
+            TERM: 'xterm-256color',
+            COLORTERM: 'truecolor',
+        };
+        const normalizedOptions = { ...options, cwd, env: environment };
+        if (this.commandGuard) {
+            await this.commandGuard((0, command_policy_1.buildFullCommand)(options.command, options.args), cwd, environment);
         }
         // If terminal viewer is not requested, use fallback
         if (!options.enableTerminalViewer) {
             console.error(`[DEBUG] Terminal viewer not requested, using fallback session manager`);
             // Ensure command is provided for fallback session manager
             const fallbackOptions = {
-                ...options,
+                ...normalizedOptions,
                 command: options.command || this.getShell()
             };
             return this.fallbackSessionManager.startSession(fallbackOptions);
@@ -82,17 +91,14 @@ class TerminalSessionManager {
         const sessionId = (0, uuid_1.v4)();
         const startTime = new Date();
         // Create PTY process
-        const ptyProcess = this.createPtyProcess(options);
+        const ptyProcess = this.createPtyProcess(normalizedOptions);
         // Create terminal session
         const session = {
             sessionId,
             command: options.command || 'system shell',
             args: options.args || [],
-            cwd: options.cwd || process.cwd(),
-            env: {
-                ...Object.fromEntries(Object.entries(process.env).filter(([_, value]) => value !== undefined)),
-                ...options.env,
-            },
+            cwd,
+            env: environment,
             startTime,
             lastActivity: startTime,
             status: 'running',
@@ -241,9 +247,6 @@ class TerminalSessionManager {
     }
     async sendInput(options) {
         console.error(`[DEBUG] TerminalSessionManager.sendInput called for session ${options.sessionId}`);
-        if (this.commandGuard) {
-            await this.commandGuard(options.input);
-        }
         const session = this.sessions.get(options.sessionId);
         if (!session) {
             console.error(`[DEBUG] Session ${options.sessionId} not found in terminal sessions, trying fallback manager`);
@@ -257,6 +260,9 @@ class TerminalSessionManager {
         if (!session.pty) {
             throw new Error(`Session ${options.sessionId} does not have a PTY`);
         }
+        const resultingCwd = this.commandGuard
+            ? await this.commandGuard(options.input, session.cwd, session.env)
+            : undefined;
         // Send input to PTY - writing to a PTY whose child already exited throws (EIO/EPIPE),
         // so translate it into a normal tool error instead of letting it escape.
         const input = options.addNewline !== false ? options.input + '\r' : options.input;
@@ -265,6 +271,10 @@ class TerminalSessionManager {
         }
         catch (error) {
             throw new Error(`Failed to write to session ${options.sessionId} PTY: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (resultingCwd && options.addNewline !== false) {
+            session.cwd = resultingCwd;
+            session.env.PWD = resultingCwd;
         }
         // Don't manually add to buffer - let PTY echo handle display to avoid duplication
         session.lastActivity = new Date();
