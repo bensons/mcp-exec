@@ -325,7 +325,9 @@ MCP_EXEC_TERMINAL_VIEWER_AUTH_TOKEN=        # Token to require (auto-generated w
 
 When `enableAuth` is true, **every** HTTP route (including `/health` and `/static/*`) and every
 WebSocket upgrade requires the token. Requests without a valid token get `401`; WebSocket
-connections without one are closed with code `1008`. Tokens are compared in constant time.
+connections without one are closed with code `1008`. Repeated failed authentication attempts
+from one client are limited to 20 per minute (`429` for HTTP and close code `1013` for
+WebSockets). Tokens are compared in constant time.
 
 Supply the token either way:
 
@@ -343,14 +345,19 @@ Terminal viewer auth token (generated): 5WFHL59l49GRN9S3iHuLgRMf5Ozydqvd
 
 Session URLs returned by `getStatus`, `/api/sessions`, `start_terminal_session`, and
 `execute_command` already carry `?token=...`, so opening the URL in a browser just works —
-the viewer page forwards the token to the WebSocket automatically. Treat those URLs as
-secrets: anyone holding one can read the terminal.
+the viewer page forwards the token to the WebSocket automatically. A viewer page fetched with
+an `Authorization: Bearer ...` header works as well: the authenticated response injects the
+configured token into its WebSocket initialization because browser WebSocket APIs cannot set
+custom authorization headers. Treat viewer URLs and authenticated page content as secrets:
+anyone holding either can read the terminal.
 
 #### Binding to a non-loopback address
 
 Binding to anything other than loopback (for example `MCP_EXEC_TERMINAL_VIEWER_HOST=0.0.0.0`)
 with authentication disabled is **refused** — the service fails to start with an explanatory
-error. Enable authentication, or keep the viewer on `127.0.0.1`.
+error. Runtime configuration updates and rollbacks that would make this transition are rejected
+before the active configuration changes. Enable authentication, or keep the viewer on
+`127.0.0.1`.
 
 ### Dynamic Configuration System
 
