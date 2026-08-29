@@ -16,12 +16,16 @@ export interface StartSessionOptions {
   env?: Record<string, string>;
   shell?: boolean | string;
   aiContext?: string;
+  /** Set when the command was already approved via confirm_command. */
+  skipConfirmation?: boolean;
 }
 
 export interface SendInputOptions {
   sessionId: string;
   input: string;
   addNewline?: boolean;
+  /** Set when the input was already approved via confirm_command. */
+  skipConfirmation?: boolean;
 }
 
 /** How long a finished/errored session is kept around so its output can still be drained. */
@@ -55,7 +59,11 @@ export class InteractiveSessionManager {
     };
 
     if (this.commandGuard) {
-      await this.commandGuard(buildFullCommand(options.command, options.args), cwd, environment);
+      await this.commandGuard(buildFullCommand(options.command, options.args), {
+        skipConfirmation: options.skipConfirmation,
+        cwd,
+        env: environment,
+      });
     }
 
     // Check session limit - only sessions that are still running occupy a slot
@@ -132,7 +140,11 @@ export class InteractiveSessionManager {
     }
 
     const resultingCwd = this.commandGuard
-      ? await this.commandGuard(options.input, session.cwd, session.env)
+      ? await this.commandGuard(options.input, {
+          skipConfirmation: options.skipConfirmation,
+          cwd: session.cwd,
+          env: session.env,
+        })
       : undefined;
 
     // Writing to a child that closed (or never opened) its stdin raises EPIPE. Without this

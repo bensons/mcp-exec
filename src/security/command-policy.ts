@@ -5,12 +5,29 @@
 
 import { SecurityManager } from './manager';
 import { AuditLogger } from '../audit/logger';
+import { ValidationResult } from '../types/index';
+
+export interface CommandPolicyOptions {
+  /** Bypass only the "needs confirmation" branch; hard blocks still apply. */
+  skipConfirmation?: boolean;
+  /** Effective working directory used to resolve filesystem operands. */
+  cwd?: string;
+  /** Environment supplied to the command, used to validate shell expansions. */
+  env?: Record<string, string | undefined>;
+}
 
 export type CommandGuard = (
   command: string,
-  cwd?: string,
-  env?: Record<string, string | undefined>
+  options?: CommandPolicyOptions
 ) => Promise<string | undefined>;
+
+/** Thrown when a command is allowed but gated behind confirm_command. */
+export class ConfirmationRequiredError extends Error {
+  constructor(public readonly command: string, public readonly validation: ValidationResult) {
+    super(validation.reason || 'Command requires confirmation');
+    this.name = 'ConfirmationRequiredError';
+  }
+}
 
 export function buildFullCommand(command?: string, args?: string[]): string {
   if (!command) {
@@ -27,22 +44,31 @@ export async function assertCommandAllowed(
   command: string,
   auditLogger?: AuditLogger,
   context: Record<string, unknown> = {},
-  cwd?: string,
-  env?: Record<string, string | undefined>
+  options: CommandPolicyOptions = {}
 ): Promise<string | undefined> {
   const trimmed = command.trim();
-  if (!trimmed && cwd === undefined) {
+  if (!trimmed && options.cwd === undefined) {
     return;
   }
 
-  const securityCheck = await securityManager.validateCommand(trimmed, { cwd, env });
+  const securityCheck = await securityManager.validateCommand(trimmed, {
+    cwd: options.cwd,
+    env: options.env,
+  });
   if (securityCheck.allowed) {
     return securityCheck.resultingCwd;
   }
 
+  if (securityCheck.requiresConfirmation) {
+    if (options.skipConfirmation) {
+      return securityCheck.resultingCwd;
+    }
+    throw new ConfirmationRequiredError(trimmed, securityCheck);
+  }
+
   await auditLogger?.warning('Command blocked by security policy', {
     fullCommand: trimmed,
-    cwd,
+    cwd: options.cwd,
     reason: securityCheck.reason,
     riskLevel: securityCheck.riskLevel,
     ...context,

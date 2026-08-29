@@ -62,6 +62,7 @@ export interface ValidationResult {
     reason?: string;
     suggestions?: string[];
     riskLevel: 'low' | 'medium' | 'high';
+    requiresConfirmation?: boolean;
     /** Deterministic cwd after a validated stateful-shell input such as `cd`. */
     resultingCwd?: string;
 }

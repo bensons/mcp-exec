@@ -9,7 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { CommandOutput, ServerConfig, SessionOutput } from '../types/index';
 import { SecurityManager } from '../security/manager';
-import { assertCommandAllowed } from '../security/command-policy';
+import { assertCommandAllowed, CommandPolicyOptions } from '../security/command-policy';
 import { ContextManager } from '../context/manager';
 import { AuditLogger } from '../audit/logger';
 import { OutputProcessor, RawCommandResult } from '../utils/output-processor';
@@ -94,13 +94,15 @@ export class ShellExecutor {
     this.intentTracker = new IntentTracker();
     this.sessionManager = new InteractiveSessionManager(
       config.sessions,
-      async (command, cwd, env) => assertCommandAllowed(
+      async (command, guardOptions = {}) => assertCommandAllowed(
         this.securityManager,
         command,
         this.auditLogger,
         { source: 'interactive-session' },
-        await this.getEffectiveCwd(cwd),
-        env
+        {
+          ...guardOptions,
+          cwd: await this.getEffectiveCwd(guardOptions.cwd),
+        }
       )
     );
   }
@@ -118,7 +120,10 @@ export class ShellExecutor {
     return path.resolve(context.currentDirectory || process.cwd());
   }
 
-  async executeCommand(options: ExecuteCommandOptions): Promise<CommandOutput> {
+  async executeCommand(
+    options: ExecuteCommandOptions,
+    policyOptions: CommandPolicyOptions = {}
+  ): Promise<CommandOutput> {
     const commandId = uuidv4();
     const startTime = Date.now();
 
@@ -162,7 +167,13 @@ export class ShellExecutor {
         env: environment,
       });
 
-      if (!securityCheck.allowed) {
+      // A confirmed command (via confirm_command) bypasses only the
+      // confirmation gate; hard blocks still stop it here.
+      const confirmationBypassed = Boolean(
+        securityCheck.requiresConfirmation && policyOptions.skipConfirmation
+      );
+
+      if (!securityCheck.allowed && !confirmationBypassed) {
         await this.auditLogger.warning('Command blocked by security policy', {
           commandId,
           fullCommand,
@@ -472,6 +483,10 @@ export class ShellExecutor {
     return this.sessionManager.listSessions();
   }
 
+  getSession(sessionId: string) {
+    return this.sessionManager.getSession(sessionId);
+  }
+
   async killSession(sessionId: string): Promise<void> {
     await this.sessionManager.killSession(sessionId);
   }
@@ -492,8 +507,7 @@ export class ShellExecutor {
       this.buildFullCommand(options),
       this.auditLogger,
       { source: 'start_interactive_session' },
-      cwd,
-      env
+      { skipConfirmation: options.skipConfirmation, cwd, env }
     );
     return await this.sessionManager.startSession({ ...options, cwd, env });
   }

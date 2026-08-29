@@ -69,8 +69,11 @@ export class TerminalSessionManager {
     if (this.commandGuard) {
       await this.commandGuard(
         buildFullCommand(options.command, options.args),
-        cwd,
-        environment
+        {
+          skipConfirmation: options.skipConfirmation,
+          cwd,
+          env: environment,
+        }
       );
     }
 
@@ -290,7 +293,11 @@ export class TerminalSessionManager {
     }
 
     const resultingCwd = this.commandGuard
-      ? await this.commandGuard(options.input, session.cwd, session.env)
+      ? await this.commandGuard(options.input, {
+          skipConfirmation: options.skipConfirmation,
+          cwd: session.cwd,
+          env: session.env,
+        })
       : undefined;
 
     // Send input to PTY - writing to a PTY whose child already exited throws (EIO/EPIPE),

@@ -80,7 +80,11 @@ class TerminalSessionManager {
         };
         const normalizedOptions = { ...options, cwd, env: environment };
         if (this.commandGuard) {
-            await this.commandGuard((0, command_policy_1.buildFullCommand)(options.command, options.args), cwd, environment);
+            await this.commandGuard((0, command_policy_1.buildFullCommand)(options.command, options.args), {
+                skipConfirmation: options.skipConfirmation,
+                cwd,
+                env: environment,
+            });
         }
         // If terminal viewer is not requested, use fallback
         if (!options.enableTerminalViewer) {
@@ -270,7 +274,11 @@ class TerminalSessionManager {
             throw new Error(`Session ${options.sessionId} does not have a PTY`);
         }
         const resultingCwd = this.commandGuard
-            ? await this.commandGuard(options.input, session.cwd, session.env)
+            ? await this.commandGuard(options.input, {
+                skipConfirmation: options.skipConfirmation,
+                cwd: session.cwd,
+                env: session.env,
+            })
             : undefined;
         // Send input to PTY - writing to a PTY whose child already exited throws (EIO/EPIPE),
         // so translate it into a normal tool error instead of letting it escape.

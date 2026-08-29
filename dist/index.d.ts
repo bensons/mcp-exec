@@ -33,6 +33,12 @@ declare class MCPShellServer {
     private getEffectiveCwd;
     private assertCommandAllowed;
     /**
+     * Runs the command policy for an entry point. Returns undefined when the
+     * caller may proceed, or the text to return when the command is parked
+     * pending confirm_command. Hard blocks still throw.
+     */
+    private gateCommand;
+    /**
      * Create a TerminalSessionManager wired so that any session removal (kill, terminate,
      * or the inactivity/finished sweep) also drops the session from the terminal viewer service.
      */

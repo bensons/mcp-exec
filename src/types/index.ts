@@ -83,6 +83,9 @@ export interface ValidationResult {
   reason?: string;
   suggestions?: string[];
   riskLevel: 'low' | 'medium' | 'high';
+  // Set with allowed: false when the command is only blocked pending an
+  // explicit confirm_command call (see ConfirmationManager).
+  requiresConfirmation?: boolean;
   /** Deterministic cwd after a validated stateful-shell input such as `cd`. */
   resultingCwd?: string;
 }

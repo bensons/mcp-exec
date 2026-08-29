@@ -97,7 +97,10 @@ class ShellExecutor {
         this.config = config;
         this.outputProcessor = new output_processor_1.OutputProcessor(config.output);
         this.intentTracker = new intent_tracker_1.IntentTracker();
-        this.sessionManager = new interactive_session_manager_1.InteractiveSessionManager(config.sessions, async (command, cwd, env) => (0, command_policy_1.assertCommandAllowed)(this.securityManager, command, this.auditLogger, { source: 'interactive-session' }, await this.getEffectiveCwd(cwd), env));
+        this.sessionManager = new interactive_session_manager_1.InteractiveSessionManager(config.sessions, async (command, guardOptions = {}) => (0, command_policy_1.assertCommandAllowed)(this.securityManager, command, this.auditLogger, { source: 'interactive-session' }, {
+            ...guardOptions,
+            cwd: await this.getEffectiveCwd(guardOptions.cwd),
+        }));
     }
     /**
      * Effective working directory a command will run in: explicit cwd, else the
@@ -111,7 +114,7 @@ class ShellExecutor {
         const context = await this.contextManager.getCurrentContext();
         return path.resolve(context.currentDirectory || process.cwd());
     }
-    async executeCommand(options) {
+    async executeCommand(options, policyOptions = {}) {
         const commandId = (0, uuid_1.v4)();
         const startTime = Date.now();
         // Debug logging through audit logger to avoid JSON-RPC interference
@@ -148,7 +151,10 @@ class ShellExecutor {
                 cwd: workingDirectory,
                 env: environment,
             });
-            if (!securityCheck.allowed) {
+            // A confirmed command (via confirm_command) bypasses only the
+            // confirmation gate; hard blocks still stop it here.
+            const confirmationBypassed = Boolean(securityCheck.requiresConfirmation && policyOptions.skipConfirmation);
+            if (!securityCheck.allowed && !confirmationBypassed) {
                 await this.auditLogger.warning('Command blocked by security policy', {
                     commandId,
                     fullCommand,
@@ -409,6 +415,9 @@ class ShellExecutor {
     async listSessions() {
         return this.sessionManager.listSessions();
     }
+    getSession(sessionId) {
+        return this.sessionManager.getSession(sessionId);
+    }
     async killSession(sessionId) {
         await this.sessionManager.killSession(sessionId);
     }
@@ -421,7 +430,7 @@ class ShellExecutor {
             ...context.environmentVariables,
             ...options.env,
         };
-        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, this.buildFullCommand(options), this.auditLogger, { source: 'start_interactive_session' }, cwd, env);
+        await (0, command_policy_1.assertCommandAllowed)(this.securityManager, this.buildFullCommand(options), this.auditLogger, { source: 'start_interactive_session' }, { skipConfirmation: options.skipConfirmation, cwd, env });
         return await this.sessionManager.startSession({ ...options, cwd, env });
     }
     // Public method to send input to a session

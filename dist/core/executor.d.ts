@@ -3,6 +3,7 @@
  */
 import { CommandOutput, ServerConfig, SessionOutput } from '../types/index';
 import { SecurityManager } from '../security/manager';
+import { CommandPolicyOptions } from '../security/command-policy';
 import { ContextManager } from '../context/manager';
 import { AuditLogger } from '../audit/logger';
 import { StartSessionOptions, SendInputOptions } from './interactive-session-manager';
@@ -30,7 +31,7 @@ export declare class ShellExecutor {
      * the command are validated against this, not against process.cwd().
      */
     private getEffectiveCwd;
-    executeCommand(options: ExecuteCommandOptions): Promise<CommandOutput>;
+    executeCommand(options: ExecuteCommandOptions, policyOptions?: CommandPolicyOptions): Promise<CommandOutput>;
     getIntentSummary(): {
         categories: Record<string, number>;
         totalCommands: number;
@@ -44,6 +45,7 @@ export declare class ShellExecutor {
     private buildFullCommand;
     private executeWithTimeout;
     listSessions(): Promise<import("../types/index").SessionInfo[]>;
+    getSession(sessionId: string): import("../types/index").InteractiveSession | undefined;
     killSession(sessionId: string): Promise<void>;
     startInteractiveSession(options: StartSessionOptions): Promise<string>;
     sendInputToSession(options: SendInputOptions): Promise<void>;
