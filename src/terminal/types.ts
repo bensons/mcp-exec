@@ -35,8 +35,8 @@ export interface TerminalSession {
  */
 export interface TerminalBuffer {
   chunks: string[];
-  bytes: number;
-  maxBytes: number;
+  bytes: number; // UTF-8 encoded size of the retained chunks
+  maxBytes: number; // UTF-8 encoded capacity
 }
 
 export interface TerminalViewerSession {

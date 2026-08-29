@@ -13,8 +13,8 @@ class OutputProcessor {
         let { stdout, stderr, exitCode } = rawOutput;
         // Strip ANSI codes if configured
         if (this.config.stripAnsi) {
-            stdout = this.stripAnsiCodes(stdout);
-            stderr = this.stripAnsiCodes(stderr);
+            stdout = OutputProcessor.stripAnsiCodes(stdout);
+            stderr = OutputProcessor.stripAnsiCodes(stderr);
         }
         // Apply AI optimizations if enabled
         if (this.config.enableAiOptimizations) {
@@ -43,7 +43,7 @@ class OutputProcessor {
             summary,
         };
     }
-    stripAnsiCodes(text) {
+    static stripAnsiCodes(text) {
         // Remove ANSI escape sequences
         return text.replace(/\x1b\[[0-9;]*m/g, '');
     }

@@ -63,10 +63,10 @@ function testBufferHelpers() {
   // Derived lines: ANSI stripped, \r overwrites resolved, trailing prompt kept.
   const readable = createTerminalBuffer(100);
   appendToBuffer(readable, 'one\r\n\u001b[32mtwo\u001b[0m\r\n');
-  appendToBuffer(readable, '50%\r100%\r\n$ ');
+  appendToBuffer(readable, 'Downloading 100%\rDone\r\n50%\r100%\r\n$ ');
   const lines = bufferLines(readable);
   assert(
-    JSON.stringify(lines) === JSON.stringify(['one', 'two', '100%', '$ ']),
+    JSON.stringify(lines) === JSON.stringify(['one', 'two', 'Doneloading 100%', '100%', '$ ']),
     `derived lines wrong: ${JSON.stringify(lines)}`
   );
   console.log('OK read-time lines strip ANSI, resolve carriage returns and keep the partial line');

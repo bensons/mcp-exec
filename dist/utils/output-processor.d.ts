@@ -17,7 +17,7 @@ export declare class OutputProcessor {
         stderr: string;
         exitCode: number;
     }, command?: string): Promise<CommandOutput>;
-    private stripAnsiCodes;
+    static stripAnsiCodes(text: string): string;
     private optimizeForAI;
     private enhanceCommandSpecificOutput;
     private enhanceDirectoryListing;

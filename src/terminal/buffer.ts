@@ -17,21 +17,49 @@ export function createTerminalBuffer(bufferSize: number): TerminalBuffer {
 export function appendToBuffer(buffer: TerminalBuffer, data: string): void {
   if (!data) return;
 
-  // ponytail: `bytes` counts UTF-16 code units, not encoded bytes - close enough
-  // for a cap, and it avoids a Buffer.byteLength pass on every PTY chunk.
   buffer.chunks.push(data);
-  buffer.bytes += data.length;
+  buffer.bytes += Buffer.byteLength(data, 'utf8');
 
   while (buffer.bytes > buffer.maxBytes && buffer.chunks.length > 1) {
-    buffer.bytes -= buffer.chunks.shift()!.length;
+    buffer.bytes -= Buffer.byteLength(buffer.chunks.shift()!, 'utf8');
   }
 
-  // A single chunk bigger than the whole cap: keep its tail.
+  // A single chunk bigger than the whole cap: keep the largest tail that fits.
+  // Walk Unicode code points rather than slicing UTF-16 code units so trimming
+  // can never leave half of a surrogate pair in the replay stream.
   if (buffer.bytes > buffer.maxBytes) {
-    const kept = buffer.chunks[0].slice(-buffer.maxBytes);
-    buffer.chunks[0] = kept;
-    buffer.bytes = kept.length;
+    const { text, bytes } = utf8Tail(buffer.chunks[0], buffer.maxBytes);
+    buffer.chunks[0] = text;
+    buffer.bytes = bytes;
   }
+}
+
+function utf8Tail(text: string, maxBytes: number): { text: string; bytes: number } {
+  let start = text.length;
+  let bytes = 0;
+
+  while (start > 0) {
+    let codePointStart = start - 1;
+    const lastCodeUnit = text.charCodeAt(codePointStart);
+    if (
+      lastCodeUnit >= 0xdc00 &&
+      lastCodeUnit <= 0xdfff &&
+      codePointStart > 0
+    ) {
+      const precedingCodeUnit = text.charCodeAt(codePointStart - 1);
+      if (precedingCodeUnit >= 0xd800 && precedingCodeUnit <= 0xdbff) {
+        codePointStart--;
+      }
+    }
+
+    const codePointBytes = Buffer.byteLength(text.slice(codePointStart, start), 'utf8');
+    if (bytes + codePointBytes > maxBytes) break;
+
+    bytes += codePointBytes;
+    start = codePointStart;
+  }
+
+  return { text: text.slice(start), bytes };
 }
 
 /** The buffered output exactly as the PTY emitted it. */
@@ -45,8 +73,33 @@ export function bufferText(buffer: TerminalBuffer): string {
  */
 export function bufferLines(buffer: TerminalBuffer): string[] {
   const text = OutputProcessor.stripAnsiCodes(bufferText(buffer));
-  // Drop the CR of a CRLF, then keep only what survives any in-line overwrite.
-  const lines = text.split('\n').map(line => line.replace(/\r$/, '').split('\r').pop()!);
+  if (!text) return [];
+
+  // A carriage return moves the cursor to column zero without clearing the
+  // existing line. Later characters overwrite cells in place; a shorter
+  // replacement therefore retains the untouched suffix, just like a terminal.
+  const lines = text.split('\n').map(renderCarriageReturns);
   if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
   return lines;
+}
+
+function renderCarriageReturns(line: string): string {
+  const cells: string[] = [];
+  let cursor = 0;
+
+  for (const character of line) {
+    if (character === '\r') {
+      cursor = 0;
+      continue;
+    }
+
+    if (cursor < cells.length) {
+      cells[cursor] = character;
+    } else {
+      cells.push(character);
+    }
+    cursor++;
+  }
+
+  return cells.join('');
 }

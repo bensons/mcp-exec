@@ -55,6 +55,7 @@ const confirmation_1 = require("./security/confirmation");
 const display_formatter_1 = require("./utils/display-formatter");
 const viewer_service_1 = require("./terminal/viewer-service");
 const terminal_session_manager_1 = require("./terminal/terminal-session-manager");
+const buffer_1 = require("./terminal/buffer");
 // Default configuration
 const DEFAULT_CONFIG = {
     security: {
@@ -2141,10 +2142,11 @@ class MCPShellServer {
                                         context: {
                                             sessionId: parsed.sessionId,
                                             status: terminalSession.status,
-                                            bufferLines: terminalSession.buffer.lines.length
+                                            bufferBytes: terminalSession.buffer.bytes
                                         }
                                     });
                                     const buffer = this.terminalSessionManager.getTerminalBuffer(parsed.sessionId);
+                                    const lines = buffer ? (0, buffer_1.bufferLines)(buffer) : [];
                                     const viewerUrl = this.terminalViewerService?.getSessionUrl(parsed.sessionId);
                                     return {
                                         content: [
@@ -2158,8 +2160,8 @@ class MCPShellServer {
                                                     startTime: terminalSession.startTime,
                                                     lastActivity: terminalSession.lastActivity,
                                                     terminalViewerUrl: viewerUrl,
-                                                    bufferLines: buffer?.lines.length || 0,
-                                                    recentOutput: buffer?.lines.slice(-10).map(line => line.text).join('\n') || '',
+                                                    bufferLines: lines.length,
+                                                    recentOutput: lines.slice(-10).join('\n'),
                                                     message: 'Terminal session output is streamed live to the browser. Use the terminal viewer URL for real-time output.',
                                                 }, null, 2),
                                             },
