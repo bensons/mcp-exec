@@ -12,6 +12,7 @@ export interface OutputConfig {
 export declare class OutputProcessor {
     private config;
     constructor(config: OutputConfig);
+    updateConfig(config: OutputConfig): void;
     process(rawOutput: {
         stdout: string;
         stderr: string;

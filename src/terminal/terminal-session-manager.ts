@@ -53,6 +53,16 @@ export class TerminalSessionManager {
     this.config = config;
     this.terminalViewerConfig = terminalViewerConfig;
     this.fallbackSessionManager.updateConfig(config);
+
+    for (const session of this.sessions.values()) {
+      const previousLength = session.buffer.lines.length;
+      session.buffer.maxLines = terminalViewerConfig.bufferSize;
+      if (previousLength > session.buffer.maxLines) {
+        const excess = previousLength - session.buffer.maxLines;
+        session.buffer.lines = session.buffer.lines.slice(excess);
+        session.buffer.scrollback += excess;
+      }
+    }
   }
 
   async startSession(options: TerminalStartSessionOptions): Promise<string> {
@@ -316,6 +326,10 @@ export class TerminalSessionManager {
 
   getSession(sessionId: string): TerminalSession | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  getTerminalSessions(): TerminalSession[] {
+    return Array.from(this.sessions.values());
   }
 
   getSessionInfo(sessionId: string): any {

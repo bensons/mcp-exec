@@ -351,6 +351,20 @@ export class ShellExecutor {
     this.sessionManager.updateConfig(config.sessions);
   }
 
+  /**
+   * Rebind services that can be recreated by dynamic configuration without
+   * replacing this executor (and orphaning its interactive sessions).
+   */
+  updateDependencies(
+    securityManager: SecurityManager,
+    contextManager: ContextManager,
+    auditLogger: AuditLogger
+  ): void {
+    this.securityManager = securityManager;
+    this.contextManager = contextManager;
+    this.auditLogger = auditLogger;
+  }
+
   async shutdown(): Promise<void> {
     await this.sessionManager.shutdown();
   }

@@ -143,12 +143,38 @@ async function assertStillListed(client, ids, label) {
   console.log(`✅ ${label}: both sessions still listed`);
 }
 
+async function waitFor(check, label, timeout = 10000) {
+  const started = Date.now();
+  let lastError;
+  while (Date.now() - started < timeout) {
+    try {
+      const result = await check();
+      if (result) return result;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for ${label}${lastError ? `: ${lastError.message}` : ''}`);
+}
+
+async function readTerminalOutput(client, sessionId) {
+  const { text } = await client.callTool('read_session_output', { sessionId });
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`read_session_output did not return JSON:\n${text}`);
+  }
+}
+
 async function run() {
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-exec-issue28-'));
   const port = await getFreePort();
   const client = new McpClient({
-    MCP_EXEC_SECURITY_LEVEL: 'permissive',
+    MCP_EXEC_SECURITY_LEVEL: 'strict',
     MCP_EXEC_LOG_DIR: logDir,
+    MCP_EXEC_DESKTOP_NOTIFICATIONS_ENABLED: 'false',
+    MCP_EXEC_TERMINAL_VIEWER_ENABLED: 'true',
     MCP_EXEC_TERMINAL_VIEWER_PORT: String(port),
   });
 
@@ -159,6 +185,27 @@ async function run() {
   try {
     await client.start();
     console.log('✅ MCP server initialized\n');
+
+    await waitFor(async () => {
+      const response = await fetch(`http://127.0.0.1:${port}/health`);
+      return response.ok;
+    }, 'terminal viewer startup');
+
+    // Replacing security/context/audit services must also rebind the live
+    // ShellExecutor. Start permissive, then later reset to the original strict
+    // config and verify the same executor observes both policies.
+    await client.callTool('update_configuration', {
+      section: 'security',
+      settings: { level: 'permissive' },
+    });
+    const permissiveResult = await client.callTool('execute_command', {
+      command: 'sudo',
+      args: ['--version'],
+    });
+    if (/blocked by security policy/i.test(permissiveResult.text)) {
+      throw new Error(`Live executor did not adopt permissive security config:\n${permissiveResult.text}`);
+    }
+    console.log('✅ live executor adopted replacement security manager');
 
     // 1. Start one PTY-backed terminal session and one interactive session.
     const terminalId = extractSessionId(
@@ -202,7 +249,77 @@ async function run() {
     });
     await assertStillListed(client, ids, 'after update_configuration');
 
-    // 5. Both sessions must still be killable.
+    // 5. A full reset recreates the security/context/audit services. The
+    // executor must retain its session manager but rebind those dependencies.
+    const resetResult = await client.callTool('reset_configuration', { section: 'all' });
+    if (!resetResult.text.includes('Configuration reset completed')) {
+      throw new Error(`Full reset failed:\n${resetResult.text}`);
+    }
+    await assertStillListed(client, ids, 'after full reset');
+    const strictResult = await client.callTool('execute_command', {
+      command: 'sudo',
+      args: ['--version'],
+    });
+    if (!/blocked by security policy/i.test(strictResult.text)) {
+      throw new Error(`Live executor kept stale permissive security after reset:\n${strictResult.text}`);
+    }
+    console.log('✅ full reset rebound executor to strict security manager');
+
+    // 6. Restarting the viewer must re-register retained PTYs. Lowering the
+    // buffer limit must update and truncate the already-running session.
+    for (let i = 0; i < 4; i++) {
+      await client.callTool('send_to_session', {
+        sessionId: terminalId,
+        input: `echo before-viewer-restart-${i}`,
+      });
+    }
+    await waitFor(async () => {
+      const output = await readTerminalOutput(client, terminalId);
+      return output.bufferLines >= 4 && output;
+    }, 'terminal output before viewer restart');
+
+    await client.callTool('update_terminal_viewer', { bufferSize: 2 });
+    const truncated = await readTerminalOutput(client, terminalId);
+    if (truncated.bufferLines > 2) {
+      throw new Error(`Retained PTY buffer was not truncated to 2 lines: ${truncated.bufferLines}`);
+    }
+    if (!truncated.terminalViewerUrl) {
+      throw new Error('Retained PTY lost its viewer URL after viewer restart');
+    }
+
+    // Increase the limit again so the echoed command, command output, and
+    // prompt all remain available while verifying output after another restart.
+    await client.callTool('update_terminal_viewer', { bufferSize: 20 });
+    const statusResponse = await fetch(
+      `http://127.0.0.1:${port}/api/sessions/${terminalId}/status`
+    );
+    if (!statusResponse.ok) {
+      throw new Error(`Restarted viewer returned HTTP ${statusResponse.status} for retained PTY`);
+    }
+
+    const afterRestartMarker = 'after-viewer-restart-marker';
+    await client.callTool('send_to_session', {
+      sessionId: terminalId,
+      input: `echo ${afterRestartMarker}`,
+    });
+    await waitFor(async () => {
+      const output = await readTerminalOutput(client, terminalId);
+      if (!output.recentOutput.includes(afterRestartMarker)) {
+        throw new Error(JSON.stringify(output));
+      }
+      return output;
+    }, 'terminal output after viewer restart');
+    const afterRestart = await readTerminalOutput(client, terminalId);
+    if (afterRestart.bufferLines > 20) {
+      throw new Error(`Updated PTY buffer limit was not enforced: ${afterRestart.bufferLines}`);
+    }
+    const markerOccurrences = afterRestart.recentOutput.split(afterRestartMarker).length - 1;
+    if (markerOccurrences > 2) {
+      throw new Error(`Viewer restart left duplicate PTY listeners (${markerOccurrences} marker copies)`);
+    }
+    console.log('✅ retained PTY re-registered and live buffer limit applied');
+
+    // 7. Both sessions must still be killable.
     for (const [name, id] of Object.entries(ids)) {
       const { text } = await client.callTool('kill_session', { sessionId: id });
       if (/not found/i.test(text)) {

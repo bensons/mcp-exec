@@ -1418,6 +1418,7 @@ class MCPShellServer {
 
                 if (!this.terminalViewerService.isEnabled()) {
                   await this.terminalViewerService.start();
+                  this.registerTerminalSessionsWithViewer();
                 }
 
                 // Create terminal session using enhanced session manager
@@ -1579,6 +1580,7 @@ class MCPShellServer {
 
               if (!this.terminalViewerService.isEnabled()) {
                 await this.terminalViewerService.start();
+                this.registerTerminalSessionsWithViewer();
               }
 
               // Create terminal session using enhanced session manager
@@ -2382,6 +2384,7 @@ class MCPShellServer {
 
                 if (!this.terminalViewerService.isEnabled()) {
                   await this.terminalViewerService.start();
+                  this.registerTerminalSessionsWithViewer();
                 }
 
                 const status = this.terminalViewerService.getStatus();
@@ -2579,6 +2582,22 @@ class MCPShellServer {
             const resetResults: Record<string, any> = {};
 
             for (const resetSection of resetSections) {
+              if (resetSection === 'logging') {
+                const previousValues = JSON.parse(JSON.stringify({
+                  audit: this.config.audit,
+                  mcpLogging: this.config.mcpLogging,
+                }));
+                this.config.audit = JSON.parse(JSON.stringify(this.originalConfig.audit));
+                this.config.mcpLogging = JSON.parse(JSON.stringify(this.originalConfig.mcpLogging));
+                const resetLogging = {
+                  audit: this.config.audit,
+                  mcpLogging: this.config.mcpLogging,
+                };
+                this.recordConfigurationChange('logging', resetLogging, previousValues);
+                resetResults.logging = 'reset';
+                continue;
+              }
+
               // Record previous values
               const previousValues = JSON.parse(JSON.stringify(this.config[resetSection as keyof ServerConfig]));
               
@@ -2975,6 +2994,7 @@ class MCPShellServer {
               await this.terminalViewerService.stop();
               this.terminalViewerService = new TerminalViewerService(this.config.terminalViewer);
               await this.terminalViewerService.start();
+              this.registerTerminalSessionsWithViewer();
             }
 
             return {
@@ -3786,13 +3806,18 @@ Please start by enabling the terminal viewer service.`,
   }
 
   private async reinitializeComponents(section?: string): Promise<void> {
+    // Recreate audit logging first so newly constructed managers receive the
+    // current logger during a full reset.
+    if (!section || section === 'audit' || section === 'logging') {
+      this.auditLogger = new AuditLogger(this.config.audit);
+    }
     if (!section || section === 'security') {
       this.securityManager = new SecurityManager(this.config.security, this.auditLogger);
     }
     if (!section || section === 'context') {
       this.contextManager = new ContextManager(this.config.context, this.auditLogger);
     }
-    if (!section || section === 'mcpLogging') {
+    if (!section || section === 'mcpLogging' || section === 'logging') {
       this.mcpLogger = new MCPLogger(this.config.mcpLogging || {
         enabled: true,
         minLevel: 'info',
@@ -3800,9 +3825,6 @@ Please start by enabling the terminal viewer service.`,
         maxQueueSize: 100,
         includeContext: true
       });
-    }
-    if (!section || section === 'audit') {
-      this.auditLogger = new AuditLogger(this.config.audit);
     }
     if (!section || section === 'display') {
       this.displayFormatter = new DisplayFormatter(this.config.display);
@@ -3815,6 +3837,23 @@ Please start by enabling the terminal viewer service.`,
     }
     if (!section || section === 'sessions' || section === 'output') {
       this.shellExecutor.updateConfig(this.config);
+    }
+    if (!section || section === 'security' || section === 'context' || section === 'audit' || section === 'logging') {
+      this.shellExecutor.updateDependencies(
+        this.securityManager,
+        this.contextManager,
+        this.auditLogger
+      );
+    }
+  }
+
+  private registerTerminalSessionsWithViewer(): void {
+    if (!this.terminalViewerService || !this.terminalSessionManager) {
+      return;
+    }
+
+    for (const session of this.terminalSessionManager.getTerminalSessions()) {
+      this.terminalViewerService.addSession(session);
     }
   }
 

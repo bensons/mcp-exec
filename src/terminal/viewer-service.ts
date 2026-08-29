@@ -24,6 +24,7 @@ export class TerminalViewerService {
   private config: TerminalViewerConfig;
   private sessions: Map<string, TerminalSession>;
   private connections: Map<string, WebSocket>;
+  private sessionListeners: Map<string, Array<{ dispose(): void }>>;
   private isRunning: boolean = false;
   private startTime?: Date;
 
@@ -31,6 +32,7 @@ export class TerminalViewerService {
     this.config = config;
     this.sessions = new Map();
     this.connections = new Map();
+    this.sessionListeners = new Map();
     this.app = express();
     this.setupRoutes();
   }
@@ -215,7 +217,10 @@ export class TerminalViewerService {
   }
 
   async stop(): Promise<void> {
+    this.detachAllSessionListeners();
+
     if (!this.isRunning) {
+      this.sessions.clear();
       return;
     }
 
@@ -227,6 +232,8 @@ export class TerminalViewerService {
         }
       });
       this.connections.clear();
+      this.sessions.forEach(session => session.viewers.clear());
+      this.sessions.clear();
 
       // Close WebSocket server
       if (this.wss) {
@@ -337,20 +344,21 @@ export class TerminalViewerService {
   // Public methods for session management
   addSession(session: TerminalSession): void {
     console.error(`[DEBUG] TerminalViewerService.addSession called for session: ${session.sessionId}`);
+    this.detachSessionListeners(session.sessionId);
     this.sessions.set(session.sessionId, session);
     console.error(`[DEBUG] Session ${session.sessionId} added to terminal viewer, total sessions: ${this.sessions.size}`);
 
     // Set up PTY data handlers if available
     if (session.pty) {
-      session.pty.onData((data: string) => {
+      const listeners = [session.pty.onData((data: string) => {
         // Immediately broadcast data to prevent buffering delays
         this.broadcastToSession(session.sessionId, data);
         // Add to buffer for new connections
         this.addToBuffer(session, data, 'output');
-      });
+      })];
 
       // Handle process exit - PTY onExit receives (exitCode, signal) as separate parameters
-      session.pty.onExit((exitCode: any, signal?: any) => {
+      listeners.push(session.pty.onExit((exitCode: any, signal?: any) => {
         console.error(`[DEBUG] PTY process exited in viewer service for session ${session.sessionId}:`);
         console.error(`[DEBUG]   exitCode: ${JSON.stringify(exitCode)} (type: ${typeof exitCode})`);
         console.error(`[DEBUG]   signal: ${JSON.stringify(signal)} (type: ${typeof signal})`);
@@ -383,7 +391,14 @@ export class TerminalViewerService {
 
         session.status = newStatus;
         this.broadcastStatusToSession(session.sessionId, session.status);
-      });
+      }));
+
+      this.sessionListeners.set(
+        session.sessionId,
+        listeners.filter((listener): listener is { dispose(): void } =>
+          !!listener && typeof listener.dispose === 'function'
+        )
+      );
     }
   }
 
@@ -397,7 +412,22 @@ export class TerminalViewerService {
           ws.close();
         }
       });
+      this.detachSessionListeners(sessionId);
       this.sessions.delete(sessionId);
+    }
+  }
+
+  private detachSessionListeners(sessionId: string): void {
+    const listeners = this.sessionListeners.get(sessionId) || [];
+    for (const listener of listeners) {
+      listener.dispose();
+    }
+    this.sessionListeners.delete(sessionId);
+  }
+
+  private detachAllSessionListeners(): void {
+    for (const sessionId of this.sessionListeners.keys()) {
+      this.detachSessionListeners(sessionId);
     }
   }
 

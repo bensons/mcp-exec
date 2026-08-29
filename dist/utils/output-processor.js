@@ -9,6 +9,9 @@ class OutputProcessor {
     constructor(config) {
         this.config = config;
     }
+    updateConfig(config) {
+        this.config = config;
+    }
     async process(rawOutput, command) {
         let { stdout, stderr, exitCode } = rawOutput;
         // Strip ANSI codes if configured
