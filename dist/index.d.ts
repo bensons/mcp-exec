@@ -27,9 +27,27 @@ declare class MCPShellServer {
     private originalConfig;
     constructor(config?: Partial<ServerConfig>);
     private getDefaultShell;
+    /**
+     * Effective working directory a command will run in: explicit cwd, else the
+     * session context directory, else the server's cwd. Relative and `~` paths in
+     * the command are validated against this, not against process.cwd().
+     */
+    private getEffectiveCwd;
     private assertCommandAllowed;
+    /**
+     * Runs the command policy for an entry point. Returns undefined when the
+     * caller may proceed, or the text to return when the command is parked
+     * pending confirm_command. Hard blocks still throw.
+     */
+    private gateCommand;
+    /**
+     * Create a TerminalSessionManager wired so that any session removal (kill, terminate,
+     * or the inactivity/finished sweep) also drops the session from the terminal viewer service.
+     */
+    private createTerminalSessionManager;
     private setupHandlers;
     start(): Promise<void>;
+    private installMcpLoggerNotificationCallback;
     private setupConnectionMonitoring;
     private updateActivity;
     private hasActiveSessions;
@@ -42,6 +60,8 @@ declare class MCPShellServer {
     private formatHistoryDisplay;
     private recordConfigurationChange;
     private reinitializeComponents;
+    private registerTerminalSessionsWithViewer;
+    private restartTerminalViewerService;
     private formatSecurityStatusDisplay;
 }
 export { MCPShellServer };
