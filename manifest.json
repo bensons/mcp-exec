@@ -1,0 +1,57 @@
+{
+  "manifest_version": "0.2",
+  "name": "@bensons/mcp-exec",
+  "version": "1.2.0",
+  "description": "Enhanced MCP server for secure shell command execution with context preservation and AI optimization",
+  "author": {
+    "name": "Benson Schliesser",
+    "email": "bensons@queuefull.net",
+    "url": "https://linkedin.com/in/bensons"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/dist/index.js"
+      ],
+      "env": {}
+    }
+  },
+  "tools": [
+    {
+      "name": "start_terminal_session",
+      "description": "Start a new terminal session with full PTY support and browser-based viewing. The terminal provides a persistent shell environment that continues running even after individual commands exit. Use kill_session to terminate the entire terminal session."
+    },
+    {
+      "name": "start_interactive_session",
+      "description": "Start a new interactive shell session for command execution. The session will run the specified command (or default shell) and terminate when the process exits."
+    },
+    {
+      "name": "send_to_session",
+      "description": "Send input to an existing interactive or terminal session"
+    },
+    {
+      "name": "execute_command",
+      "description": "Execute a one-shot shell command with security validation and context preservation. For interactive sessions, use start_terminal_session or start_interactive_session instead."
+    }
+  ],
+  "tools_generated": true,
+  "prompts": [
+    {
+      "name": "terminal",
+      "description": "Launch an interactive terminal session with browser viewer",
+      "arguments": [
+        "command",
+        "cwd"
+      ],
+      "text": "Launch a new interactive terminal session using the mcp-exec tools. This workflow allows you to interact with a live shell by sending commands and receiving output iteratively."
+    }
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bensons/mcp-exec.git"
+  }
+}
