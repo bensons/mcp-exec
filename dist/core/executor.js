@@ -208,9 +208,9 @@ class ShellExecutor {
                 commandId,
                 command: fullCommand,
                 context: {
-                    ...context,
+                    sessionId: context.sessionId,
                     workingDirectory,
-                    environment: environment,
+                    previousCommands: context.previousCommands.slice(-5),
                     aiIntent: options.aiContext,
                 },
                 result: processedOutput,
@@ -250,7 +250,12 @@ class ShellExecutor {
                 commandId,
                 command: this.buildFullCommand(options),
                 error: error instanceof Error ? error : new Error('Unknown error'),
-                context: errorContext,
+                context: {
+                    sessionId: errorContext.sessionId,
+                    workingDirectory: options.cwd || errorContext.currentDirectory || process.cwd(),
+                    previousCommands: errorContext.previousCommands.slice(-5),
+                    aiIntent: options.aiContext,
+                },
             });
             return errorOutput;
         }

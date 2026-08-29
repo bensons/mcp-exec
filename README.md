@@ -64,7 +64,7 @@ The server implements the Model Context Protocol specification with STDIO transp
 - **Real-time Monitoring**: Live monitoring with configurable alerts
 - **Multiple Export Formats**: JSON, CSV, XML export capabilities
 - **Compliance Reporting**: Detailed audit reports for security compliance
-- **Privacy Controls**: Configurable sensitive data redaction
+- **Privacy Controls**: Audit entries record a slim context (session, working directory, last five commands, AI intent) — never the process environment, command history, or output cache. Values stored under secret-looking keys (`secret`, `token`, `password`, `api_key`, `auth`, `credential`, `private`, plus any pattern you add via `MCP_EXEC_AUDIT_REDACT_PATTERNS`) are replaced with `[REDACTED]` before anything is written to the log or returned by `export_logs`. Command output in audit entries is truncated to `MCP_EXEC_AUDIT_MAX_OUTPUT_BYTES` (4 KB by default); the full output remains available in the in-memory context cache. Note that command *output* itself is logged as-is up to that limit, so a command that prints a secret still records it.
 
 ## Quick Start
 
@@ -304,6 +304,9 @@ the command is rejected rather than allowed without a complete block-list check.
 MCP_EXEC_AUDIT_ENABLED=true                 # Enable audit logging
 MCP_EXEC_AUDIT_LOG_LEVEL=debug              # emergency|alert|critical|error|warning|notice|info|debug
 MCP_EXEC_AUDIT_RETENTION=30                 # Days to retain logs
+MCP_EXEC_AUDIT_MAX_OUTPUT_BYTES=4096        # Max stdout/stderr bytes stored per audit entry
+MCP_EXEC_AUDIT_MAX_IN_MEMORY_ENTRIES=1000   # Hot-cache entries; reports/exports still read full log history
+MCP_EXEC_AUDIT_REDACT_PATTERNS=             # Extra comma-separated regexes for secret-bearing keys
 
 # MCP Client Logging
 MCP_EXEC_MCP_LOGGING_ENABLED=true           # Enable MCP client notifications
