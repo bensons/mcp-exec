@@ -29,9 +29,12 @@ logs/
 # AI Agent Files
 .augment/
 .augment/*
-.claude/
-.claude/*
-CLAUDE.md
+
+# Shared agent configuration (CLAUDE.md, .claude/settings.json, .claude/agents/,
+# .claude/commands/) is tracked so it travels with the repo. Only per-developer
+# and throwaway state stays out:
+.claude/settings.local.json
+.claude/worktrees/
 
 # IDE and editor files
 .vscode/
