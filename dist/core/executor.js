@@ -144,7 +144,6 @@ class ShellExecutor {
             const workingDirectory = path.resolve(options.cwd || context.currentDirectory || process.cwd());
             // Validate expansions against the same merged environment supplied to the shell.
             const environment = {
-                ...process.env,
                 ...context.environmentVariables,
                 ...options.env,
             };
@@ -214,6 +213,11 @@ class ShellExecutor {
                 command: fullCommand,
                 workingDirectory,
                 environment: environment,
+                // Per-command overrides are reported separately so they are not mistaken for
+                // persistent session state.
+                envOverrides: options.env,
+                resultingEnvironment: result.environment,
+                resultingWorkingDirectory: result.workingDirectory,
                 output: processedOutput,
                 aiContext: options.aiContext,
             });
@@ -292,10 +296,27 @@ class ShellExecutor {
     async executeWithTimeout(command, args, options) {
         return new Promise((resolve, reject) => {
             const { timeout, ...spawnOptions } = options;
-            // spawnOptions.shell is already resolved: true/string spawns through a shell,
-            // false spawns the command directly with args kept separate.
-            const child = (0, child_process_1.spawn)(command, args, {
+            const stateMarker = `__MCP_EXEC_STATE_${(0, uuid_1.v4)().replace(/-/g, '')}`;
+            const fullCommand = args.length > 0 ? `${command} ${args.join(' ')}` : command;
+            const captureShellState = this.supportsShellStateCapture(spawnOptions.shell);
+            const wrappedCommand = captureShellState
+                ? process.platform === 'win32'
+                    ? this.wrapWindowsCommand(fullCommand, stateMarker)
+                    : this.wrapPosixCommand(fullCommand, stateMarker)
+                : fullCommand;
+            const childEnvironment = { ...spawnOptions.env };
+            if (captureShellState && process.platform !== 'win32' && childEnvironment.OLDPWD !== undefined) {
+                // Some /bin/sh implementations discard inherited OLDPWD during startup.
+                // Carry it under an internal name, restore it before the user command, and
+                // immediately remove the internal names from the command's environment.
+                childEnvironment.__MCP_EXEC_OLDPWD_PRESENT = '1';
+                childEnvironment.__MCP_EXEC_OLDPWD_VALUE = childEnvironment.OLDPWD;
+            }
+            // Wrap shell-backed commands so the shell reports its final exported
+            // environment and cwd. With shell:false, preserve direct-spawn semantics.
+            const child = (0, child_process_1.spawn)(captureShellState ? wrappedCommand : command, captureShellState ? [] : args, {
                 ...spawnOptions,
+                env: childEnvironment,
                 stdio: ['pipe', 'pipe', 'pipe'],
                 // Own process group so a timeout can kill the whole tree, not just the
                 // wrapping shell (`a; b` would otherwise leave `b` running as an orphan).
@@ -398,12 +419,19 @@ class ShellExecutor {
                     // Otherwise the timeout path remains responsible for tree cleanup.
                     return;
                 }
+                const shellState = !captureShellState
+                    ? { stderr }
+                    : process.platform === 'win32'
+                        ? this.extractWindowsShellState(stderr, stateMarker)
+                        : this.extractPosixShellState(stderr, stateMarker);
                 settle({
                     stdout,
-                    stderr,
+                    stderr: shellState.stderr,
                     // code is null when the process was terminated by a signal
                     exitCode: code ?? (signal ? 128 + signalNumber(signal) : 1),
                     signal: signal ?? undefined,
+                    environment: shellState.environment,
+                    workingDirectory: shellState.workingDirectory,
                 });
             });
             // Handle errors
@@ -411,6 +439,95 @@ class ShellExecutor {
                 fail(error);
             });
         });
+    }
+    supportsShellStateCapture(shell) {
+        if (typeof shell === 'boolean' || shell === undefined) {
+            return shell !== false;
+        }
+        const shellName = path.basename(shell).toLowerCase().replace(/\.exe$/, '');
+        return process.platform === 'win32'
+            ? shellName === 'cmd'
+            : ['sh', 'bash', 'dash', 'zsh', 'ksh'].includes(shellName);
+    }
+    wrapPosixCommand(command, marker) {
+        return 'if [ "${__MCP_EXEC_OLDPWD_PRESENT-}" = 1 ]; then ' +
+            'OLDPWD=$__MCP_EXEC_OLDPWD_VALUE; export OLDPWD; fi\n' +
+            'unset __MCP_EXEC_OLDPWD_PRESENT __MCP_EXEC_OLDPWD_VALUE\n' +
+            `${command}\n` +
+            '__mcp_exec_status=$?\n' +
+            `printf '\\000%s\\000%s\\000' '${marker}' "$PWD" >&2\n` +
+            'command -p env -0 >&2\n' +
+            `printf '\\000%s\\000' '${marker}_END' >&2\n` +
+            'exit "$__mcp_exec_status"';
+    }
+    extractPosixShellState(stderr, marker) {
+        const startMarker = `\0${marker}\0`;
+        const endMarker = `\0${marker}_END\0`;
+        const start = stderr.lastIndexOf(startMarker);
+        if (start < 0) {
+            return { stderr };
+        }
+        const end = stderr.indexOf(endMarker, start + startMarker.length);
+        if (end < 0) {
+            return { stderr };
+        }
+        const state = stderr.slice(start + startMarker.length, end).split('\0');
+        const workingDirectory = state.shift();
+        const environment = {};
+        for (const entry of state) {
+            const separator = entry.indexOf('=');
+            if (separator > 0) {
+                environment[entry.slice(0, separator)] = entry.slice(separator + 1);
+            }
+        }
+        return {
+            stderr: stderr.slice(0, start) + stderr.slice(end + endMarker.length),
+            environment,
+            workingDirectory,
+        };
+    }
+    wrapWindowsCommand(command, marker) {
+        return `${command}\r\n` +
+            'set "__mcp_exec_status=%ERRORLEVEL%"\r\n' +
+            `>&2 echo ${marker}\r\n` +
+            '>&2 cd\r\n' +
+            '>&2 set\r\n' +
+            `>&2 echo ${marker}_END\r\n` +
+            'exit /b %__mcp_exec_status%';
+    }
+    extractWindowsShellState(stderr, marker) {
+        const crlfMarker = `${marker}\r\n`;
+        const lfMarker = `${marker}\n`;
+        const crlfStart = stderr.lastIndexOf(crlfMarker);
+        const lfStart = stderr.lastIndexOf(lfMarker);
+        const start = Math.max(crlfStart, lfStart);
+        if (start < 0) {
+            return { stderr };
+        }
+        const payloadStart = start + (start === crlfStart ? crlfMarker.length : lfMarker.length);
+        const end = stderr.indexOf(`${marker}_END`, payloadStart);
+        if (end < 0) {
+            return { stderr };
+        }
+        const lines = stderr.slice(payloadStart, end).split(/\r?\n/);
+        const workingDirectory = lines.shift()?.trim();
+        const environment = {};
+        for (const line of lines) {
+            const separator = line.indexOf('=');
+            if (separator > 0) {
+                const name = line.slice(0, separator);
+                if (name.toLowerCase() !== '__mcp_exec_status') {
+                    environment[name] = line.slice(separator + 1);
+                }
+            }
+        }
+        const afterEnd = end + `${marker}_END`.length;
+        const trailingNewline = stderr.slice(afterEnd).match(/^\r?\n/)?.[0].length || 0;
+        return {
+            stderr: stderr.slice(0, start) + stderr.slice(afterEnd + trailingNewline),
+            environment,
+            workingDirectory,
+        };
     }
     // Session management API
     async listSessions() {
@@ -427,7 +544,6 @@ class ShellExecutor {
         const context = await this.contextManager.getCurrentContext();
         const cwd = await this.getEffectiveCwd(options.cwd);
         const env = {
-            ...Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== undefined)),
             ...context.environmentVariables,
             ...options.env,
         };
