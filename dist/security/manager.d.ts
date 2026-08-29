@@ -45,6 +45,15 @@ export declare class SecurityManager {
     private assessRiskLevel;
     validateResourceLimits(command: string): ValidationResult;
     validateSandboxing(command: string): ValidationResult;
+    /**
+     * Matches a `blockedCommands` entry against the parsed command.
+     *
+     * Entries are command patterns, not substrings: a single-word entry (`format`)
+     * matches only when it is the command being run, and a multi-word entry
+     * (`rm -rf /`) matches when the same command runs with at least those flags and
+     * operands. An entry prefixed with `re:` is treated as a raw regex escape hatch.
+     */
+    private matchesBlockedCommand;
     validateCommand(command: string, options?: {
         cwd?: string;
         env?: Record<string, string | undefined>;

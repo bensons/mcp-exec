@@ -283,9 +283,16 @@ export class TerminalSessionManager {
       ? await this.commandGuard(options.input, session.cwd, session.env)
       : undefined;
 
-    // Send input to PTY
+    // Send input to PTY - writing to a PTY whose child already exited throws (EIO/EPIPE),
+    // so translate it into a normal tool error instead of letting it escape.
     const input = options.addNewline !== false ? options.input + '\r' : options.input;
-    session.pty.write(input);
+    try {
+      session.pty.write(input);
+    } catch (error) {
+      throw new Error(
+        `Failed to write to session ${options.sessionId} PTY: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
     if (resultingCwd && options.addNewline !== false) {
       session.cwd = resultingCwd;
       session.env.PWD = resultingCwd;

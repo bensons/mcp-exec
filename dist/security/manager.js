@@ -43,6 +43,12 @@ const path = __importStar(require("path"));
 const os = __importStar(require("os"));
 const fs = __importStar(require("fs"));
 const url_1 = require("url");
+const tokenize_1 = require("./tokenize");
+const RM_DESTRUCTIVE_FLAGS = ['r', 'R', 'recursive', 'f', 'force', 'no-preserve-root'];
+/** True when any sub-command is an `rm` carrying a recursive/force flag, however the flags are spelled. */
+function hasDestructiveRm(command) {
+    return (0, tokenize_1.tokenizeCommand)(command).some(sub => sub.argv0 === 'rm' && RM_DESTRUCTIVE_FLAGS.some(flag => sub.flags.has(flag)));
+}
 const SERVER_STARTUP_CWD = process.cwd();
 /**
  * True when `child` is `parent` itself or lives underneath it.
@@ -196,6 +202,14 @@ function expandShellWord(word, environment, cwd) {
             if (next === '(') {
                 return { error: 'Command substitutions cannot be safely resolved' };
             }
+            // These POSIX special parameters expand to numeric/status metadata or
+            // shell option letters, never filesystem paths. Their exact runtime
+            // values are irrelevant to directory validation.
+            if (next && '$?!#-'.includes(next)) {
+                expanded += next === '-' ? 'flags' : '0';
+                index += 1;
+                continue;
+            }
             let variableName = '';
             let endIndex = index;
             if (next === '{') {
@@ -279,8 +293,9 @@ class SecurityManager {
     }
     initializeDangerousPatterns() {
         this.dangerousPatterns = [
-            // File system destruction
-            /rm\s+(-[rf]+|--recursive|--force)/i,
+            // File system destruction. Token-aware so flag order/clustering cannot hide it
+            // (`rm -vrf`, `rm --no-preserve-root -r`, `sudo -u root rm -rf` all match).
+            { source: 'rm with recursive/force flag', test: hasDestructiveRm },
             /del\s+\/[fs]/i,
             /rmdir\s+\/s/i,
             /format\s+[a-z]:/i,
@@ -493,10 +508,13 @@ class SecurityManager {
             }
             let candidate = expandedWords.get(token) || '';
             let displayCandidate = token.value;
-            const equals = candidate.indexOf('=');
-            if (equals !== -1) {
-                candidate = candidate.slice(equals + 1);
-                displayCandidate = displayCandidate.slice(displayCandidate.indexOf('=') + 1);
+            const rawEquals = token.value.indexOf('=');
+            if (rawEquals !== -1 && token.unquoted[rawEquals]) {
+                const expandedEquals = candidate.indexOf('=');
+                if (expandedEquals !== -1) {
+                    candidate = candidate.slice(expandedEquals + 1);
+                    displayCandidate = displayCandidate.slice(rawEquals + 1);
+                }
             }
             if (!candidate || !isPathLike(candidate)) {
                 continue;
@@ -671,6 +689,37 @@ class SecurityManager {
         }
         return { allowed: true, riskLevel: 'low' };
     }
+    /**
+     * Matches a `blockedCommands` entry against the parsed command.
+     *
+     * Entries are command patterns, not substrings: a single-word entry (`format`)
+     * matches only when it is the command being run, and a multi-word entry
+     * (`rm -rf /`) matches when the same command runs with at least those flags and
+     * operands. An entry prefixed with `re:` is treated as a raw regex escape hatch.
+     */
+    matchesBlockedCommand(command, subCommands, blocked) {
+        const entry = blocked.trim();
+        if (!entry) {
+            return false;
+        }
+        if (entry.toLowerCase().startsWith('re:')) {
+            try {
+                return new RegExp(entry.slice(3), 'i').test(command);
+            }
+            catch (error) {
+                this.auditLogger?.warning('Invalid regex in blockedCommands entry', {
+                    entry,
+                    error: error instanceof Error ? error.message : String(error),
+                }, 'security-validator');
+                return false;
+            }
+        }
+        const pattern = (0, tokenize_1.parseCommand)(entry).subCommands[0];
+        if (!pattern) {
+            return false;
+        }
+        return subCommands.some(sub => (0, tokenize_1.matchesPattern)(sub, pattern));
+    }
     async validateCommand(command, options = {}) {
         const normalizedCommand = command.trim().toLowerCase();
         this.auditLogger?.debug('Starting command validation', {
@@ -678,8 +727,24 @@ class SecurityManager {
             securityLevel: this.config.level
         }, 'security-validator');
         // Check blocked commands first
+        const parsedCommand = (0, tokenize_1.parseCommand)(command);
+        if (!parsedCommand.complete) {
+            const parseError = parsedCommand.error || 'Unable to identify every executable';
+            this.auditLogger?.warning('Command blocked because policy parsing was incomplete', {
+                command: command.substring(0, 100),
+                parseError,
+                securityLevel: this.config.level,
+            }, 'security-validator');
+            return {
+                allowed: false,
+                reason: `Unable to safely parse command: ${parseError}`,
+                riskLevel: 'high',
+                suggestions: ['Use explicit command names and supported shell syntax'],
+            };
+        }
+        const subCommands = parsedCommand.subCommands;
         for (const blocked of this.config.blockedCommands) {
-            if (normalizedCommand.includes(blocked.toLowerCase())) {
+            if (this.matchesBlockedCommand(command, subCommands, blocked)) {
                 this.auditLogger?.warning('Command blocked by explicit block list', {
                     command: command.substring(0, 100),
                     blockedPattern: blocked,

@@ -46,6 +46,7 @@ declare class MCPShellServer {
     private formatHistoryDisplay;
     private recordConfigurationChange;
     private reinitializeComponents;
+    private restartTerminalViewerService;
     private formatSecurityStatusDisplay;
 }
 export { MCPShellServer };
