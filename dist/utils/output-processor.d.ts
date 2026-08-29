@@ -16,6 +16,11 @@ export declare class OutputProcessor {
         stdout: string;
         stderr: string;
         exitCode: number;
+        /** Bytes dropped per stream by the executor's in-memory cap (see ServerConfig.output.maxCollectedBytes). */
+        truncated?: {
+            stdout: number;
+            stderr: number;
+        };
     }, command?: string): Promise<CommandOutput>;
     private stripAnsiCodes;
     private optimizeForAI;

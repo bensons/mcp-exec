@@ -4,12 +4,64 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ShellExecutor = void 0;
+exports.defaultMaxCollectedBytes = defaultMaxCollectedBytes;
 const child_process_1 = require("child_process");
 const uuid_1 = require("uuid");
 const command_policy_1 = require("../security/command-policy");
 const output_processor_1 = require("../utils/output-processor");
 const intent_tracker_1 = require("../utils/intent-tracker");
 const interactive_session_manager_1 = require("./interactive-session-manager");
+/** Bytes of the most recent output kept once the hard cap is hit (the tail usually holds the error). */
+const OUTPUT_TAIL_BYTES = 64 * 1024;
+/** Default hard cap on bytes retained per stream when `output.maxCollectedBytes` is not configured. */
+function defaultMaxCollectedBytes(maxOutputLength) {
+    return Math.max(4 * maxOutputLength, 1024 * 1024);
+}
+/**
+ * Collects a child stream's text with bounded memory: the first `cap` bytes plus a rolling tail
+ * window, so a command that prints gigabytes cannot OOM the server. The stream is always drained
+ * (never paused) so the child never blocks on a full pipe.
+ */
+class BoundedOutputCollector {
+    cap;
+    tailWindow;
+    head = [];
+    headBytes = 0;
+    tail = [];
+    tailBytes = 0;
+    droppedBytes = 0;
+    constructor(cap, tailWindow = OUTPUT_TAIL_BYTES) {
+        this.cap = cap;
+        this.tailWindow = tailWindow;
+        if (!Number.isSafeInteger(cap) || cap < 0) {
+            throw new RangeError('maxCollectedBytes must be a non-negative integer');
+        }
+    }
+    push(chunk) {
+        const bytes = Buffer.byteLength(chunk, 'utf8');
+        if (this.cap === 0 || this.headBytes + bytes <= this.cap) {
+            this.head.push(chunk);
+            this.headBytes += bytes;
+            return;
+        }
+        this.tail.push({ chunk, bytes });
+        this.tailBytes += bytes;
+        // Evict from the front of the tail window, always keeping the newest chunk.
+        while (this.tail.length > 1 && this.tailBytes - this.tail[0].bytes >= this.tailWindow) {
+            const evicted = this.tail.shift();
+            this.tailBytes -= evicted.bytes;
+            this.droppedBytes += evicted.bytes;
+        }
+    }
+    text() {
+        const head = this.head.join('');
+        const tail = this.tail.map(entry => entry.chunk).join('');
+        if (this.droppedBytes === 0) {
+            return head + tail;
+        }
+        return `${head}\n... [Output truncated - ${this.droppedBytes} bytes dropped] ...\n${tail}`;
+    }
+}
 class ShellExecutor {
     securityManager;
     contextManager;
@@ -202,12 +254,14 @@ class ShellExecutor {
                     execArgs = ['-c', fullCommand];
                 }
             }
+            const maxCollectedBytes = this.config.output.maxCollectedBytes ??
+                defaultMaxCollectedBytes(this.config.output.maxOutputLength);
+            const stdout = new BoundedOutputCollector(maxCollectedBytes);
+            const stderr = new BoundedOutputCollector(maxCollectedBytes);
             const child = (0, child_process_1.spawn)(execCommand, execArgs, {
                 ...spawnOptions,
                 stdio: ['pipe', 'pipe', 'pipe'],
             });
-            let stdout = '';
-            let stderr = '';
             let timeoutId;
             // Set up timeout
             if (timeout > 0) {
@@ -216,12 +270,15 @@ class ShellExecutor {
                     reject(new Error(`Command timed out after ${timeout}ms`));
                 }, timeout);
             }
-            // Collect output
-            child.stdout?.on('data', (data) => {
-                stdout += data.toString();
+            // Collect output. setEncoding keeps multi-byte UTF-8 sequences intact across chunk
+            // boundaries; the collectors bound how much of the output is retained in memory.
+            child.stdout?.setEncoding('utf8');
+            child.stderr?.setEncoding('utf8');
+            child.stdout?.on('data', (chunk) => {
+                stdout.push(chunk);
             });
-            child.stderr?.on('data', (data) => {
-                stderr += data.toString();
+            child.stderr?.on('data', (chunk) => {
+                stderr.push(chunk);
             });
             // Handle completion
             child.on('close', (code) => {
@@ -229,9 +286,10 @@ class ShellExecutor {
                     clearTimeout(timeoutId);
                 }
                 resolve({
-                    stdout,
-                    stderr,
+                    stdout: stdout.text(),
+                    stderr: stderr.text(),
                     exitCode: code || 0,
+                    truncated: { stdout: stdout.droppedBytes, stderr: stderr.droppedBytes },
                 });
             });
             // Handle errors

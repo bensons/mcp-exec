@@ -46,11 +46,15 @@ class BoundedOutputCollector {
   private tailBytes = 0;
   droppedBytes = 0;
 
-  constructor(private readonly cap: number, private readonly tailWindow: number = OUTPUT_TAIL_BYTES) {}
+  constructor(private readonly cap: number, private readonly tailWindow: number = OUTPUT_TAIL_BYTES) {
+    if (!Number.isSafeInteger(cap) || cap < 0) {
+      throw new RangeError('maxCollectedBytes must be a non-negative integer');
+    }
+  }
 
   push(chunk: string): void {
     const bytes = Buffer.byteLength(chunk, 'utf8');
-    if (this.cap <= 0 || this.headBytes + bytes <= this.cap) {
+    if (this.cap === 0 || this.headBytes + bytes <= this.cap) {
       this.head.push(chunk);
       this.headBytes += bytes;
       return;
@@ -318,16 +322,16 @@ export class ShellExecutor {
         }
       }
 
-      const child = spawn(execCommand, execArgs, {
-        ...spawnOptions,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
       const maxCollectedBytes =
         this.config.output.maxCollectedBytes ??
         defaultMaxCollectedBytes(this.config.output.maxOutputLength);
       const stdout = new BoundedOutputCollector(maxCollectedBytes);
       const stderr = new BoundedOutputCollector(maxCollectedBytes);
+
+      const child = spawn(execCommand, execArgs, {
+        ...spawnOptions,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
       let timeoutId: NodeJS.Timeout;
 
       // Set up timeout

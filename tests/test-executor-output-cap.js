@@ -6,6 +6,7 @@
  */
 
 const assert = require('assert');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -183,12 +184,128 @@ async function testMultibyteAcrossChunkBoundaries() {
   await executor.shutdown();
 }
 
+async function testTailSurvivesFinalFormatting() {
+  console.log('📝 retained output tail survives final formatting');
+
+  const maxOutputLength = 1000;
+  const executor = createExecutor({ maxOutputLength, maxCollectedBytes: 128 * 1024 });
+  const result = await executor.executeCommand({
+    command: `node -e "process.stdout.write('HEAD_MARKER\\n' + 'x'.repeat(300000) + '\\nFINAL_ERROR_MARKER\\n')"`,
+    shell: true,
+  });
+
+  assert.strictEqual(result.exitCode, 0, `command failed: ${result.stderr}`);
+  assert.ok(result.stdout.startsWith('HEAD_MARKER\n'), 'expected the output prefix to be retained');
+  assert.ok(result.stdout.includes('FINAL_ERROR_MARKER'), 'expected the final diagnostic to be retained');
+  assert.ok(result.stdout.length <= maxOutputLength, `expected stdout <= ${maxOutputLength} chars`);
+  assert.ok(
+    result.metadata.warnings.some(warning => warning.startsWith('[Output truncated:')),
+    'expected an in-memory truncation warning'
+  );
+
+  console.log('✅ final diagnostic retained');
+  await executor.shutdown();
+}
+
+async function testNegativeCapIsRejected() {
+  console.log('📝 negative collection caps are rejected');
+
+  const executor = createExecutor({ maxCollectedBytes: -1 });
+  const result = await executor.executeCommand({ command: "printf 'should-not-run'", shell: true });
+
+  assert.strictEqual(result.exitCode, 1);
+  assert.match(result.stderr, /maxCollectedBytes must be a non-negative integer/);
+  assert.strictEqual(result.stdout, '');
+
+  console.log('✅ negative cap rejected');
+  await executor.shutdown();
+}
+
+function sendMcpRequest(server, request) {
+  return new Promise((resolve, reject) => {
+    let buffered = '';
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`timed out waiting for MCP response ${request.id}`));
+    }, 5000);
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      server.stdout.off('data', onData);
+      server.off('exit', onExit);
+    };
+    const onExit = code => {
+      cleanup();
+      reject(new Error(`MCP server exited with code ${code}`));
+    };
+    const onData = data => {
+      buffered += data.toString();
+      const lines = buffered.split('\n');
+      buffered = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const response = JSON.parse(line);
+        if (response.id === request.id) {
+          cleanup();
+          resolve(response);
+          return;
+        }
+      }
+    };
+
+    server.stdout.on('data', onData);
+    server.once('exit', onExit);
+    server.stdin.write(JSON.stringify(request) + '\n');
+  });
+}
+
+async function testDynamicNegativeCapIsRejected() {
+  console.log('📝 update_output_formatting rejects a negative collection cap');
+
+  const server = spawn(process.execPath, [path.resolve(__dirname, '..', 'dist', 'index.js')], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, MCP_EXEC_SECURITY_LEVEL: 'permissive' },
+  });
+
+  try {
+    await sendMcpRequest(server, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'output-cap-test', version: '1.0.0' },
+      },
+    });
+    const response = await sendMcpRequest(server, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: {
+        name: 'update_output_formatting',
+        arguments: { maxCollectedBytes: -1 },
+      },
+    });
+
+    assert.strictEqual(response.result?.isError, true, JSON.stringify(response));
+    assert.match(response.result.content[0].text, /greater than or equal to 0/i);
+  } finally {
+    server.kill('SIGTERM');
+  }
+
+  console.log('✅ dynamic negative cap rejected');
+}
+
 async function run() {
   console.log('🧪 Testing ShellExecutor output memory cap (issue #42)...\n');
 
   await testLargeOutputIsCapped();
   await testMultibyteOutputIsExact();
   await testMultibyteAcrossChunkBoundaries();
+  await testTailSurvivesFinalFormatting();
+  await testNegativeCapIsRejected();
+  await testDynamicNegativeCapIsRejected();
 
   console.log('\n🎉 executor output cap tests passed');
 }

@@ -352,7 +352,7 @@ const UpdateOutputFormattingSchema = z.object({
   stripAnsi: z.boolean().optional().describe('Strip ANSI escape codes'),
   enableAiOptimizations: z.boolean().optional().describe('Enable AI-powered optimizations'),
   maxOutputLength: z.number().optional().describe('Maximum output length in bytes'),
-  maxCollectedBytes: z.number().optional().describe('Maximum bytes buffered in memory per stream while a command runs (0 = unlimited)'),
+  maxCollectedBytes: z.number().int().nonnegative().optional().describe('Maximum bytes buffered in memory per stream while a command runs (0 = unlimited)'),
   summarizeVerbose: z.boolean().optional().describe('Summarize verbose output'),
 });
 
@@ -1263,7 +1263,7 @@ class MCPShellServer {
                 stripAnsi: { type: 'boolean', description: 'Strip ANSI escape codes' },
                 enableAiOptimizations: { type: 'boolean', description: 'Enable AI-powered optimizations' },
                 maxOutputLength: { type: 'number', description: 'Maximum output length in bytes' },
-                maxCollectedBytes: { type: 'number', description: 'Maximum bytes buffered in memory per stream while a command runs (0 = unlimited)' },
+                maxCollectedBytes: { type: 'integer', minimum: 0, description: 'Maximum bytes buffered in memory per stream while a command runs (0 = unlimited)' },
                 summarizeVerbose: { type: 'boolean', description: 'Summarize verbose output' },
               },
             },

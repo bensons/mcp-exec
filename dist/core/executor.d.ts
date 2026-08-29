@@ -15,6 +15,8 @@ export interface ExecuteCommandOptions {
     shell?: boolean | string;
     aiContext?: string;
 }
+/** Default hard cap on bytes retained per stream when `output.maxCollectedBytes` is not configured. */
+export declare function defaultMaxCollectedBytes(maxOutputLength: number): number;
 export declare class ShellExecutor {
     private securityManager;
     private contextManager;
