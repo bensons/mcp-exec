@@ -3,20 +3,37 @@
  * Confirmation manager for dangerous operations
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ConfirmationManager = void 0;
+exports.ConfirmationManager = exports.DEFAULT_MAX_PENDING_CONFIRMATIONS = void 0;
+exports.DEFAULT_MAX_PENDING_CONFIRMATIONS = 100;
 class ConfirmationManager {
     pendingConfirmations = new Map();
     confirmationTimeout = 300000; // 5 minutes
-    constructor(confirmationTimeout) {
+    maxPendingConfirmations;
+    cleanupInterval;
+    constructor(confirmationTimeout, maxPendingConfirmations = exports.DEFAULT_MAX_PENDING_CONFIRMATIONS) {
         if (confirmationTimeout) {
             this.confirmationTimeout = confirmationTimeout;
         }
+        if (!Number.isInteger(maxPendingConfirmations) || maxPendingConfirmations <= 0) {
+            throw new Error('Maximum pending confirmations must be a positive integer');
+        }
+        this.maxPendingConfirmations = maxPendingConfirmations;
         // Clean up expired confirmations every minute
-        setInterval(() => {
+        this.cleanupInterval = setInterval(() => {
             this.cleanupExpiredConfirmations();
         }, 60000);
+        this.cleanupInterval.unref?.();
     }
-    createConfirmation(command, validation) {
+    /** Clears the cleanup timer and drops every pending confirmation. */
+    cleanup() {
+        clearInterval(this.cleanupInterval);
+        this.pendingConfirmations.clear();
+    }
+    createConfirmation(command, validation, run, source) {
+        this.cleanupExpiredConfirmations();
+        if (this.pendingConfirmations.size >= this.maxPendingConfirmations) {
+            throw new Error(`Maximum pending confirmations (${this.maxPendingConfirmations}) reached`);
+        }
         const confirmationId = this.generateConfirmationId();
         const now = new Date();
         const expiresAt = new Date(now.getTime() + this.confirmationTimeout);
@@ -27,21 +44,26 @@ class ConfirmationManager {
             reason: validation.reason || 'Command requires confirmation',
             timestamp: now,
             expiresAt,
+            source,
+            run,
         };
         this.pendingConfirmations.set(confirmationId, confirmation);
         return confirmationId;
     }
+    /**
+     * Consumes a pending confirmation. Returns the entry (so the caller can run
+     * it) or undefined when it is unknown, already used, or expired.
+     */
     confirmCommand(confirmationId) {
         const confirmation = this.pendingConfirmations.get(confirmationId);
         if (!confirmation) {
-            return false;
-        }
-        if (new Date() > confirmation.expiresAt) {
-            this.pendingConfirmations.delete(confirmationId);
-            return false;
+            return undefined;
         }
         this.pendingConfirmations.delete(confirmationId);
-        return true;
+        if (new Date() > confirmation.expiresAt) {
+            return undefined;
+        }
+        return confirmation;
     }
     getPendingConfirmation(confirmationId) {
         const confirmation = this.pendingConfirmations.get(confirmationId);
@@ -71,6 +93,9 @@ class ConfirmationManager {
     }
     getConfirmationTimeout() {
         return this.confirmationTimeout;
+    }
+    getMaxPendingConfirmations() {
+        return this.maxPendingConfirmations;
     }
     setConfirmationTimeout(timeout) {
         this.confirmationTimeout = timeout;

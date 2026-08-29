@@ -93,6 +93,11 @@ export interface ValidationResult {
   category?: SecurityCategory;
   /** All classifications when a command has more than one security concern. */
   categories?: SecurityCategory[];
+  // Set with allowed: false when the command is only blocked pending an
+  // explicit confirm_command call (see ConfirmationManager).
+  requiresConfirmation?: boolean;
+  /** Deterministic cwd after a validated stateful-shell input such as `cd`. */
+  resultingCwd?: string;
 }
 
 export interface SecurityProvider {
@@ -100,7 +105,10 @@ export interface SecurityProvider {
   securityLevel: 'strict' | 'moderate' | 'permissive';
   
   // Command validation before execution
-  validateCommand(command: string): ValidationResult;
+  validateCommand(
+    command: string,
+    options?: { cwd?: string; env?: Record<string, string | undefined> }
+  ): ValidationResult | Promise<ValidationResult>;
   
   // Resource limits
   resourceLimits: {
@@ -192,7 +200,7 @@ export interface AuditLogger {
     sessionId: string;
     userId?: string;
     command: string;
-    context: CommandContext;
+    context: AuditContext;
     result: CommandOutput;
     securityCheck: ValidationResult;
     aiIntent?: string;
@@ -225,6 +233,20 @@ export interface CommandContext {
   aiIntent?: string;
 }
 
+/**
+ * Slim, non-recursive context recorded on every audit entry. Deliberately
+ * excludes commandHistory / outputCache / fileSystemChanges / environment maps:
+ * embedding the full CommandContext made entry N contain entries 1..N-1 and put
+ * the whole process environment on disk. See issue #30.
+ */
+export interface AuditContext {
+  sessionId: string;
+  workingDirectory: string;
+  previousCommands: string[]; // last few command strings only
+  aiIntent?: string;
+  userId?: string;
+}
+
 export interface LogFilters {
   sessionId?: string;
   userId?: string;
@@ -244,7 +266,7 @@ export interface LogEntry {
   sessionId: string;
   userId?: string;
   command: string;
-  context: CommandContext;
+  context: AuditContext;
   result: CommandOutput;
   securityCheck: ValidationResult;
   aiIntent?: string;
@@ -286,7 +308,7 @@ export interface ServerConfig {
   sessions: {
     maxInteractiveSessions: number; // Maximum number of concurrent interactive sessions
     sessionTimeout: number; // Session timeout in milliseconds
-    outputBufferSize: number; // Maximum lines to buffer per session
+    outputBufferBytes: number; // Maximum bytes of output buffered per session (per stream)
   };
   lifecycle: {
     inactivityTimeout: number; // milliseconds before shutdown due to inactivity
@@ -316,6 +338,9 @@ export interface ServerConfig {
     retention: number;
     logFile?: string; // Full path to log file
     logDirectory?: string; // Directory for log files
+    maxOutputBytes?: number; // truncate stdout/stderr in audit entries (default 4096)
+    maxInMemoryEntries?: number; // hot-cache/startup cap; queries still read full durable history (default 1000)
+    redactPatterns?: string[]; // key patterns whose values are redacted before writing
     monitoring?: {
       enabled: boolean;
       alertRetention: number;
@@ -346,6 +371,16 @@ export interface ServerConfig {
 }
 
 // Interactive Session Types
+export interface SessionOutputBuffer {
+  chunks: Buffer[];
+  head: number;
+  headOffset: number;
+  startByte: number;
+  endByte: number;
+  lineBreaks: number[];
+  lineBreakHead: number;
+}
+
 export interface InteractiveSession {
   sessionId: string;
   command: string;
@@ -356,8 +391,9 @@ export interface InteractiveSession {
   cwd: string;
   env: Record<string, string>;
   status: 'running' | 'finished' | 'error';
-  outputBuffer: string[];
-  errorBuffer: string[];
+  outputBuffer: SessionOutputBuffer;
+  errorBuffer: SessionOutputBuffer;
+  droppedBytes: number; // Bytes discarded from the front of the buffers to stay under outputBufferBytes
   aiContext?: string;
 }
 
@@ -367,6 +403,7 @@ export interface SessionOutput {
   stderr: string;
   hasMore: boolean; // Whether there's more output available
   status: 'running' | 'finished' | 'error';
+  droppedBytes: number; // Bytes dropped because the buffer exceeded outputBufferBytes (0 = nothing lost)
 }
 
 export interface SessionInfo {
